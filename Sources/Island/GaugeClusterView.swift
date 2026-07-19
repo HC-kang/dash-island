@@ -1,20 +1,44 @@
 import SwiftUI
 
-/// Center-aligned horizontal cluster of 1–5 account widgets.
+/// Center-aligned horizontal cluster of 0–5 account widgets, plus edge/empty add chrome.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
+    /// Live account count (not demo VMs). Drives add-chrome visibility.
+    var accountCount: Int = 0
+    /// When true, show centered `+` (empty, non-demo).
+    var showEmptyAdd: Bool = false
+    /// When true, show right-edge dwell chevron/`+` (1…4 accounts, non-demo).
+    var showEdgeChrome: Bool = false
 
     private static let maxWidgets = 5
     private static let gap: CGFloat = 12
 
     var body: some View {
-        let shown = Array(widgets.prefix(Self.maxWidgets))
-        HStack(spacing: Self.gap) {
-            ForEach(shown) { model in
-                AccountWidget(model: model)
+        ZStack {
+            if showEmptyAdd {
+                CenteredAddButton { adapter in
+                    AccountChromeActions.beginAdd(adapter: adapter)
+                }
+            } else {
+                let shown = Array(widgets.prefix(Self.maxWidgets))
+                HStack(spacing: Self.gap) {
+                    ForEach(shown) { model in
+                        AccountWidget(model: model)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+
+            if showEdgeChrome {
+                EdgeAddChrome { adapter in
+                    AccountChromeActions.beginAdd(adapter: adapter)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                // Nudge into the padding zone without shifting the widget cluster.
+                .padding(.trailing, 2)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -22,14 +46,16 @@ struct GaugeClusterView: View {
 
 @MainActor
 enum DemoWidgets {
+    /// Explicit `DASHISLAND_DEMO=1` only (empty accounts no longer auto-demo).
+    static var isForced: Bool {
+        ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1"
+    }
+
     /// Whether the island should render fake view models.
-    /// True when accounts are empty, or explicit `DASHISLAND_DEMO=1`.
     static func isEnabled(accountsEmpty: Bool) -> Bool {
-        if ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1" {
-            return true
-        }
-        // Prefer demo when no accounts are configured.
-        return accountsEmpty
+        // `accountsEmpty` retained for call-site compatibility; ignored.
+        _ = accountsEmpty
+        return isForced
     }
 
     /// Demo count: env `DASHISLAND_DEMO_COUNT` ∈ {1,3,5}, else 3.

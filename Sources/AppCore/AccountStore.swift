@@ -76,6 +76,16 @@ final class AccountStore: ObservableObject {
         try persist()
     }
 
+    /// After adapter `reauthenticate`, stamp auth time and optionally replace credential ref.
+    func markAuthenticated(id: AccountID, credentialRef: CredentialRef? = nil) throws {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].lastAuthenticatedAt = Date()
+        if let credentialRef {
+            accounts[index].credentialRef = credentialRef
+        }
+        try persist()
+    }
+
     // MARK: - Private
 
     private func reindex() {

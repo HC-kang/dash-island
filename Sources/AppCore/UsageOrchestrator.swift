@@ -88,6 +88,16 @@ final class UsageOrchestrator: ObservableObject {
         polling = false
     }
 
+    /// Force a poll. Optionally mark one account immediately due (e.g. after reauth).
+    func refresh(accountID: AccountID? = nil) {
+        if let accountID {
+            lastFetchAt[accountID] = nil
+            cooldownUntil[accountID] = nil
+        }
+        rebuildWidgets()
+        Task { await pollDueAccounts() }
+    }
+
     // MARK: - Due helper (pure, testable)
 
     /// Whether an account should be fetched at `now`.

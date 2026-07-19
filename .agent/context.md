@@ -56,5 +56,23 @@
 - Views: `GaugeRingView`, `AccountWidget`, `GaugeClusterView`; `IslandRootView` hosts cluster.
 - v5 balance: flush dual rings (outer brand, inner steel #3a6580), ticks ~0.34α, needle #ef4444 1.35pt.
 - Needle piecewise angles (screen deg, 0=east): unit0→135° (7:30), 0.5→300° (1:00), 1→45° (4:30).
-- Demo: `DASHISLAND_DEMO=1` OR empty `AccountStore` → 3 fake VMs (count via `DASHISLAND_DEMO_COUNT` ∈ 1|3|5).
+- Demo: `DASHISLAND_DEMO=1` only → fake VMs (`DASHISLAND_DEMO_COUNT` ∈ 1|3|5); empty without env → add UI (Task 6).
 - Window `600×200`, `acceptsMouseMovedEvents` for hover tooltips below widgets.
+
+## Usage orchestrator (Task 5)
+
+- `PreferencesStore`: `pollSeconds` ∈ {300,900,1800}, `displayMode` used|remaining; UserDefaults keys `DashIsland.*`.
+- `UsageOrchestrator`: one timer; due = `now-last >= max(userInterval, adapter.minPoll)`; parallel fetch via VendorRegistry.
+- Soft error: retain last-good rings + `errorCaption`; auth → "reauth required"; 429 → 15m cooldown map, skip fetch.
+- Burn: prev+last good snapshots only (error-free); first poll ratio 0.
+- Pure helpers for tests: `isDue`, `displayFraction`, `formatTokens` (k/m hover).
+- App: `startAutoRefresh` after `AccountStore.load`; IslandRootView shows orchestrator widgets when accounts non-empty.
+- `refresh(accountID:)` clears due timers and polls (used after reauth).
+
+## Edge add chrome + context menu (Task 6)
+
+- `EdgeAddChrome`: right-edge chevron, dwell ≥500ms → glass `+` menu (VendorRegistry); no width-stealing empty slot.
+- Empty (0 accounts, not demo): `CenteredAddButton` only.
+- At 5 accounts: hide add chrome. Demo forced (`DASHISLAND_DEMO=1`): hide add chrome.
+- Widget context menu (real accounts only): Rename (NSAlert), Reauth, Remove (confirm).
+- `AccountStore.markAuthenticated`; add via `beginAdd` → `add(from:)` → accounts sink refreshes orchestrator.

@@ -71,8 +71,25 @@ struct AccountWidget: View {
                 isHovered = hovering
             }
         }
+        .contextMenu { managedContextMenu }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
+    }
+
+    @ViewBuilder
+    private var managedContextMenu: some View {
+        if let account = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+            Button("Rename…") {
+                AccountChromeActions.rename(accountID: account.id, currentLabel: account.label)
+            }
+            Button("Reauthenticate") {
+                AccountChromeActions.reauthenticate(account: account)
+            }
+            Divider()
+            Button("Remove…", role: .destructive) {
+                AccountChromeActions.remove(accountID: account.id, label: account.label)
+            }
+        }
     }
 
     private var isHot: Bool {
