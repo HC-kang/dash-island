@@ -213,7 +213,7 @@ struct GaugeClusterView: View {
 
                 let nearTrash = isNearTrashLocal(finger)
                 magnetizedToTrash = nearTrash
-                targetSlot = nearTrash ? nil : slotIndex(atLocalX: finger.x)
+                targetSlot = nearTrash ? nil : slotIndexAt(localX: finger.x)
             }
             .onEnded { value in
                 let finger = CGPoint(
@@ -221,7 +221,7 @@ struct GaugeClusterView: View {
                     y: liftOrigin.y + value.translation.height
                 )
                 let nearTrash = isNearTrashLocal(finger)
-                let dropSlot = nearTrash ? nil : (slotIndex(atLocalX: finger.x) ?? targetSlot)
+                let dropSlot = nearTrash ? nil : (slotIndexAt(localX: finger.x) ?? targetSlot)
                 let dragged = id
                 let from = homeSlot
 
@@ -258,7 +258,7 @@ struct GaugeClusterView: View {
         return CGPoint(x: x, y: y)
     }
 
-    private func slotIndex(atLocalX x: CGFloat) -> Int? {
+    private func slotIndexAt(localX x: CGFloat) -> Int? {
         let n = slotCount
         guard n > 0 else { return nil }
         let cell = AccountWidget.cellSize
