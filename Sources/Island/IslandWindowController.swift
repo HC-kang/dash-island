@@ -118,11 +118,12 @@ final class IslandWindowController {
         model.setState(.compact)
 
         // Fade out (notification fires when the switch settles; still softens the pop).
-        NSAnimationContext.runAnimationGroup { ctx in
+        // Two-arg form is synchronous (single-arg overload is async on newer SDKs).
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.12
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
-        }
+        }, completionHandler: nil)
 
         spaceRevealTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 140_000_000)
@@ -132,11 +133,11 @@ final class IslandWindowController {
             applySize(model.size, animate: false)
             window.orderFrontRegardless()
 
-            NSAnimationContext.runAnimationGroup { ctx in
+            NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.22
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 window.animator().alphaValue = 1
-            }
+            }, completionHandler: nil)
         }
     }
 
