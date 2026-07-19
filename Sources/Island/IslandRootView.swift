@@ -115,7 +115,8 @@ struct IslandRootView: View {
                 widgets: widgets,
                 accountCount: accountStore.accounts.count,
                 showEmptyAdd: showEmptyAdd,
-                showEdgeChrome: showEdgeChrome
+                showAdd: showAdd,
+                allowsEditing: !DemoWidgets.isForced
             )
             .padding(.horizontal, 14)
             .padding(.top, 2)
@@ -145,9 +146,9 @@ struct IslandRootView: View {
         !DemoWidgets.isForced && accountStore.accounts.isEmpty
     }
 
-    private var showEdgeChrome: Bool {
+    /// Trailing + whenever under the 5-account cap (demo hides it).
+    private var showAdd: Bool {
         !DemoWidgets.isForced
-            && accountStore.accounts.count > 0
             && accountStore.accounts.count < AccountStore.maxAccounts
     }
 

@@ -100,7 +100,7 @@ struct CenteredAddButton: View {
 
 // MARK: - Shared pieces
 
-private struct VendorMenuItems: View {
+struct VendorMenuItems: View {
     var onSelect: (any VendorAdapter) -> Void
 
     var body: some View {

@@ -3,6 +3,8 @@ import SwiftUI
 /// Square account cell: gauge + label + hover tooltip below.
 struct AccountWidget: View {
     let model: WidgetViewModel
+    var isDragging: Bool = false
+    var isDropTarget: Bool = false
 
     @State private var isHovered = false
 
@@ -53,9 +55,16 @@ struct AccountWidget: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(isHot || isHovered ? 0.12 : 0.06), lineWidth: 1)
+                        .strokeBorder(
+                            isDropTarget
+                                ? Color.white.opacity(0.35)
+                                : Color.white.opacity(isHot || isHovered || isDragging ? 0.14 : 0.06),
+                            lineWidth: isDropTarget ? 1.5 : 1
+                        )
                 )
+                .shadow(color: isDragging ? Color.black.opacity(0.45) : .clear, radius: isDragging ? 12 : 0, y: 6)
         )
+        .scaleEffect(isDragging ? 1.06 : 1)
         // Tooltip floats below the cell into the transparent window tail —
         // must not reserve black layout space in the island body.
         .overlay(alignment: .bottom) {
