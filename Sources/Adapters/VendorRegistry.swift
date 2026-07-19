@@ -4,6 +4,7 @@ import Foundation
 enum VendorRegistry {
     static let all: [any VendorAdapter] = [
         FakeAdapter(),
+        ClaudeAdapter(),
     ]
 
     static func adapter(for id: VendorID) -> (any VendorAdapter)? {

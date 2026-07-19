@@ -31,6 +31,7 @@ swiftc \
   -framework SwiftUI \
   -framework AppKit \
   -framework Combine \
+  -framework Security \
   -o "$MACOS_DIR/$APP_NAME" \
   $SWIFT_SOURCES
 

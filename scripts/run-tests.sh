@@ -26,6 +26,7 @@ swiftc \
   -parse-as-library \
   -O \
   -framework Combine \
+  -framework Security \
   -o "$OUT" \
   $DOMAIN_SOURCES \
   $INFRA_SOURCES \

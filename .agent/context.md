@@ -76,3 +76,13 @@
 - At 5 accounts: hide add chrome. Demo forced (`DASHISLAND_DEMO=1`): hide add chrome.
 - Widget context menu (real accounts only): Rename (NSAlert), Reauth, Remove (confirm).
 - `AccountStore.markAuthenticated`; add via `beginAdd` → `add(from:)` → accounts sink refreshes orchestrator.
+
+## Claude adapter (Task 7)
+
+- `ClaudeAdapter` id `"claude"`, `minPollSeconds` 300; registered after Fake in `VendorRegistry`.
+- Managed auth: `accounts/<uuid>/` as `CLAUDE_CONFIG_DIR`; credentials in `.credentials.json`.
+- `beginAdd` / `reauthenticate`: spawn `claude auth login --claudeai` with managed dir; poll ≤180s for creds (file or CLAUDE_CONFIG_DIR-scoped keychain `Claude Code-credentials-<sha256[0:8]>`); copy into managed file. Never write default keychain. Never OAuth refresh.
+- Fallback error text includes manual `CLAUDE_CONFIG_DIR=… claude auth login --claudeai`.
+- Usage: `GET https://api.anthropic.com/api/oauth/usage` with Bearer + `anthropic-beta: oauth-2025-04-20` + UA `claude-code/2.1.121`.
+- Map: 401/403 → `.authRequired`, 429 → `.rateLimited`, utilization always ÷100.
+- Parse unit tests in `Tests/ClaudeAdapterTests.swift`; build needs `-framework Security`.
