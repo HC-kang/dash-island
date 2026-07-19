@@ -86,3 +86,24 @@
 - Usage: `GET https://api.anthropic.com/api/oauth/usage` with Bearer + `anthropic-beta: oauth-2025-04-20` + UA `claude-code/2.1.121`.
 - Map: 401/403 → `.authRequired`, 429 → `.rateLimited`, utilization always ÷100.
 - Parse unit tests in `Tests/ClaudeAdapterTests.swift`; build needs `-framework Security`.
+
+## Codex adapter (Task 8)
+
+- `CodexAdapter` id `"codex"`, `minPollSeconds` 120; registered after Claude in `VendorRegistry`.
+- Managed auth: `accounts/<uuid>/` as `CODEX_HOME`; credentials in `auth.json` (`tokens.access_token`, optional `tokens.account_id`). Fallback path: `managed/.codex/auth.json` if HOME-isolated login.
+- `beginAdd` / `reauthenticate`: spawn `codex login` with `CODEX_HOME` + strip `OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_ACCESS_TOKEN`; poll ≤180s for auth.json; terminate CLI after creds appear.
+- Fallback error text: `CODEX_HOME='…' codex login`.
+- Usage: `GET https://chatgpt.com/backend-api/wham/usage` Bearer (+ optional `ChatGPT-Account-Id`). 401/403 → `.authRequired`, 429 → `.rateLimited`.
+- Parse: `rate_limit.primary_window` / `secondary_window`; `used_percent` always ÷100; `reset_at` unix; `plan_type` → plan. No OAuth refresh from app.
+- Parse unit tests in `Tests/CodexAdapterTests.swift`.
+
+## Grok adapter (Task 9)
+
+- Spike: `docs/notes/grok-usage-spike.md` (Orca grok-auth/fetcher + `~/.grok/auth.json`).
+- `GrokAdapter` id `"grok"`, `minPollSeconds` **300**; registered after Codex in `VendorRegistry`.
+- Managed auth: `accounts/<uuid>/` as `GROK_HOME`; credentials in `auth.json` (issuer map; prefer `https://auth.x.ai…`; field `key` = access token). Fallback path: `managed/.grok/auth.json`.
+- `beginAdd` / `reauthenticate`: spawn `grok login --oauth` with `GROK_HOME`; poll ≤180s. If binary missing on add, copy usable `~/.grok/auth.json` into managed folder; else instruct `GROK_HOME=… grok login --oauth`.
+- No OIDC refresh in app; expired access → `.authRequired` (5m skew).
+- Usage: `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` then monthly fallback `/v1/billing`. Headers: Bearer + `X-XAI-Token-Auth: xai-grok-cli` + optional `x-userid`.
+- Map: `creditUsagePercent` ÷100 → primary; confirmed weekly with omitted % → 0; monthly `used.val/monthlyLimit.val` when weekly absent; `subscriptionTier` → plan.
+- 401/403 → `.authRequired`, 429 → `.rateLimited`. Parse tests in `Tests/GrokAdapterTests.swift`.

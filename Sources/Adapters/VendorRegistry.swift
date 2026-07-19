@@ -6,6 +6,7 @@ enum VendorRegistry {
         FakeAdapter(),
         ClaudeAdapter(),
         CodexAdapter(),
+        GrokAdapter(),
     ]
 
     static func adapter(for id: VendorID) -> (any VendorAdapter)? {
