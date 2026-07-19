@@ -10,8 +10,6 @@ struct IslandRootView: View {
     @State private var showPrefs = false
     @State private var collapseTask: Task<Void, Never>?
 
-    /// Grow the black body this far past the aux-reported notch so the
-    /// hairline rim sits *on* the body edge (no hollow gap to the desktop).
     private let bodyOutset: CGFloat = 1.0
 
     var body: some View {
@@ -22,7 +20,7 @@ struct IslandRootView: View {
                 expandedContent
                     .transition(.opacity.combined(with: .offset(y: -6)))
             } else {
-                compactNotchRim
+                compactChrome
                     .transition(.opacity)
             }
         }
@@ -46,7 +44,6 @@ struct IslandRootView: View {
         }
     }
 
-    /// 0 when empty-add; otherwise visible widget count (demo or live).
     private func syncExpandedItemCount() {
         if showEmptyAdd {
             model.setExpandedItemCount(0)
@@ -57,29 +54,37 @@ struct IslandRootView: View {
 
     // MARK: - Compact
 
-    private var compactNotchRim: some View {
+    private var compactChrome: some View {
         let nw = model.notch.width
         let nh = model.notch.height
-        // Black body matches rim path exactly — fills the former hollow gap.
         let bodyW = nw + bodyOutset * 2
         let bodyH = nh + bodyOutset
         let radius = cornerRadius(forHeight: bodyH)
+        let tabs = model.showsCompactTabs
 
-        return ZStack {
-            // Solid black under the full U, including under the stroke.
-            IslandShape(bottomRadius: radius)
-                .fill(Color.black)
-
-            // Hairline on the outer edge of that body (left + bottom + right).
-            NotchRimPath(bottomRadius: radius)
-                .stroke(
-                    rimGradient,
-                    style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
+        return ZStack(alignment: .top) {
+            if tabs {
+                CompactVendorMarks(
+                    tints: compactTints,
+                    notchWidth: bodyW,
+                    notchHeight: nh
                 )
+                .frame(width: model.size.width, height: nh, alignment: .top)
+            }
+
+            ZStack {
+                IslandShape(bottomRadius: radius)
+                    .fill(Color.black)
+                NotchRimPath(bottomRadius: radius)
+                    .stroke(
+                        rimGradient,
+                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
+                    )
+            }
+            .frame(width: bodyW, height: bodyH)
         }
-        .frame(width: bodyW, height: bodyH)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .contentShape(IslandShape(bottomRadius: radius))
+        .contentShape(Rectangle())
         .onTapGesture {
             collapseTask?.cancel()
             model.setState(.expanded)
@@ -87,6 +92,20 @@ struct IslandRootView: View {
         .accessibilityLabel("Dash Island")
         .accessibilityHint("Hover or click to show usage")
         .accessibilityValue(compactLabel)
+    }
+
+    private var compactTints: [VendorTint] {
+        if DemoWidgets.isForced {
+            return [.claude, .codex]
+        }
+        var seen: [VendorTint] = []
+        for account in accountStore.accounts {
+            let t = UsageOrchestrator.tint(for: account.vendorID)
+            if !seen.contains(t) { seen.append(t) }
+            if seen.count == 2 { break }
+        }
+        if seen.isEmpty { return [.neutral] }
+        return seen
     }
 
     // MARK: - Expanded
@@ -100,7 +119,7 @@ struct IslandRootView: View {
     }
 
     private var expandedContent: some View {
-        ZStack(alignment: .bottomLeading) {
+        VStack(spacing: 0) {
             GaugeClusterView(
                 widgets: widgets,
                 accountCount: accountStore.accounts.count,
@@ -108,14 +127,13 @@ struct IslandRootView: View {
                 showEdgeChrome: showEdgeChrome
             )
             .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .padding(.top, 4)
+            .frame(maxHeight: .infinity)
 
-            PrefsGearButton {
+            PanelFooter {
                 NSApp.activate(ignoringOtherApps: true)
                 showPrefs = true
             }
-            .padding(.leading, 10)
-            .padding(.bottom, 10)
         }
         .padding(.top, model.notch.height)
         .frame(width: model.size.width, height: model.blackHeight, alignment: .top)
@@ -126,7 +144,6 @@ struct IslandRootView: View {
         min(16, max(11, h * 0.40))
     }
 
-    /// Top→bottom keeps left/right flanks lit; brightest at the bottom curve.
     private var rimGradient: LinearGradient {
         LinearGradient(
             stops: [

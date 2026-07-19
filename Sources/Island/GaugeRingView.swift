@@ -281,17 +281,13 @@ struct GaugeRingView: View {
 // MARK: - Tint → brand color
 
 extension VendorTint {
-    /// Warm brand hue for the outer usage ring (not cool steel).
+    /// Brand hue for outer usage ring + decorative marks.
     var brandColor: Color {
         switch self {
-        case .claude:
-            return Color(red: 0.910, green: 0.584, blue: 0.416) // #e8956a
-        case .codex:
-            return Color(red: 0.204, green: 0.827, blue: 0.600) // #34d399
-        case .grok:
-            return Color(red: 0.941, green: 0.627, blue: 0.314) // #f0a050
-        case .neutral:
-            return Color(red: 0.75, green: 0.72, blue: 0.68)
+        case .claude: return IslandColor.claude
+        case .codex: return IslandColor.codex
+        case .grok: return IslandColor.grok
+        case .neutral: return Color(red: 0.75, green: 0.72, blue: 0.68)
         }
     }
 }

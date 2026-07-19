@@ -1,83 +1,106 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Prefs sheet
+// MARK: - Prefs sheet (island look)
 
-/// Thin preferences: display mode + poll interval only (no settings cathedral).
+/// Dark preferences matching the island panel — not a stock light sheet.
 struct PrefsSheet: View {
     @ObservedObject var preferences: PreferencesStore
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Preferences")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Typography.settingsTitle)
+                    .foregroundStyle(.white)
                 Spacer()
                 Button("Done") { dismiss() }
+                    .font(Typography.settingsRow)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .buttonStyle(.plain)
                     .keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Display")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Picker("Display", selection: $preferences.displayMode) {
-                    Text("Used").tag(PreferencesStore.DisplayMode.used)
-                    Text("Remaining").tag(PreferencesStore.DisplayMode.remaining)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
+            LinearGradient(
+                colors: [.clear, .white.opacity(0.06), .white.opacity(0.06), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 1)
+            .padding(.horizontal, 14)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Poll interval")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Picker("Poll interval", selection: $preferences.pollSeconds) {
-                    Text("5 min").tag(300)
-                    Text("15 min").tag(900)
-                    Text("30 min").tag(1800)
+            VStack(alignment: .leading, spacing: 16) {
+                prefBlock(title: "DISPLAY") {
+                    segmented(
+                        selection: $preferences.displayMode,
+                        options: [
+                            (.used, "Used"),
+                            (.remaining, "Remaining")
+                        ]
+                    )
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+
+                prefBlock(title: "POLL INTERVAL") {
+                    segmented(
+                        selection: $preferences.pollSeconds,
+                        options: [
+                            (300, "5 min"),
+                            (900, "15 min"),
+                            (1800, "30 min")
+                        ]
+                    )
+                }
             }
+            .padding(18)
 
             Spacer(minLength: 0)
         }
-        .padding(20)
-        .frame(width: 300, height: 168)
+        .frame(width: 300, height: 200)
+        .background(Color.black)
+        .preferredColorScheme(.dark)
     }
-}
 
-// MARK: - Quiet gear
-
-/// Apple-quiet gear control that opens the prefs sheet.
-struct PrefsGearButton: View {
-    var action: () -> Void
-
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "gearshape")
-                .font(.system(size: 11, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color.white.opacity(hovered ? 0.55 : 0.26))
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
-                .background {
-                    Circle()
-                        .fill(Color.white.opacity(hovered ? 0.07 : 0))
-                }
+    private func prefBlock<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(Typography.settingsSection)
+                .tracking(0.8)
+                .foregroundStyle(.white.opacity(0.45))
+            content()
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.12)) {
-                hovered = hovering
+    }
+
+    private func segmented<T: Hashable>(
+        selection: Binding<T>,
+        options: [(T, String)]
+    ) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, opt in
+                let selected = selection.wrappedValue == opt.0
+                Button {
+                    selection.wrappedValue = opt.0
+                } label: {
+                    Text(opt.1)
+                        .font(Typography.settingsRow)
+                        .foregroundStyle(.white.opacity(selected ? 0.95 : 0.45))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.white.opacity(selected ? 0.12 : 0))
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
-        .help("Preferences")
-        .accessibilityLabel("Preferences")
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
     }
 }

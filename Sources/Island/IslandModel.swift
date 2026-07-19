@@ -15,19 +15,20 @@ final class IslandModel: ObservableObject {
     /// Visible account/widget slots driving expanded width (0…5).
     @Published private(set) var expandedItemCount: Int = 0
 
-    private let expandedContentHeight: CGFloat = 132
+    /// Gauges + footer strip under the notch band.
+    private let expandedContentHeight: CGFloat = 168
     private let tooltipOverflow: CGFloat = 72
     private let compactRimPad: CGFloat = 3
 
-    // Layout constants — keep in sync with AccountWidget / GaugeClusterView.
     static let cellSize: CGFloat = 100
     static let cellGap: CGFloat = 12
-    static let horizontalPadding: CGFloat = 32 // 16pt each side
+    static let horizontalPadding: CGFloat = 32
     static let maxItems: Int = 5
+    static let compactTabWidth: CGFloat = CompactVendorMarks.tabWidth
 
     init(notch: NotchInfo = .detectPreferred()) {
         self.notch = notch
-        self.size = Self.compactSize(for: notch, rimPad: 3)
+        self.size = Self.compactSize(for: notch, rimPad: 3, tabs: 0)
     }
 
     var blackHeight: CGFloat {
@@ -35,6 +36,10 @@ final class IslandModel: ObservableObject {
         case .compact: return notch.height
         case .expanded: return notch.height + expandedContentHeight
         }
+    }
+
+    var showsCompactTabs: Bool {
+        expandedItemCount > 0 || ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1"
     }
 
     func setState(_ new: State) {
@@ -49,32 +54,33 @@ final class IslandModel: ObservableObject {
         recomputeSize()
     }
 
-    /// Call when the number of visible widgets / empty state changes.
     func setExpandedItemCount(_ count: Int) {
         let c = min(Self.maxItems, max(0, count))
-        guard c != expandedItemCount else { return }
+        guard c != expandedItemCount else {
+            // Still recompute compact tabs when count was already set but tabs flag changes.
+            recomputeSize()
+            return
+        }
         expandedItemCount = c
         recomputeSize()
     }
 
     func recomputeSize() {
-        size = state == .compact
-            ? Self.compactSize(for: notch, rimPad: compactRimPad)
-            : CGSize(
+        if state == .compact {
+            let tabs = showsCompactTabs ? Self.compactTabWidth * 2 : 0
+            size = Self.compactSize(for: notch, rimPad: compactRimPad, tabs: tabs)
+        } else {
+            size = CGSize(
                 width: Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount),
                 height: notch.height + expandedContentHeight + tooltipOverflow
             )
+        }
     }
 
-    /// Minimum = hardware notch width. Grows per added account cell.
-    ///
-    /// - 0 items (empty +): notch width
-    /// - n items: `max(notch, n×cell + (n−1)×gap + horizontal padding)`
     static func expandedWidth(notchWidth: CGFloat, itemCount: Int) -> CGFloat {
         let minW = max(notchWidth, 80)
         let n = min(maxItems, max(0, itemCount))
         guard n > 0 else { return minW }
-
         let content =
             CGFloat(n) * cellSize
             + CGFloat(n - 1) * cellGap
@@ -82,9 +88,9 @@ final class IslandModel: ObservableObject {
         return max(minW, content)
     }
 
-    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
+    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat, tabs: CGFloat) -> CGSize {
         CGSize(
-            width: max(notch.width + rimPad * 2, 80),
+            width: max(notch.width + rimPad * 2, 80) + tabs,
             height: notch.height + rimPad
         )
     }

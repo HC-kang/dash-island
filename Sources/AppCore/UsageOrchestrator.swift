@@ -17,6 +17,8 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let rateLimitCooldown: TimeInterval = 15 * 60
 
     @Published private(set) var widgets: [WidgetViewModel] = []
+    @Published private(set) var loading = false
+    @Published private(set) var lastUpdated: Date?
 
     private let accountStore: AccountStore
     private let preferences: PreferencesStore
@@ -148,7 +150,11 @@ final class UsageOrchestrator: ObservableObject {
         // Coalesce overlapping ticks (timer may fire while a slow adapter runs).
         guard !polling else { return }
         polling = true
-        defer { polling = false }
+        loading = true
+        defer {
+            polling = false
+            loading = false
+        }
 
         let accounts = accountStore.accounts
         guard !accounts.isEmpty else {
@@ -219,8 +225,13 @@ final class UsageOrchestrator: ObservableObject {
         }
 
         let applyAt = Date()
+        var anyGood = false
         for (id, snapshot) in results {
             apply(accountID: id, snapshot: snapshot, now: applyAt)
+            if snapshot.error == nil { anyGood = true }
+        }
+        if anyGood || lastUpdated == nil {
+            lastUpdated = applyAt
         }
         rebuildWidgets()
     }
