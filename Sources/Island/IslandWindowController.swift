@@ -8,9 +8,11 @@ final class IslandWindowController {
     let window: NSWindow
     let model: IslandModel
     private var screenChangeObserver: NSObjectProtocol?
+    private var spaceChangeObserver: NSObjectProtocol?
     private var sizeCancellable: AnyCancellable?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    private var spaceRevealTask: Task<Void, Never>?
 
     init() {
         let notch = NotchInfo.detectPreferred()
@@ -33,10 +35,18 @@ final class IslandWindowController {
         window.backgroundColor = .clear
         window.hasShadow = false
         window.level = .popUpMenu
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        // Not `canJoinAllSpaces` — that glues the island across Mission Control
+        // swipes. Follow the active desktop; it slides away with the old space.
+        window.collectionBehavior = [
+            .moveToActiveSpace,
+            .stationary,
+            .fullScreenAuxiliary,
+            .ignoresCycle
+        ]
         window.isMovable = false
         window.acceptsMouseMovedEvents = true
         window.ignoresMouseEvents = true
+        window.alphaValue = 1
 
         let host = NSHostingView(rootView: IslandRootView(model: model))
         host.autoresizingMask = [.width, .height]
@@ -56,8 +66,10 @@ final class IslandWindowController {
     func show() {
         refreshNotchGeometry()
         applySize(model.size, animate: false)
+        window.alphaValue = 1
         window.orderFrontRegardless()
         observeScreenChanges()
+        observeSpaceChanges()
         installMouseTracking()
     }
 
@@ -65,6 +77,10 @@ final class IslandWindowController {
         if let observer = screenChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = spaceChangeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        spaceRevealTask?.cancel()
         if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
         if let m = localMouseMonitor { NSEvent.removeMonitor(m) }
     }
@@ -82,6 +98,48 @@ final class IslandWindowController {
         }
     }
 
+    /// Soft-hide when the user swipes desktops, then reappear compact on the new space.
+    private func observeSpaceChanges() {
+        spaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleActiveSpaceDidChange()
+            }
+        }
+    }
+
+    private func handleActiveSpaceDidChange() {
+        spaceRevealTask?.cancel()
+
+        // Drop expanded chrome immediately — never carry a wide panel across spaces.
+        model.setState(.compact)
+
+        // Fade out (notification fires when the switch settles; still softens the pop).
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            window.animator().alphaValue = 0
+        }
+
+        spaceRevealTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            guard !Task.isCancelled else { return }
+
+            refreshNotchGeometry()
+            applySize(model.size, animate: false)
+            window.orderFrontRegardless()
+
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.22
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().alphaValue = 1
+            }
+        }
+    }
+
     private func refreshNotchGeometry() {
         let next = NotchInfo.detect(from: NotchInfo.preferredScreen())
         model.updateNotch(next)
@@ -95,7 +153,6 @@ final class IslandWindowController {
 
     private func applySize(_ size: CGSize, animate: Bool) {
         guard let screen = NotchInfo.preferredScreen() else { return }
-        // Align to measured notch strip, not merely screen center.
         let x = model.notch.windowOriginX(windowWidth: size.width)
         let y = screen.frame.maxY - size.height
         let rect = NSRect(x: x, y: y, width: size.width, height: size.height)
@@ -123,6 +180,11 @@ final class IslandWindowController {
     }
 
     private func updateMouseEventPassthrough() {
+        // Fully transparent during space handoff — never steal clicks mid-swipe.
+        guard window.alphaValue > 0.05 else {
+            window.ignoresMouseEvents = true
+            return
+        }
         let mouse = NSEvent.mouseLocation
         let wf = window.frame
         let hitW = model.state == .compact ? model.notch.width + 6 : model.size.width
