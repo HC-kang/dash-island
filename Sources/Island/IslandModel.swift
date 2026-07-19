@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Island presentation. Compact = hairline rim around the physical notch.
-/// Expanded width starts at notch width and grows with account count.
+/// Expanded content width floors at 3 slots; window is larger by drag bleed.
 @MainActor
 final class IslandModel: ObservableObject {
     enum State: Equatable {
@@ -12,12 +12,11 @@ final class IslandModel: ObservableObject {
     @Published private(set) var state: State = .compact
     @Published private(set) var notch: NotchInfo
     @Published private(set) var size: CGSize
-    /// Visible account/widget slots driving expanded width (0…5).
     @Published private(set) var expandedItemCount: Int = 0
 
-    /// Gauge row only (chrome sits in the notch band, not a bottom footer).
     private let expandedContentHeight: CGFloat = 124
-    private let tooltipOverflow: CGFloat = 72
+    /// Transparent buffer so lifted widgets + trash can render past the black body.
+    private let dragBleed: CGFloat = 112
     private let compactRimPad: CGFloat = 3
 
     static let cellSize: CGFloat = 100
@@ -35,6 +34,11 @@ final class IslandModel: ObservableObject {
         case .compact: return notch.height
         case .expanded: return notch.height + expandedContentHeight
         }
+    }
+
+    /// Black silhouette width (no bleed).
+    var expandedContentWidth: CGFloat {
+        Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount)
     }
 
     func setState(_ new: State) {
@@ -60,22 +64,21 @@ final class IslandModel: ObservableObject {
         if state == .compact {
             size = Self.compactSize(for: notch, rimPad: compactRimPad)
         } else {
+            let contentW = Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount)
             size = CGSize(
-                width: Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount),
-                height: notch.height + expandedContentHeight + tooltipOverflow
+                width: contentW + dragBleed * 2,
+                height: notch.height + expandedContentHeight + dragBleed
             )
         }
     }
 
-    /// Floor at the 3-slot layout (not the bare notch — one cell looked too thin).
-    /// 0…3 items share that width; 4–5 grow from there.
+    /// Floor at the 3-slot layout; 4–5 grow.
     static func expandedWidth(notchWidth: CGFloat, itemCount: Int) -> CGFloat {
         let n = min(maxItems, max(3, itemCount))
         let content =
             CGFloat(n) * cellSize
             + CGFloat(n - 1) * cellGap
             + horizontalPadding
-        // Never narrower than the hardware notch either (ultra-wide notches).
         return max(notchWidth, content)
     }
 

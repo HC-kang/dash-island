@@ -77,4 +77,5 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
 
 extension Notification.Name {
     static let dashIslandPrefsOpenChanged = Notification.Name("dashIslandPrefsOpenChanged")
+    static let dashIslandRequestKey = Notification.Name("dashIslandRequestKey")
 }

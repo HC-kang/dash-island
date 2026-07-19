@@ -14,6 +14,7 @@ final class IslandWindowController {
     private var localMouseMonitor: Any?
     private var spaceRevealTask: Task<Void, Never>?
     private var dragActiveObserver: NSObjectProtocol?
+    private var requestKeyObserver: NSObjectProtocol?
     /// While true, the full window receives mouse events so drags aren't killed.
     private var dragActive = false
 
@@ -74,6 +75,7 @@ final class IslandWindowController {
         observeScreenChanges()
         observeSpaceChanges()
         observeDragActive()
+        observeKeyRequests()
         installMouseTracking()
     }
 
@@ -85,6 +87,9 @@ final class IslandWindowController {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         if let observer = dragActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = requestKeyObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         spaceRevealTask?.cancel()
@@ -100,8 +105,23 @@ final class IslandWindowController {
         ) { [weak self] note in
             Task { @MainActor in
                 self?.dragActive = (note.object as? Bool) ?? false
-                // Immediately re-evaluate hit testing for the drag.
                 self?.updateMouseEventPassthrough()
+            }
+        }
+    }
+
+    private func observeKeyRequests() {
+        requestKeyObserver = NotificationCenter.default.addObserver(
+            forName: .dashIslandRequestKey,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                // Don't steal focus from a key prefs panel mid-edit.
+                if PrefsWindowController.shared.isOpen { return }
+                NSApp.activate(ignoringOtherApps: false)
+                self?.window.makeKeyAndOrderFront(nil)
+                self?.window.ignoresMouseEvents = false
             }
         }
     }

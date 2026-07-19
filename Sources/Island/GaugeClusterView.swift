@@ -1,10 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Fixed slots (default 3). Drag lifts a floating copy; home slot shows skeleton.
-///
-/// Critical: the drag *source* view must stay mounted for the whole gesture.
-/// Hiding it with `if id != dragging` cancels DragGesture mid-flight.
+/// Slot grid (min 3). Drag = float on cursor + skeleton in **home** slot.
+/// Order is frozen while dragging; committed once on release into a target slot.
+/// Trash magnet below the panel absorbs deletes (no “drop on desktop”).
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -15,15 +14,18 @@ struct GaugeClusterView: View {
 
     @State private var orderIDs: [AccountID] = []
     @State private var draggingID: AccountID?
+    /// Fixed for the whole gesture — never reorder the row under the finger mid-drag.
     @State private var homeSlot: Int?
     @State private var dragGlobalPoint: CGPoint?
-    @State private var inRemoveZone = false
-    @State private var hoveredSlot: Int?
+    @State private var targetSlot: Int?
+    @State private var magnetizedToTrash = false
     @State private var clusterGlobalFrame: CGRect = .zero
 
     private static let maxSlots = IslandModel.maxItems
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
+    /// Trash sits under the black body; magnetic radius in points.
+    private static let trashMagnetRadius: CGFloat = 56
 
     private var slotCount: Int {
         let filled = max(orderIDs.count, widgets.count)
@@ -48,10 +50,11 @@ struct GaugeClusterView: View {
                 trailingAdd
             }
 
+            // Floating lift — must not be clipped by parent.
             if let id = draggingID,
                let model = modelByID[id],
                let point = dragGlobalPoint {
-                floatingWidget(model: model, globalPoint: point)
+                floatingWidget(model: model, globalPoint: displayPoint(for: point))
             }
         }
         .frame(maxWidth: .infinity)
@@ -69,26 +72,31 @@ struct GaugeClusterView: View {
             guard draggingID == nil else { return }
             orderIDs = ids
         }
-        // Tell the window to keep receiving mouse events for the full frame while dragging.
         .onChange(of: draggingID) { id in
-            NotificationCenter.default.post(
-                name: .dashIslandDragActive,
-                object: id != nil
-            )
+            NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
         }
+        // Trash magnet — below black panel, outside content layout.
         .overlay(alignment: .bottom) {
             if draggingID != nil {
-                removeStrip
-                    .offset(y: 36)
-                    .opacity(inRemoveZone ? 1 : 0.5)
-                    .scaleEffect(inRemoveZone ? 1.04 : 0.98)
-                    .animation(.easeOut(duration: 0.14), value: inRemoveZone)
+                trashTarget
+                    .offset(y: 44)
+                    .scaleEffect(magnetizedToTrash ? 1.18 : 1.0)
+                    .opacity(magnetizedToTrash ? 1 : 0.65)
+                    .animation(.spring(response: 0.28, dampingFraction: 0.72), value: magnetizedToTrash)
             }
         }
     }
 
     private func syncOrderFromWidgets() {
         orderIDs = widgets.map(\.id)
+    }
+
+    /// When magnetized, snap the float to the trash center.
+    private func displayPoint(for finger: CGPoint) -> CGPoint {
+        if magnetizedToTrash, let trash = trashGlobalCenter() {
+            return trash
+        }
+        return finger
     }
 
     // MARK: - Slots
@@ -105,25 +113,20 @@ struct GaugeClusterView: View {
     @ViewBuilder
     private func slotCell(index: Int) -> some View {
         let occupantID: AccountID? = index < orderIDs.count ? orderIDs[index] : nil
-        let isHome = (homeSlot == index && draggingID != nil)
-            || (occupantID != nil && occupantID == draggingID)
-        let isHover = hoveredSlot == index && draggingID != nil && !inRemoveZone
+        let isHome = homeSlot == index && draggingID != nil
+        let isTarget = targetSlot == index && draggingID != nil && !magnetizedToTrash
 
         ZStack {
             SlotSkeleton(
-                highlighted: isHover || isHome,
+                highlighted: isHome || isTarget,
                 empty: occupantID == nil || isHome
             )
 
-            // Keep the widget view mounted while dragging so the gesture is not cancelled.
+            // Source stays mounted (opacity ~0) so DragGesture is not cancelled.
             if let oid = occupantID, let model = modelByID[oid] {
-                AccountWidget(
-                    model: model,
-                    isDragging: false,
-                    isDropTarget: isHover && oid != draggingID
-                )
-                .opacity(oid == draggingID ? 0.001 : 1) // nearly invisible, still hit-testable source
-                .gesture(allowsEditing ? dragGesture(for: oid) : nil)
+                AccountWidget(model: model, isDragging: false, isDropTarget: isTarget && oid != draggingID)
+                    .opacity(oid == draggingID ? 0.001 : 1)
+                    .gesture(allowsEditing ? dragGesture(for: oid) : nil)
             }
         }
         .frame(width: AccountWidget.cellSize, height: AccountWidget.cellSize + 8)
@@ -148,35 +151,40 @@ struct GaugeClusterView: View {
         .zIndex(5)
     }
 
-    private var removeStrip: some View {
-        Label("Release to remove", systemImage: "trash")
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color.red.opacity(inRemoveZone ? 0.72 : 0.4))
-            )
-            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-            .allowsHitTesting(false)
+    private var trashTarget: some View {
+        ZStack {
+            Circle()
+                .fill(Color.red.opacity(magnetizedToTrash ? 0.55 : 0.28))
+                .frame(width: magnetizedToTrash ? 48 : 40, height: magnetizedToTrash ? 48 : 40)
+            Image(systemName: magnetizedToTrash ? "trash.fill" : "trash")
+                .font(.system(size: magnetizedToTrash ? 18 : 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.95))
+        }
+        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.45 : 0.2), radius: magnetizedToTrash ? 12 : 6)
+        .allowsHitTesting(false)
+        .accessibilityLabel("Remove account")
     }
 
     private func floatingWidget(model: WidgetViewModel, globalPoint: CGPoint) -> some View {
         let origin = clusterGlobalFrame.origin
-        let local = CGPoint(x: globalPoint.x - origin.x, y: globalPoint.y - origin.y)
+        // Guard against zero frame before first layout pass.
+        let ox = clusterGlobalFrame.width > 1 ? origin.x : 0
+        let oy = clusterGlobalFrame.width > 1 ? origin.y : 0
+        let local = CGPoint(x: globalPoint.x - ox, y: globalPoint.y - oy)
         return AccountWidget(model: model, isDragging: true, isDropTarget: false)
-            .scaleEffect(1.07)
+            .scaleEffect(magnetizedToTrash ? 0.72 : 1.07)
+            .opacity(magnetizedToTrash ? 0.85 : 1)
             .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
             .position(x: local.x, y: local.y)
             .zIndex(100)
             .allowsHitTesting(false)
+            .animation(.spring(response: 0.28, dampingFraction: 0.75), value: magnetizedToTrash)
     }
 
     // MARK: - Drag
 
     private func dragGesture(for id: AccountID) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
             .onChanged { value in
                 if draggingID == nil {
                     if orderIDs.isEmpty { syncOrderFromWidgets() }
@@ -187,62 +195,55 @@ struct GaugeClusterView: View {
                 guard draggingID == id else { return }
 
                 dragGlobalPoint = value.location
-                let remove = isInRemoveZone(value.location)
-                inRemoveZone = remove
+                let nearTrash = isNearTrash(value.location)
+                magnetizedToTrash = nearTrash
 
-                if remove {
-                    hoveredSlot = nil
-                    return
+                if nearTrash {
+                    targetSlot = nil
+                } else {
+                    targetSlot = slotIndex(atGlobal: value.location)
                 }
-
-                if let slot = slotIndex(atGlobal: value.location) {
-                    hoveredSlot = slot
-                    moveLocal(id: id, toIndex: slot)
-                }
+                // Do NOT reorder orderIDs mid-drag — that remounts cells and kills the gesture.
             }
             .onEnded { value in
-                let remove = isInRemoveZone(value.location)
+                let nearTrash = isNearTrash(value.location)
                 let dragged = id
+                let dropSlot = nearTrash ? nil : (slotIndex(atGlobal: value.location) ?? targetSlot)
 
-                if !remove, let slot = slotIndex(atGlobal: value.location) {
-                    moveLocal(id: dragged, toIndex: slot)
-                }
-
-                let finalOrder = orderIDs
-
+                let finalHome = homeSlot
                 draggingID = nil
                 homeSlot = nil
                 dragGlobalPoint = nil
-                inRemoveZone = false
-                hoveredSlot = nil
+                targetSlot = nil
+                magnetizedToTrash = false
                 NotificationCenter.default.post(name: .dashIslandDragActive, object: false)
 
-                if remove {
+                if nearTrash {
                     confirmRemove(id: dragged)
                     syncOrderFromWidgets()
-                } else {
-                    try? AccountStore.shared.applyOrder(finalOrder)
-                    // Demo IDs won't be in the store — keep local order either way.
-                    if !DemoWidgets.isForced {
-                        syncOrderFromWidgets()
-                    }
+                    return
+                }
+
+                if let dropSlot, let from = finalHome ?? orderIDs.firstIndex(of: dragged) {
+                    commitMove(id: dragged, from: from, to: dropSlot)
                 }
             }
     }
 
-    private func moveLocal(id: AccountID, toIndex: Int) {
-        guard let from = orderIDs.firstIndex(of: id) else { return }
-        guard !orderIDs.isEmpty else { return }
-        let target = min(max(0, toIndex), orderIDs.count - 1)
-        guard from != target else { return }
+    private func commitMove(id: AccountID, from: Int, to: Int) {
+        guard from != to else { return }
         var next = orderIDs
+        guard from < next.count else { return }
         let item = next.remove(at: from)
-        // Final index == target
-        let dest = min(max(0, target), next.count)
+        let dest = min(max(0, to), next.count)
         next.insert(item, at: dest)
-        if next != orderIDs {
-            orderIDs = next
-            homeSlot = next.firstIndex(of: id)
+        orderIDs = next
+        try? AccountStore.shared.applyOrder(next)
+        // Keep demo visual order even if store ignores unknown ids.
+        if DemoWidgets.isForced {
+            // orderIDs already updated
+        } else {
+            syncOrderFromWidgets()
         }
     }
 
@@ -257,26 +258,30 @@ struct GaugeClusterView: View {
             : (islandWindow()?.frame.midX ?? point.x)
         let leading = midX - rowW / 2
         let localX = point.x - leading
-        guard localX >= -cell * 0.45, localX <= rowW + cell * 0.45 else { return nil }
+        // Generous horizontal acceptance so edge slots work.
+        guard localX >= -cell * 0.5, localX <= rowW + cell * 0.5 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
         if orderIDs.isEmpty { return index }
-        return min(index, orderIDs.count - 1)
+        return min(index, max(orderIDs.count - 1, 0))
     }
 
-    private func isInRemoveZone(_ globalPoint: CGPoint) -> Bool {
+    private func trashGlobalCenter() -> CGPoint? {
         guard let win = islandWindow() else {
-            return globalPoint.y > clusterGlobalFrame.maxY + 24
-                || globalPoint.y < clusterGlobalFrame.minY - 16
+            // Fallback under cluster.
+            return CGPoint(x: clusterGlobalFrame.midX, y: clusterGlobalFrame.maxY + 44)
         }
         let wf = win.frame
-        // Fully off window
-        if !wf.insetBy(dx: -16, dy: -16).contains(globalPoint) {
-            return true
-        }
-        // Below black body (AppKit y↑)
+        // Center of trash overlay: midX of window, just below black body.
         let blackBottomY = wf.maxY - panelBlackHeight
-        return globalPoint.y < blackBottomY - 2
+        return CGPoint(x: wf.midX, y: blackBottomY - 22)
+    }
+
+    private func isNearTrash(_ globalPoint: CGPoint) -> Bool {
+        guard let c = trashGlobalCenter() else { return false }
+        let dx = globalPoint.x - c.x
+        let dy = globalPoint.y - c.y
+        return (dx * dx + dy * dy).squareRoot() <= Self.trashMagnetRadius
     }
 
     private func islandWindow() -> NSWindow? {
@@ -284,9 +289,7 @@ struct GaugeClusterView: View {
     }
 
     private func confirmRemove(id: AccountID) {
-        // Demo rows are not in AccountStore.
         guard AccountStore.shared.accounts.contains(where: { $0.id == id }) else {
-            // Local-only demo: drop from orderIDs
             orderIDs.removeAll { $0 == id }
             return
         }

@@ -86,6 +86,7 @@ struct IslandRootView: View {
 
     private var expandedChrome: some View {
         let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
+        let contentW = model.expandedContentWidth
         return ZStack {
             IslandShape(bottomRadius: radius)
                 .fill(Color.black)
@@ -97,13 +98,15 @@ struct IslandRootView: View {
                 period: 3.2
             )
         }
-        .frame(width: model.size.width, height: model.blackHeight)
+        // Black body = content width only; window is larger for drag bleed.
+        .frame(width: contentW, height: model.blackHeight)
+        .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
     }
 
     private var expandedContent: some View {
-        VStack(spacing: 0) {
-            // Ears around the physical notch: prefs · [notch] · poll age
+        let contentW = model.expandedContentWidth
+        return VStack(spacing: 0) {
             NotchBandChrome(
                 notchWidth: model.notch.width,
                 notchHeight: model.notch.height
@@ -123,8 +126,10 @@ struct IslandRootView: View {
             .padding(.top, 2)
             .padding(.bottom, 12)
         }
-        .frame(width: model.size.width, height: model.blackHeight, alignment: .top)
+        .frame(width: contentW, height: model.blackHeight, alignment: .top)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        // Lifted widgets draw into the bleed; don't clip.
+        .clipped(false)
     }
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
@@ -158,6 +163,8 @@ struct IslandRootView: View {
             collapseTask?.cancel()
             collapseTask = nil
             model.setState(.expanded)
+            // Become key so the first drag doesn't require an extra click.
+            NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
         } else if !prefsOpen {
             scheduleCollapse()
         }
