@@ -128,8 +128,6 @@ struct IslandRootView: View {
         }
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        // Lifted widgets draw into the bleed; don't clip.
-        .clipped(false)
     }
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
