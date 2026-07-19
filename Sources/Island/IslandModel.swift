@@ -67,15 +67,16 @@ final class IslandModel: ObservableObject {
         }
     }
 
+    /// Floor at the 3-slot layout (not the bare notch — one cell looked too thin).
+    /// 0…3 items share that width; 4–5 grow from there.
     static func expandedWidth(notchWidth: CGFloat, itemCount: Int) -> CGFloat {
-        let minW = max(notchWidth, 80)
-        let n = min(maxItems, max(0, itemCount))
-        guard n > 0 else { return minW }
+        let n = min(maxItems, max(3, itemCount))
         let content =
             CGFloat(n) * cellSize
             + CGFloat(n - 1) * cellGap
             + horizontalPadding
-        return max(minW, content)
+        // Never narrower than the hardware notch either (ultra-wide notches).
+        return max(notchWidth, content)
     }
 
     private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
