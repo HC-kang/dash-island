@@ -15,8 +15,8 @@ final class IslandModel: ObservableObject {
     /// Visible account/widget slots driving expanded width (0…5).
     @Published private(set) var expandedItemCount: Int = 0
 
-    /// Gauges + footer strip under the notch band.
-    private let expandedContentHeight: CGFloat = 168
+    /// Gauge row only (chrome sits in the notch band, not a bottom footer).
+    private let expandedContentHeight: CGFloat = 124
     private let tooltipOverflow: CGFloat = 72
     private let compactRimPad: CGFloat = 3
 

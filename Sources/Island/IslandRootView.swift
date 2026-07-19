@@ -52,7 +52,7 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Compact (notch + flowing rim only)
+    // MARK: - Compact
 
     private var compactChrome: some View {
         let nw = model.notch.width
@@ -78,7 +78,7 @@ struct IslandRootView: View {
         .accessibilityValue(compactLabel)
     }
 
-    // MARK: - Expanded (panel + same flowing rim)
+    // MARK: - Expanded (slim: gauges only + notch-ear chrome)
 
     private var expandedChrome: some View {
         let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
@@ -94,27 +94,30 @@ struct IslandRootView: View {
             )
         }
         .frame(width: model.size.width, height: model.blackHeight)
-        .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+        .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
     }
 
     private var expandedContent: some View {
         VStack(spacing: 0) {
+            // Ears around the physical notch: prefs · [notch] · poll age
+            NotchBandChrome(
+                notchWidth: model.notch.width,
+                notchHeight: model.notch.height
+            ) {
+                NSApp.activate(ignoringOtherApps: true)
+                showPrefs = true
+            }
+
             GaugeClusterView(
                 widgets: widgets,
                 accountCount: accountStore.accounts.count,
                 showEmptyAdd: showEmptyAdd,
                 showEdgeChrome: showEdgeChrome
             )
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .frame(maxHeight: .infinity)
-
-            PanelFooter {
-                NSApp.activate(ignoringOtherApps: true)
-                showPrefs = true
-            }
+            .padding(.horizontal, 14)
+            .padding(.top, 2)
+            .padding(.bottom, 12)
         }
-        .padding(.top, model.notch.height)
         .frame(width: model.size.width, height: model.blackHeight, alignment: .top)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
     }
