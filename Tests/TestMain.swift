@@ -9,6 +9,7 @@ struct TestMain {
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += ClaudeAdapterSuite.run()
+        failures += CodexAdapterSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")
