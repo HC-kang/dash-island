@@ -10,6 +10,10 @@ struct IslandRootView: View {
     @State private var showPrefs = false
     @State private var collapseTask: Task<Void, Never>?
 
+    /// Rim sits this many points outside the black notch fill so L/R flanks
+    /// clear the hardware bezel and read against the menu bar.
+    private let rimOutset: CGFloat = 1.25
+
     var body: some View {
         ZStack(alignment: .top) {
             if model.state == .expanded {
@@ -38,31 +42,33 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Compact: hairline border on the hardware notch
+    // MARK: - Compact
 
-    /// Solid black only in the physical notch dead zone (blends with glass),
-    /// plus a *thin* gradient stroke along the U-edge — not a floating card.
     private var compactNotchRim: some View {
-        let w = model.notch.width
-        let h = model.notch.height
-        let radius = cornerRadius(forHeight: h)
+        let nw = model.notch.width
+        let nh = model.notch.height
+        let radius = cornerRadius(forHeight: nh)
+        // Rim path is outset so left/right flanks are outside the camera black.
+        let rimW = nw + rimOutset * 2
+        let rimH = nh + rimOutset
 
-        return ZStack {
-            // Exact notch fill — pure black, no material, no shadow.
+        return ZStack(alignment: .top) {
+            // Hardware dead-zone fill — exact notch size, pure black, no shadow.
             IslandShape(bottomRadius: radius)
                 .fill(Color.black)
+                .frame(width: nw, height: nh)
+                .frame(width: rimW, height: rimH, alignment: .top)
 
-            // Hairline rim: left + bottom + right (open U). Top→bottom gradient so
-            // vertical flanks stay visible (L→R gradient washed the sides out).
-            NotchRimPath(bottomRadius: radius)
+            // Hairline U: left + bottom + right, outside the fill.
+            NotchRimPath(bottomRadius: radius + rimOutset * 0.35)
                 .stroke(
                     rimGradient,
-                    style: StrokeStyle(lineWidth: 0.9, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
                 )
+                .frame(width: rimW, height: rimH)
         }
-        .frame(width: w, height: h)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .contentShape(IslandShape(bottomRadius: radius))
+        .contentShape(Rectangle())
         .onTapGesture {
             collapseTask?.cancel()
             model.setState(.expanded)
@@ -72,7 +78,7 @@ struct IslandRootView: View {
         .accessibilityValue(compactLabel)
     }
 
-    // MARK: - Expanded chrome (panel under notch)
+    // MARK: - Expanded
 
     private var expandedChrome: some View {
         let radius = cornerRadius(forHeight: model.notch.height)
@@ -106,18 +112,17 @@ struct IslandRootView: View {
     }
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
-        // Hardware-ish continuous bottom corners scale with notch height.
         min(16, max(11, h * 0.40))
     }
 
-    /// Top→bottom so left/right flanks share the same readable edge, brightest at the bottom curve.
+    /// Top→bottom keeps left/right flanks lit; brightest at the bottom curve.
     private var rimGradient: LinearGradient {
         LinearGradient(
             stops: [
-                .init(color: Color.white.opacity(0.28), location: 0),
-                .init(color: Color.white.opacity(0.40), location: 0.45),
-                .init(color: Color.white.opacity(0.62), location: 0.85),
-                .init(color: Color.white.opacity(0.72), location: 1)
+                .init(color: Color.white.opacity(0.38), location: 0),
+                .init(color: Color.white.opacity(0.48), location: 0.4),
+                .init(color: Color.white.opacity(0.68), location: 0.85),
+                .init(color: Color.white.opacity(0.78), location: 1)
             ],
             startPoint: .top,
             endPoint: .bottom

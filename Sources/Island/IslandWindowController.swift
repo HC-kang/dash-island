@@ -15,6 +15,13 @@ final class IslandWindowController {
     init() {
         let notch = NotchInfo.detectPreferred()
         model = IslandModel(notch: notch)
+        NSLog(
+            "DashIsland: notch width=%.1f height=%.1f hasNotch=%@ minX=%@",
+            notch.width,
+            notch.height,
+            notch.hasNotch ? "yes" : "no",
+            notch.screenMinX.map { String(format: "%.1f", $0) } ?? "nil"
+        )
 
         window = BorderlessFloatingWindow(
             contentRect: NSRect(origin: .zero, size: model.size),
@@ -33,7 +40,6 @@ final class IslandWindowController {
 
         let host = NSHostingView(rootView: IslandRootView(model: model))
         host.autoresizingMask = [.width, .height]
-        // Tooltips paint into the transparent overflow under the black silhouette.
         host.wantsLayer = true
         host.layer?.masksToBounds = false
         window.contentView = host
@@ -77,15 +83,21 @@ final class IslandWindowController {
     }
 
     private func refreshNotchGeometry() {
-        model.updateNotch(NotchInfo.detect(from: NotchInfo.preferredScreen()))
+        let next = NotchInfo.detect(from: NotchInfo.preferredScreen())
+        model.updateNotch(next)
+        NSLog(
+            "DashIsland: notch refresh width=%.1f height=%.1f minX=%@",
+            next.width,
+            next.height,
+            next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil"
+        )
     }
 
     private func applySize(_ size: CGSize, animate: Bool) {
         guard let screen = NotchInfo.preferredScreen() else { return }
-        let frame = screen.frame
-        // Flush to top of screen so the silhouette seats into the physical notch.
-        let x = frame.midX - size.width / 2
-        let y = frame.maxY - size.height
+        // Align to measured notch strip, not merely screen center.
+        let x = model.notch.windowOriginX(windowWidth: size.width)
+        let y = screen.frame.maxY - size.height
         let rect = NSRect(x: x, y: y, width: size.width, height: size.height)
         if animate {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -113,8 +125,8 @@ final class IslandWindowController {
     private func updateMouseEventPassthrough() {
         let mouse = NSEvent.mouseLocation
         let wf = window.frame
-        let hitW = model.state == .compact ? model.notch.width : model.size.width
-        let hitH = model.blackHeight
+        let hitW = model.state == .compact ? model.notch.width + 6 : model.size.width
+        let hitH = model.blackHeight + (model.state == .compact ? 3 : 0)
         let hit = NSRect(
             x: wf.midX - hitW / 2,
             y: wf.maxY - hitH,

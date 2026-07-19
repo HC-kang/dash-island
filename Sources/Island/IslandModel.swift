@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Island presentation. Compact = hairline rim on the physical notch.
+/// Island presentation. Compact = hairline rim around the physical notch.
 /// Expanded = panel dropping below the notch dead zone.
 @MainActor
 final class IslandModel: ObservableObject {
@@ -16,15 +16,14 @@ final class IslandModel: ObservableObject {
     private let expandedContentHeight: CGFloat = 132
     private let tooltipOverflow: CGFloat = 72
     private let expandedWidth: CGFloat = 600
-    /// Half-stroke slack so the rim hairline is not clipped by the window.
-    private let compactStrokePad: CGFloat = 1.5
+    /// Room for rim outset + stroke so L/R flanks are not clipped.
+    private let compactRimPad: CGFloat = 3
 
     init(notch: NotchInfo = .detectPreferred()) {
         self.notch = notch
-        self.size = Self.compactSize(for: notch, strokePad: 1.5)
+        self.size = Self.compactSize(for: notch, rimPad: 3)
     }
 
-    /// Height of solid black (notch only when compact; notch+panel when expanded).
     var blackHeight: CGFloat {
         switch state {
         case .compact: return notch.height
@@ -46,18 +45,17 @@ final class IslandModel: ObservableObject {
 
     func recomputeSize() {
         size = state == .compact
-            ? Self.compactSize(for: notch, strokePad: compactStrokePad)
+            ? Self.compactSize(for: notch, rimPad: compactRimPad)
             : CGSize(
                 width: expandedWidth,
                 height: notch.height + expandedContentHeight + tooltipOverflow
             )
     }
 
-    private static func compactSize(for notch: NotchInfo, strokePad: CGFloat) -> CGSize {
-        // Exact notch + tiny pad so a 1pt rim is not clipped.
+    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
         CGSize(
-            width: max(notch.width + strokePad * 2, 80),
-            height: notch.height + strokePad
+            width: max(notch.width + rimPad * 2, 80),
+            height: notch.height + rimPad
         )
     }
 }

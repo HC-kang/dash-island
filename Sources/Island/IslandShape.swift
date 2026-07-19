@@ -25,22 +25,20 @@ struct IslandShape: InsettableShape {
     }
 }
 
-/// Open U path: left side + bottom curve + right side (no top edge).
-/// Full vertical run so the rim continues along both flanks of the notch.
+/// Open U: full-height left flank + bottom curve + full-height right flank.
+/// Drawn in a rect that is slightly larger than the black fill so the rim
+/// sits *outside* the hardware notch and stays visible against the menu bar.
 struct NotchRimPath: Shape {
     var bottomRadius: CGFloat = 14
 
     func path(in rect: CGRect) -> Path {
-        // Inset half a hairline so the stroke sits just outside the black fill.
-        let inset: CGFloat = 0.5
-        let x0 = rect.minX + inset
-        let x1 = rect.maxX - inset
+        let x0 = rect.minX
+        let x1 = rect.maxX
         let y0 = rect.minY
-        let y1 = rect.maxY - inset
-        let r = min(bottomRadius, (y1 - y0) * 0.5, (x1 - x0) * 0.25)
+        let y1 = rect.maxY
+        let r = min(bottomRadius, (y1 - y0) * 0.48, (x1 - x0) * 0.22)
 
         var p = Path()
-        // Top of left flank (screen edge) → bottom-left corner → bottom → bottom-right → top of right flank.
         p.move(to: CGPoint(x: x0, y: y0))
         p.addLine(to: CGPoint(x: x0, y: y1 - r))
         p.addQuadCurve(
