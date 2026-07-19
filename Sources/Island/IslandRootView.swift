@@ -1,23 +1,40 @@
+import AppKit
 import SwiftUI
 
 struct IslandRootView: View {
     @ObservedObject private var accountStore = AccountStore.shared
     @ObservedObject private var orchestrator = UsageOrchestrator.shared
+    @ObservedObject private var preferences = PreferencesStore.shared
+
+    @State private var showPrefs = false
 
     var body: some View {
-        GaugeClusterView(
-            widgets: widgets,
-            accountCount: accountStore.accounts.count,
-            showEmptyAdd: showEmptyAdd,
-            showEdgeChrome: showEdgeChrome
-        )
+        ZStack(alignment: .bottomLeading) {
+            GaugeClusterView(
+                widgets: widgets,
+                accountCount: accountStore.accounts.count,
+                showEmptyAdd: showEmptyAdd,
+                showEdgeChrome: showEdgeChrome
+            )
             .padding(.horizontal, 16)
             .padding(.top, 12)
             .padding(.bottom, 14)
             // Extra bottom room so hover tooltips aren't clipped by the window.
             .padding(.bottom, 52)
-            .background(islandBackground)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            // Quiet gear on the island body (above tooltip gutter).
+            PrefsGearButton {
+                NSApp.activate(ignoringOtherApps: true)
+                showPrefs = true
+            }
+            .padding(.leading, 10)
+            .padding(.bottom, 56)
+        }
+        .background(islandBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheet(isPresented: $showPrefs) {
+            PrefsSheet(preferences: preferences)
+        }
     }
 
     private var widgets: [WidgetViewModel] {

@@ -13,8 +13,18 @@ struct GaugeRingView: View {
     var tint: VendorTint
     var size: CGFloat = 96
 
+    /// Drawn values (spring toward targets — Apple-quiet, not theatrical).
+    @State private var drawnPrimary: Double = 0
+    @State private var drawnSecondary: Double = 0
+    @State private var drawnHasSecondary: Bool = false
+    @State private var drawnBurn: Double = 0
+    @State private var drawnPercent: Int = 0
+    @State private var didAppear = false
+
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
+
+    private static let settle = Animation.spring(response: 0.55, dampingFraction: 0.88)
 
     var body: some View {
         ZStack {
@@ -30,7 +40,7 @@ struct GaugeRingView: View {
             }
 
             VStack(spacing: 1) {
-                Text("\(centerPercent)")
+                Text("\(drawnPercent)")
                     .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color(white: 0.96))
                     .tracking(-0.4)
@@ -45,6 +55,29 @@ struct GaugeRingView: View {
         .frame(width: size, height: size)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(centerPercent) percent")
+        .onAppear {
+            applyTargets(animated: false)
+            didAppear = true
+        }
+        .onChange(of: primaryFraction) { _ in applyTargets(animated: didAppear) }
+        .onChange(of: secondaryFraction ?? -1) { _ in applyTargets(animated: didAppear) }
+        .onChange(of: burnRatio) { _ in applyTargets(animated: didAppear) }
+        .onChange(of: centerPercent) { _ in applyTargets(animated: didAppear) }
+    }
+
+    private func applyTargets(animated: Bool) {
+        let update = {
+            drawnPrimary = primaryFraction
+            drawnSecondary = secondaryFraction ?? 0
+            drawnHasSecondary = secondaryFraction != nil
+            drawnBurn = burnRatio
+            drawnPercent = centerPercent
+        }
+        if animated {
+            withAnimation(Self.settle, update)
+        } else {
+            update()
+        }
     }
 
     // MARK: - Drawing
@@ -126,13 +159,13 @@ struct GaugeRingView: View {
         // Track underlays.
         strokeRing(context: context, center: center, radius: outerR, fraction: 1,
                    color: Color.white.opacity(0.07), lineWidth: stroke)
-        if secondaryFraction != nil {
+        if drawnHasSecondary {
             strokeRing(context: context, center: center, radius: innerR, fraction: 1,
                        color: Color.white.opacity(0.045), lineWidth: stroke)
         }
 
         // Outer brand (primary).
-        let p = clamped(primaryFraction)
+        let p = clamped(drawnPrimary)
         if p > 0.0005 {
             var ctx = context
             ctx.addFilter(.shadow(color: brand.opacity(0.35), radius: 2 * scale, x: 0, y: 0))
@@ -141,8 +174,8 @@ struct GaugeRingView: View {
         }
 
         // Inner cool steel (secondary).
-        if let secondary = secondaryFraction {
-            let s = clamped(secondary)
+        if drawnHasSecondary {
+            let s = clamped(drawnSecondary)
             if s > 0.0005 {
                 strokeRing(context: context, center: center, radius: innerR, fraction: s,
                            color: steel, lineWidth: stroke)
@@ -151,7 +184,7 @@ struct GaugeRingView: View {
     }
 
     private func drawNeedle(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
-        let unit = BurnRate.needleUnit(ratio: burnRatio)
+        let unit = BurnRate.needleUnit(ratio: drawnBurn)
         let angle = Self.needleAngleDegrees(unit: unit)
         let tipR: CGFloat = 38 * scale
         let tip = point(center: center, angleDeg: angle, radius: tipR)
