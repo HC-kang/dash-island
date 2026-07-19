@@ -52,11 +52,12 @@ struct IslandRootView: View {
             IslandShape(bottomRadius: radius)
                 .fill(Color.black)
 
-            // Hairline rim on the U only (open path — no top edge / no closed box).
+            // Hairline rim: left + bottom + right (open U). Top→bottom gradient so
+            // vertical flanks stay visible (L→R gradient washed the sides out).
             NotchRimPath(bottomRadius: radius)
                 .stroke(
                     rimGradient,
-                    style: StrokeStyle(lineWidth: 0.85, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: 0.9, lineCap: .round, lineJoin: .round)
                 )
         }
         .frame(width: w, height: h)
@@ -109,18 +110,17 @@ struct IslandRootView: View {
         min(16, max(11, h * 0.40))
     }
 
-    /// Brightest at bottom-center (where the rim is most visible against desktop).
+    /// Top→bottom so left/right flanks share the same readable edge, brightest at the bottom curve.
     private var rimGradient: LinearGradient {
         LinearGradient(
             stops: [
-                .init(color: Color.white.opacity(0.15), location: 0),
-                .init(color: Color.white.opacity(0.55), location: 0.35),
-                .init(color: Color.white.opacity(0.70), location: 0.5),
-                .init(color: Color.white.opacity(0.55), location: 0.65),
-                .init(color: Color.white.opacity(0.15), location: 1)
+                .init(color: Color.white.opacity(0.28), location: 0),
+                .init(color: Color.white.opacity(0.40), location: 0.45),
+                .init(color: Color.white.opacity(0.62), location: 0.85),
+                .init(color: Color.white.opacity(0.72), location: 1)
             ],
-            startPoint: .leading,
-            endPoint: .trailing
+            startPoint: .top,
+            endPoint: .bottom
         )
     }
 
