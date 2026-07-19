@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Slot grid (min 3). Drag floats a copy under the cursor (grab offset preserved);
-/// home slot shows a gray skeleton. Order commits on release. Trash magnet deletes.
+/// Slot grid (min 3). Drag floats a copy; home slot shows skeleton.
+/// Drop on another slot reorders. Drag near trash magnet to remove.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -14,20 +14,23 @@ struct GaugeClusterView: View {
     @State private var orderIDs: [AccountID] = []
     @State private var draggingID: AccountID?
     @State private var homeSlot: Int?
-    /// Center of the home slot in the `dragSpace` coordinate space.
     @State private var liftOrigin: CGPoint = .zero
-    /// Finger translation in the same space (keeps grab offset).
     @State private var dragTranslation: CGSize = .zero
     @State private var targetSlot: Int?
     @State private var magnetizedToTrash = false
     @State private var clusterSize: CGSize = .zero
-    @State private var clusterGlobalFrame: CGRect = .zero
 
     private static let maxSlots = IslandModel.maxItems
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
-    private static let trashMagnetRadius: CGFloat = 56
+    /// Enter magnet inside this radius; exit only outside + hysteresis.
+    private static let trashMagnetEnter: CGFloat = 72
+    private static let trashMagnetExit: CGFloat = 96
     private static let dragSpace = "dashIsland.dragSpace"
+    private static let cellH = AccountWidget.cellSize + 8
+    private static let trashSize: CGFloat = 44
+    /// Gap between slot row bottom and trash center.
+    private static let trashOffsetY: CGFloat = 52
 
     private var slotCount: Int {
         let filled = max(orderIDs.count, widgets.count)
@@ -38,7 +41,15 @@ struct GaugeClusterView: View {
         Dictionary(uniqueKeysWithValues: widgets.map { ($0.id, $0) })
     }
 
-    /// Where the floating widget's center should sit (local dragSpace).
+    /// Trash center in `dragSpace` — must match the drawn trash `position`.
+    private var trashCenterLocal: CGPoint {
+        let w = clusterSize.width > 1 ? clusterSize.width : 300
+        return CGPoint(
+            x: w / 2,
+            y: Self.cellH + Self.trashOffsetY
+        )
+    }
+
     private var floatCenter: CGPoint {
         if magnetizedToTrash {
             return trashCenterLocal
@@ -46,14 +57,6 @@ struct GaugeClusterView: View {
         return CGPoint(
             x: liftOrigin.x + dragTranslation.width,
             y: liftOrigin.y + dragTranslation.height
-        )
-    }
-
-    /// Trash sits under the slot row, centered.
-    private var trashCenterLocal: CGPoint {
-        CGPoint(
-            x: clusterSize.width / 2,
-            y: AccountWidget.cellSize + 8 + 44
         )
     }
 
@@ -71,28 +74,34 @@ struct GaugeClusterView: View {
                 trailingAdd
             }
 
+            // Trash drawn IN this coordinate space (not overlay offset math).
+            if draggingID != nil {
+                trashTarget
+                    .position(trashCenterLocal)
+                    .zIndex(50)
+            }
+
             if let id = draggingID, let model = modelByID[id] {
                 AccountWidget(model: model, isDragging: true, isDropTarget: false)
-                    .scaleEffect(magnetizedToTrash ? 0.72 : 1.07)
-                    .opacity(magnetizedToTrash ? 0.85 : 1)
+                    .scaleEffect(magnetizedToTrash ? 0.68 : 1.07)
+                    .opacity(magnetizedToTrash ? 0.9 : 1)
                     .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
                     .position(floatCenter)
                     .zIndex(100)
                     .allowsHitTesting(false)
-                    .animation(.spring(response: 0.28, dampingFraction: 0.75), value: magnetizedToTrash)
+                    .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
             }
         }
-        .coordinateSpace(name: Self.dragSpace)
+        // Extra height so trash + float below slots stay inside the view (and hit-testable area).
         .frame(maxWidth: .infinity)
+        .frame(minHeight: Self.cellH + (draggingID != nil ? Self.trashOffsetY + 36 : 0))
+        .coordinateSpace(name: Self.dragSpace)
         .background(
             GeometryReader { geo in
-                Color.clear
-                    .preference(key: ClusterSizeKey.self, value: geo.size)
-                    .preference(key: ClusterGlobalFrameKey.self, value: geo.frame(in: .global))
+                Color.clear.preference(key: ClusterSizeKey.self, value: geo.size)
             }
         )
         .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
-        .onPreferenceChange(ClusterGlobalFrameKey.self) { clusterGlobalFrame = $0 }
         .onAppear { syncOrderFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
             guard draggingID == nil else { return }
@@ -100,15 +109,6 @@ struct GaugeClusterView: View {
         }
         .onChange(of: draggingID) { id in
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
-        }
-        .overlay(alignment: .bottom) {
-            if draggingID != nil {
-                trashTarget
-                    .offset(y: 44)
-                    .scaleEffect(magnetizedToTrash ? 1.18 : 1.0)
-                    .opacity(magnetizedToTrash ? 1 : 0.65)
-                    .animation(.spring(response: 0.28, dampingFraction: 0.72), value: magnetizedToTrash)
-            }
         }
     }
 
@@ -125,6 +125,7 @@ struct GaugeClusterView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
+        .frame(height: Self.cellH, alignment: .top)
     }
 
     @ViewBuilder
@@ -145,12 +146,11 @@ struct GaugeClusterView: View {
                     isDragging: false,
                     isDropTarget: isTarget && oid != draggingID
                 )
-                // Keep mounted so the gesture is not cancelled.
                 .opacity(oid == draggingID ? 0.001 : 1)
                 .gesture(allowsEditing ? dragGesture(for: oid, slotIndex: index) : nil)
             }
         }
-        .frame(width: AccountWidget.cellSize, height: AccountWidget.cellSize + 8)
+        .frame(width: AccountWidget.cellSize, height: Self.cellH)
         .contentShape(Rectangle())
     }
 
@@ -175,17 +175,21 @@ struct GaugeClusterView: View {
     private var trashTarget: some View {
         ZStack {
             Circle()
-                .fill(Color.red.opacity(magnetizedToTrash ? 0.55 : 0.28))
-                .frame(width: magnetizedToTrash ? 48 : 40, height: magnetizedToTrash ? 48 : 40)
+                .fill(Color.red.opacity(magnetizedToTrash ? 0.6 : 0.32))
+                .frame(
+                    width: magnetizedToTrash ? 52 : Self.trashSize,
+                    height: magnetizedToTrash ? 52 : Self.trashSize
+                )
             Image(systemName: magnetizedToTrash ? "trash.fill" : "trash")
-                .font(.system(size: magnetizedToTrash ? 18 : 15, weight: .semibold))
+                .font(.system(size: magnetizedToTrash ? 20 : 16, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
         }
-        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.45 : 0.2), radius: magnetizedToTrash ? 12 : 6)
+        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.5 : 0.22), radius: magnetizedToTrash ? 14 : 7)
         .allowsHitTesting(false)
+        .accessibilityLabel("Remove account")
     }
 
-    // MARK: - Drag (local named space + translation)
+    // MARK: - Drag
 
     private func dragGesture(for id: AccountID, slotIndex: Int) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.dragSpace))
@@ -196,66 +200,80 @@ struct GaugeClusterView: View {
                     homeSlot = orderIDs.firstIndex(of: id) ?? slotIndex
                     liftOrigin = slotCenter(index: homeSlot ?? slotIndex)
                     dragTranslation = .zero
+                    magnetizedToTrash = false
                 }
                 guard draggingID == id else { return }
 
                 dragTranslation = value.translation
-
                 let finger = CGPoint(
                     x: liftOrigin.x + value.translation.width,
                     y: liftOrigin.y + value.translation.height
                 )
-                // Also compare against startLocation + translation for grab fidelity:
-                // float center = liftOrigin + translation already preserves grab offset
-                // relative to slot center. Finger is at startLocation + translation;
-                // we intentionally pin float to slot-center + translation so the
-                // widget doesn't jump on press.
 
-                let nearTrash = isNearTrashLocal(finger)
-                magnetizedToTrash = nearTrash
-                targetSlot = nearTrash ? nil : slotIndexAt(localX: finger.x)
+                updateTrashMagnet(finger: finger)
+
+                if magnetizedToTrash {
+                    targetSlot = nil
+                } else {
+                    targetSlot = slotIndexAt(localX: finger.x)
+                }
             }
             .onEnded { value in
                 let finger = CGPoint(
                     x: liftOrigin.x + value.translation.width,
                     y: liftOrigin.y + value.translation.height
                 )
-                let nearTrash = isNearTrashLocal(finger)
-                // Prefer last highlighted slot from onChanged; recompute as fallback.
-                let dropSlot = nearTrash
-                    ? nil
-                    : (targetSlot ?? slotIndexAt(localX: finger.x))
+                // Sticky: if we were magnetized, count as trash even if release jitter.
+                let remove = magnetizedToTrash || distanceToTrash(finger) <= Self.trashMagnetEnter
+                let dropSlot = remove ? nil : (targetSlot ?? slotIndexAt(localX: finger.x))
                 let dragged = id
                 let from = homeSlot ?? orderIDs.firstIndex(of: dragged)
 
                 draggingID = nil
                 homeSlot = nil
                 dragTranslation = .zero
-                let committedTarget = dropSlot
                 targetSlot = nil
                 magnetizedToTrash = false
 
-                if nearTrash {
+                if remove {
                     confirmRemove(id: dragged)
                     return
                 }
 
-                if let dropSlot = committedTarget, let from {
+                if let dropSlot, let from {
                     commitMove(id: dragged, from: from, to: dropSlot)
                 }
             }
     }
 
+    private func updateTrashMagnet(finger: CGPoint) {
+        let d = distanceToTrash(finger)
+        if magnetizedToTrash {
+            // Hysteresis — don't drop magnet until clearly away.
+            if d > Self.trashMagnetExit {
+                magnetizedToTrash = false
+            }
+        } else if d <= Self.trashMagnetEnter {
+            magnetizedToTrash = true
+        }
+    }
+
+    private func distanceToTrash(_ point: CGPoint) -> CGFloat {
+        let c = trashCenterLocal
+        let dx = point.x - c.x
+        let dy = point.y - c.y
+        return (dx * dx + dy * dy).squareRoot()
+    }
+
     private func slotCenter(index: Int) -> CGPoint {
         let n = slotCount
         let cell = AccountWidget.cellSize
-        let h = cell + 8
         let stride = cell + Self.gap
         let rowW = CGFloat(n) * cell + CGFloat(max(0, n - 1)) * Self.gap
         let w = clusterSize.width > 1 ? clusterSize.width : rowW
         let leading = (w - rowW) / 2
         let x = leading + CGFloat(index) * stride + cell / 2
-        let y = h / 2
+        let y = Self.cellH / 2
         return CGPoint(x: x, y: y)
     }
 
@@ -275,45 +293,33 @@ struct GaugeClusterView: View {
         return min(index, max(orderIDs.count - 1, 0))
     }
 
-    private func isNearTrashLocal(_ point: CGPoint) -> Bool {
-        let c = trashCenterLocal
-        let dx = point.x - c.x
-        let dy = point.y - c.y
-        return (dx * dx + dy * dy).squareRoot() <= Self.trashMagnetRadius
-    }
-
     private func commitMove(id: AccountID, from: Int, to: Int) {
         guard from != to else { return }
-
-        // Build next order from current orderIDs (or widgets if empty).
         var next = orderIDs.isEmpty ? widgets.map(\.id) : orderIDs
         guard let fromIdx = next.firstIndex(of: id) else { return }
         let item = next.remove(at: fromIdx)
         let dest = min(max(0, to), next.count)
         next.insert(item, at: dest)
-
-        // Optimistic UI first — never immediately re-sync from widgets (race:
-        // orchestrator still holds pre-reorder order for a tick).
         orderIDs = next
 
-        if DemoWidgets.isForced {
-            // Demo rows aren't in AccountStore; local orderIDs is source of truth.
-            return
-        }
+        if DemoWidgets.isForced { return }
 
         do {
             try AccountStore.shared.applyOrder(next)
         } catch {
-            // Roll back visual order on failure.
             syncOrderFromWidgets()
         }
     }
 
     private func confirmRemove(id: AccountID) {
-        guard AccountStore.shared.accounts.contains(where: { $0.id == id }) else {
-            orderIDs.removeAll { $0 == id }
+        // Demo: drop from local order only.
+        if DemoWidgets.isForced || !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                orderIDs.removeAll { $0 == id }
+            }
             return
         }
+
         let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? "this account"
         let alert = NSAlert()
         alert.messageText = "Remove \(label)?"
@@ -321,10 +327,16 @@ struct GaugeClusterView: View {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             try? AccountStore.shared.remove(id: id)
+            orderIDs.removeAll { $0 == id }
         }
         syncOrderFromWidgets()
+    }
+
+    private func syncOrderFromWidgets() {
+        orderIDs = widgets.map(\.id)
     }
 }
 
@@ -365,11 +377,6 @@ struct SlotSkeleton: View {
 private struct ClusterSizeKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
-}
-
-private struct ClusterGlobalFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
 extension Notification.Name {
