@@ -29,13 +29,20 @@ struct GaugeClusterView: View {
 
     var body: some View {
         ZStack {
+            // Always a slot chassis (min 3). Empty accounts = gray shells + center +.
             slotRow
 
-            if showAdd && draggingID == nil {
+            if showEmptyAdd && draggingID == nil {
+                CenteredAddButton { adapter in
+                    AccountChromeActions.beginAdd(adapter: adapter)
+                }
+            }
+
+            if showAdd && !showEmptyAdd && draggingID == nil {
                 trailingAdd
             }
 
-            // Lifted widget follows the mouse (not an in-slot offset).
+            // Lifted widget follows the mouse; home slot stays skeleton.
             if let id = draggingID,
                let model = widgets.first(where: { $0.id == id }),
                let point = dragGlobalPoint {
