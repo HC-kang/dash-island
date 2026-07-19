@@ -37,6 +37,7 @@ Branch `feat/v1-implementation` — plan tasks 1–10 landed via subagent-driven
 - Prefs sheet: used/remaining + 5/15/30 poll
 - Demo: `DASHISLAND_DEMO=1` only (empty → centered +)
 - Grok concern: contract from Orca; no live HTTP probe this session
+- Island UI: **compact by default** (thin bar); expand on hover; collapse ~350ms after leave; click-through outside hit area (2026-07-19 fix — must not stay fully open)
 
 ## Scaffold (Task 1)
 
