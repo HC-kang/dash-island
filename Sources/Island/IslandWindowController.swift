@@ -6,7 +6,9 @@ final class IslandWindowController {
     let window: NSWindow
     private var screenChangeObserver: NSObjectProtocol?
 
-    static let windowSize = CGSize(width: 220, height: 40)
+    /// Wide enough for 5×100px widgets + gaps + horizontal padding; tall enough for
+    /// gauge cells + hover tooltips hanging below.
+    static let windowSize = CGSize(width: 600, height: 200)
 
     init() {
         window = BorderlessFloatingWindow(
@@ -21,6 +23,9 @@ final class IslandWindowController {
         window.level = .popUpMenu
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isMovable = false
+        // Floating accessory windows are rarely key; still need hover for tooltips.
+        window.acceptsMouseMovedEvents = true
+        window.ignoresMouseEvents = false
 
         let host = NSHostingView(rootView: IslandRootView())
         host.autoresizingMask = [.width, .height]

@@ -41,3 +41,20 @@
 - Needle: `needleUnit = min(1, ratio/2)` → 0 rest, 1 cruise (0.5), ≥2 redline cap.
 - Tests: `scripts/run-tests.sh` compiles Domain + Tests only (no XCTest).
 - `.gitignore`: `build/`, `.DS_Store`, `.superpowers/`.
+
+## Accounts / credentials (Task 3)
+
+- Layout: `~/Library/Application Support/DashIsland/{accounts.json,accounts/<uuid>/}`.
+- `CredentialRef` = folder name under `accounts/` (usually account UUID string).
+- `Account` is `Codable` (ISO8601 dates). Cap **5** accounts (`AccountStoreError.maxAccountsReached`).
+- `FakeAdapter` id `"fake"`, `minPollSeconds` 300; `fetchUsage` fraction = stable FNV-1a of ref.
+- `AccountStore` `@MainActor ObservableObject`; `shared.load()` on launch.
+- Tests: `run-tests.sh` compiles Domain+Infra+AppCore+Adapters+Tests; single `@main` in `TestMain.swift`.
+
+## Gauge widgets (Task 4)
+
+- Views: `GaugeRingView`, `AccountWidget`, `GaugeClusterView`; `IslandRootView` hosts cluster.
+- v5 balance: flush dual rings (outer brand, inner steel #3a6580), ticks ~0.34α, needle #ef4444 1.35pt.
+- Needle piecewise angles (screen deg, 0=east): unit0→135° (7:30), 0.5→300° (1:00), 1→45° (4:30).
+- Demo: `DASHISLAND_DEMO=1` OR empty `AccountStore` → 3 fake VMs (count via `DASHISLAND_DEMO_COUNT` ∈ 1|3|5).
+- Window `600×200`, `acceptsMouseMovedEvents` for hover tooltips below widgets.
