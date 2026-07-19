@@ -1,6 +1,6 @@
 import Foundation
 
-struct Account: Identifiable, Equatable, Sendable {
+struct Account: Identifiable, Equatable, Codable, Sendable {
     let id: AccountID
     var vendorID: VendorID
     var label: String

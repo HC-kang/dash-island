@@ -30,6 +30,7 @@ swiftc \
   -parse-as-library \
   -framework SwiftUI \
   -framework AppKit \
+  -framework Combine \
   -o "$MACOS_DIR/$APP_NAME" \
   $SWIFT_SOURCES
 
