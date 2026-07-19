@@ -1,12 +1,10 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Prefs sheet (island look)
-
-/// Dark preferences matching the island panel — not a stock light sheet.
+/// Dark preferences content hosted in `PrefsWindowController` (not a sheet).
 struct PrefsSheet: View {
     @ObservedObject var preferences: PreferencesStore
-    @Environment(\.dismiss) private var dismiss
+    var onDone: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -15,7 +13,7 @@ struct PrefsSheet: View {
                     .font(Typography.settingsTitle)
                     .foregroundStyle(.white)
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("Done", action: onDone)
                     .font(Typography.settingsRow)
                     .foregroundStyle(.white.opacity(0.75))
                     .buttonStyle(.plain)

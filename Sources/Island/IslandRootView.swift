@@ -7,7 +7,7 @@ struct IslandRootView: View {
     @ObservedObject private var orchestrator = UsageOrchestrator.shared
     @ObservedObject private var preferences = PreferencesStore.shared
 
-    @State private var showPrefs = false
+    @State private var prefsOpen = false
     @State private var collapseTask: Task<Void, Never>?
 
     private let bodyOutset: CGFloat = 1.0
@@ -28,13 +28,12 @@ struct IslandRootView: View {
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.state)
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.size.width)
         .onHover { handleHover($0) }
-        .sheet(isPresented: $showPrefs) {
-            PrefsSheet(preferences: preferences)
-        }
         .onAppear { syncExpandedItemCount() }
         .onChange(of: accountStore.accounts.count) { _ in syncExpandedItemCount() }
         .onChange(of: orchestrator.widgets.count) { _ in syncExpandedItemCount() }
-        .onChange(of: showPrefs) { open in
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandPrefsOpenChanged)) { note in
+            let open = (note.object as? Bool) ?? PrefsWindowController.shared.isOpen
+            prefsOpen = open
             if open {
                 collapseTask?.cancel()
                 model.setState(.expanded)
@@ -42,6 +41,11 @@ struct IslandRootView: View {
                 scheduleCollapse()
             }
         }
+    }
+
+    private func openPrefs() {
+        // Separate NSPanel — never `.sheet` on the island (that drags the HUD down).
+        PrefsWindowController.shared.show()
     }
 
     private func syncExpandedItemCount() {
@@ -104,8 +108,7 @@ struct IslandRootView: View {
                 notchWidth: model.notch.width,
                 notchHeight: model.notch.height
             ) {
-                NSApp.activate(ignoringOtherApps: true)
-                showPrefs = true
+                openPrefs()
             }
 
             GaugeClusterView(
@@ -153,7 +156,7 @@ struct IslandRootView: View {
             collapseTask?.cancel()
             collapseTask = nil
             model.setState(.expanded)
-        } else if !showPrefs {
+        } else if !prefsOpen {
             scheduleCollapse()
         }
     }
@@ -162,7 +165,7 @@ struct IslandRootView: View {
         collapseTask?.cancel()
         collapseTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled, !showPrefs else { return }
+            guard !Task.isCancelled, !prefsOpen else { return }
             model.setState(.compact)
         }
     }
