@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Island presentation state. Default is compact — a thin bar under the notch.
-/// Expanded (gauges) only while the cursor is over the island.
+/// Island presentation. Compact wraps the physical notch; expanded drops
+/// gauges *below* the notch dead zone.
 @MainActor
 final class IslandModel: ObservableObject {
     enum State: Equatable {
@@ -10,15 +10,50 @@ final class IslandModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .compact
-    @Published private(set) var size: CGSize = IslandModel.compactSize
+    @Published private(set) var notch: NotchInfo
+    @Published private(set) var size: CGSize
 
-    static let compactSize = CGSize(width: 200, height: 40)
-    /// Wide enough for 5 widgets + padding + tooltip gutter.
-    static let expandedSize = CGSize(width: 600, height: 200)
+    /// Black silhouette height in expanded mode = notch + content (no tooltip gutter).
+    private let expandedContentHeight: CGFloat = 132
+    /// Transparent window tail so tooltips can paint outside the black shape.
+    private let tooltipOverflow: CGFloat = 72
+    private let expandedWidth: CGFloat = 600
+
+    init(notch: NotchInfo = .detectPreferred()) {
+        self.notch = notch
+        self.size = Self.compactSize(for: notch)
+    }
+
+    var blackHeight: CGFloat {
+        switch state {
+        case .compact: return notch.height
+        case .expanded: return notch.height + expandedContentHeight
+        }
+    }
 
     func setState(_ new: State) {
         guard new != state else { return }
         state = new
-        size = new == .compact ? Self.compactSize : Self.expandedSize
+        recomputeSize()
+    }
+
+    func updateNotch(_ new: NotchInfo) {
+        guard new != notch else { return }
+        notch = new
+        recomputeSize()
+    }
+
+    func recomputeSize() {
+        size = state == .compact
+            ? Self.compactSize(for: notch)
+            : CGSize(
+                width: expandedWidth,
+                height: notch.height + expandedContentHeight + tooltipOverflow
+            )
+    }
+
+    /// Compact window hugs the notch; 2pt slack so the stroke can sit outside.
+    private static func compactSize(for notch: NotchInfo) -> CGSize {
+        CGSize(width: max(notch.width + 4, 120), height: notch.height + 3)
     }
 }

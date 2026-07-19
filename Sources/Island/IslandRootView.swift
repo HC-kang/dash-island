@@ -12,23 +12,35 @@ struct IslandRootView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
+            // Black silhouette only — never fills the transparent tooltip tail.
+            silhouette
+                .frame(width: silhouetteWidth, height: model.blackHeight)
+                .frame(maxWidth: .infinity, alignment: .top)
+
             if model.state == .expanded {
-                expandedBody
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                expandedContent
+                    .transition(.opacity.combined(with: .offset(y: -6)))
             } else {
-                compactBody
-                    .transition(.opacity)
+                // Hit target + a11y over the notch silhouette (no hanging pill).
+                Color.clear
+                    .frame(width: silhouetteWidth, height: model.notch.height)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .contentShape(IslandShape(bottomRadius: cornerRadius))
+                    .onTapGesture {
+                        collapseTask?.cancel()
+                        model.setState(.expanded)
+                    }
+                    .accessibilityLabel("Dash Island")
+                    .accessibilityHint("Hover or click to show usage")
+                    .accessibilityValue(compactLabel)
             }
         }
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.state)
-        .onHover { hovering in
-            handleHover(hovering)
-        }
+        .onHover { handleHover($0) }
         .sheet(isPresented: $showPrefs) {
             PrefsSheet(preferences: preferences)
         }
-        // Keep expanded while prefs sheet is open.
         .onChange(of: showPrefs) { open in
             if open {
                 collapseTask?.cancel()
@@ -39,46 +51,54 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Compact (default)
+    // MARK: - Silhouette
 
-    private var compactBody: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(Color.white.opacity(0.35))
-                .frame(width: 5, height: 5)
-            Text(compactLabel)
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.72))
+    private var silhouetteWidth: CGFloat {
+        model.state == .compact ? model.notch.width : model.size.width
+    }
+
+    private var cornerRadius: CGFloat {
+        // Scale corner with notch height so the U tracks hardware curves.
+        min(18, max(10, model.notch.height * 0.42))
+    }
+
+    private var silhouette: some View {
+        let shape = IslandShape(bottomRadius: cornerRadius)
+        return ZStack {
+            shape.fill(Color.black)
+            // Thin gradient outline wrapping the notch / island edge.
+            shape
+                .strokeBorder(outlineGradient, lineWidth: model.state == .compact ? 1.0 : 0.8)
+                .opacity(model.state == .compact ? 0.95 : 0.35)
         }
-        .padding(.horizontal, 16)
-        .frame(height: 28)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.black)
+        .shadow(color: .black.opacity(model.state == .expanded ? 0.45 : 0.25), radius: model.state == .expanded ? 18 : 6, y: 4)
+    }
+
+    /// Soft metal edge: brighter mid-bottom, fades at the top corners.
+    private var outlineGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.white.opacity(0.08),
+                Color.white.opacity(0.42),
+                Color.white.opacity(0.55),
+                Color.white.opacity(0.42),
+                Color.white.opacity(0.08)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
         )
-        .padding(.top, 6)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            collapseTask?.cancel()
-            model.setState(.expanded)
-        }
-        .accessibilityLabel("Dash Island")
-        .accessibilityHint("Hover or click to show usage")
     }
 
     private var compactLabel: String {
-        if DemoWidgets.isForced {
-            return "Demo"
-        }
+        if DemoWidgets.isForced { return "Demo" }
         let n = accountStore.accounts.count
-        if n == 0 { return "Dash" }
+        if n == 0 { return "Dash Island" }
         return n == 1 ? "1 account" : "\(n) accounts"
     }
 
-    // MARK: - Expanded
+    // MARK: - Expanded content (below notch dead zone)
 
-    private var expandedBody: some View {
+    private var expandedContent: some View {
         ZStack(alignment: .bottomLeading) {
             GaugeClusterView(
                 widgets: widgets,
@@ -87,37 +107,25 @@ struct IslandRootView: View {
                 showEdgeChrome: showEdgeChrome
             )
             .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 14)
-            .padding(.bottom, 52)
+            .padding(.bottom, 10)
 
             PrefsGearButton {
                 NSApp.activate(ignoringOtherApps: true)
                 showPrefs = true
             }
             .padding(.leading, 10)
-            .padding(.bottom, 56)
+            .padding(.bottom, 10)
         }
-        .background(islandBackground)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-
-    private var islandBackground: some View {
-        UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: 26,
-            bottomTrailingRadius: 26,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
-        .fill(Color.black)
-        .shadow(color: .black.opacity(0.55), radius: 24, y: 10)
+        // Content starts under the physical notch — never under the dead pixels.
+        .padding(.top, model.notch.height)
+        .frame(width: model.size.width, height: model.blackHeight, alignment: .top)
+        // Allow hover tooltips to paint into the transparent window overflow
+        // below the black silhouette (no black gutter).
+        .frame(width: model.size.width, height: model.size.height, alignment: .top)
     }
 
     private var widgets: [WidgetViewModel] {
-        if DemoWidgets.isForced {
-            return DemoWidgets.make()
-        }
+        if DemoWidgets.isForced { return DemoWidgets.make() }
         return orchestrator.widgets
     }
 
@@ -152,3 +160,4 @@ struct IslandRootView: View {
         }
     }
 }
+

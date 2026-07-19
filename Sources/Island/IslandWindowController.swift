@@ -6,15 +6,18 @@ import SwiftUI
 @MainActor
 final class IslandWindowController {
     let window: NSWindow
-    let model = IslandModel()
+    let model: IslandModel
     private var screenChangeObserver: NSObjectProtocol?
     private var sizeCancellable: AnyCancellable?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
 
     init() {
+        let notch = NotchInfo.detectPreferred()
+        model = IslandModel(notch: notch)
+
         window = BorderlessFloatingWindow(
-            contentRect: NSRect(origin: .zero, size: IslandModel.compactSize),
+            contentRect: NSRect(origin: .zero, size: model.size),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -26,12 +29,16 @@ final class IslandWindowController {
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isMovable = false
         window.acceptsMouseMovedEvents = true
-        // Start click-through; enable hits only when cursor is over the island.
         window.ignoresMouseEvents = true
 
         let host = NSHostingView(rootView: IslandRootView(model: model))
         host.autoresizingMask = [.width, .height]
+        // Tooltips paint into the transparent overflow under the black silhouette.
+        host.wantsLayer = true
+        host.layer?.masksToBounds = false
         window.contentView = host
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.masksToBounds = false
 
         sizeCancellable = model.$size
             .removeDuplicates { $0.width == $1.width && $0.height == $1.height }
@@ -41,6 +48,7 @@ final class IslandWindowController {
     }
 
     func show() {
+        refreshNotchGeometry()
         applySize(model.size, animate: false)
         window.orderFrontRegardless()
         observeScreenChanges()
@@ -62,23 +70,20 @@ final class IslandWindowController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                self.applySize(self.model.size, animate: false)
+                self?.refreshNotchGeometry()
+                self?.applySize(self?.model.size ?? .zero, animate: false)
             }
         }
     }
 
-    /// Prefer a notched display; fall back to main.
-    private static func preferredScreen() -> NSScreen? {
-        if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
-            return notched
-        }
-        return NSScreen.main ?? NSScreen.screens.first
+    private func refreshNotchGeometry() {
+        model.updateNotch(NotchInfo.detect(from: NotchInfo.preferredScreen()))
     }
 
     private func applySize(_ size: CGSize, animate: Bool) {
-        guard let screen = Self.preferredScreen() else { return }
+        guard let screen = NotchInfo.preferredScreen() else { return }
         let frame = screen.frame
+        // Flush to top of screen so the silhouette seats into the physical notch.
         let x = frame.midX - size.width / 2
         let y = frame.maxY - size.height
         let rect = NSRect(x: x, y: y, width: size.width, height: size.height)
@@ -93,12 +98,9 @@ final class IslandWindowController {
         }
     }
 
-    /// Click-through outside the island; re-enable hits when cursor is over window content.
     private func installMouseTracking() {
         let handler: (NSEvent) -> Void = { [weak self] _ in
-            Task { @MainActor in
-                self?.updateMouseEventPassthrough()
-            }
+            Task { @MainActor in self?.updateMouseEventPassthrough() }
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler)
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
@@ -110,9 +112,19 @@ final class IslandWindowController {
 
     private func updateMouseEventPassthrough() {
         let mouse = NSEvent.mouseLocation
-        // Slightly generous hit pad so the compact pill is easy to catch.
-        let hit = window.frame.insetBy(dx: -4, dy: -4)
-        let inside = hit.contains(mouse)
-        window.ignoresMouseEvents = !inside
+        // Hit the black silhouette only (not the full transparent tooltip tail).
+        let blackH = model.blackHeight
+        let wf = window.frame
+        let blackFrame = NSRect(
+            x: wf.midX - silhouetteWidth / 2,
+            y: wf.maxY - blackH,
+            width: silhouetteWidth,
+            height: blackH
+        ).insetBy(dx: -3, dy: -2)
+        window.ignoresMouseEvents = !blackFrame.contains(mouse)
+    }
+
+    private var silhouetteWidth: CGFloat {
+        model.state == .compact ? model.notch.width : model.size.width
     }
 }

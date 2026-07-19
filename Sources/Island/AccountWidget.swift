@@ -56,16 +56,18 @@ struct AccountWidget: View {
                         .strokeBorder(Color.white.opacity(isHot || isHovered ? 0.12 : 0.06), lineWidth: 1)
                 )
         )
-        .overlay(alignment: .top) {
+        // Tooltip floats below the cell into the transparent window tail —
+        // must not reserve black layout space in the island body.
+        .overlay(alignment: .bottom) {
             if isHovered, !model.hoverLines.isEmpty {
                 tooltip
                     .fixedSize()
-                    // Sit just below the cell.
-                    .offset(y: Self.cellSize + 16)
+                    .offset(y: 44)
                     .transition(.opacity.combined(with: .move(edge: .top)))
-                    .zIndex(10)
+                    .allowsHitTesting(false)
             }
         }
+        .zIndex(isHovered ? 5 : 0)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) {
                 isHovered = hovering
