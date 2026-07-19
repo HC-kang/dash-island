@@ -331,12 +331,9 @@ struct GaugeClusterView: View {
         if alert.runModal() == .alertFirstButtonReturn {
             try? AccountStore.shared.remove(id: id)
             orderIDs.removeAll { $0 == id }
+        } else {
+            syncOrderFromWidgets()
         }
-        syncOrderFromWidgets()
-    }
-
-    private func syncOrderFromWidgets() {
-        orderIDs = widgets.map(\.id)
     }
 }
 
