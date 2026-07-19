@@ -120,11 +120,18 @@ struct IslandRootView: View {
                 showEmptyAdd: showEmptyAdd,
                 showAdd: showAdd,
                 allowsEditing: true,
-                panelBlackHeight: model.blackHeight
+                panelBlackHeight: model.blackHeight,
+                onAddRailExpandedChange: { open in
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        model.setAddRailOpen(open)
+                    }
+                }
             )
-            .padding(.horizontal, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, showAdd ? 4 : 14)
             .padding(.top, 2)
             .padding(.bottom, 12)
+            .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.addRailOpen)
         }
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
@@ -150,7 +157,7 @@ struct IslandRootView: View {
         !DemoWidgets.isForced && accountStore.accounts.isEmpty
     }
 
-    /// Trailing + whenever under the 5-account cap (demo hides it).
+    /// Chevron + add rail whenever under the 5-account cap (demo hides it).
     private var showAdd: Bool {
         !DemoWidgets.isForced
             && accountStore.accounts.count < AccountStore.maxAccounts

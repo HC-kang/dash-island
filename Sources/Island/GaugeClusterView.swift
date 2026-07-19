@@ -60,48 +60,61 @@ struct GaugeClusterView: View {
         )
     }
 
-    var body: some View {
-        ZStack {
-            slotRow
+    /// Grows island black body when the add rail is revealed.
+    var onAddRailExpandedChange: ((Bool) -> Void)?
 
-            if showEmptyAdd && draggingID == nil {
-                CenteredAddButton { adapter in
-                    AccountChromeActions.beginAdd(adapter: adapter)
+    var body: some View {
+        HStack(spacing: 0) {
+            ZStack {
+                slotRow
+
+                if showEmptyAdd && draggingID == nil {
+                    CenteredAddButton { adapter in
+                        AccountChromeActions.beginAdd(adapter: adapter)
+                    }
+                }
+
+                if draggingID != nil {
+                    trashTarget
+                        .position(trashCenterLocal)
+                        .zIndex(50)
+                }
+
+                if let id = draggingID, let model = modelByID[id] {
+                    AccountWidget(model: model, isDragging: true, isDropTarget: false)
+                        .scaleEffect(magnetizedToTrash ? 0.68 : 1.07)
+                        .opacity(magnetizedToTrash ? 0.9 : 1)
+                        .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
+                        .position(floatCenter)
+                        .zIndex(100)
+                        .allowsHitTesting(false)
+                        .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
                 }
             }
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: Self.cellH + (draggingID != nil ? Self.trashOffsetY + 36 : 0))
+            .coordinateSpace(name: Self.dragSpace)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: ClusterSizeKey.self, value: geo.size)
+                }
+            )
+            .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
 
-            if showAdd && !showEmptyAdd && draggingID == nil {
-                trailingAdd
-            }
-
-            // Trash drawn IN this coordinate space (not overlay offset math).
-            if draggingID != nil {
-                trashTarget
-                    .position(trashCenterLocal)
-                    .zIndex(50)
-            }
-
-            if let id = draggingID, let model = modelByID[id] {
-                AccountWidget(model: model, isDragging: true, isDropTarget: false)
-                    .scaleEffect(magnetizedToTrash ? 0.68 : 1.07)
-                    .opacity(magnetizedToTrash ? 0.9 : 1)
-                    .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
-                    .position(floatCenter)
-                    .zIndex(100)
-                    .allowsHitTesting(false)
-                    .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
+            // Chevron → smooth right expand → slim add pocket.
+            if showAdd && draggingID == nil {
+                AddRail(
+                    onSelectVendor: { adapter in
+                        AccountChromeActions.beginAdd(adapter: adapter)
+                    },
+                    onExpandedChange: { open in
+                        onAddRailExpandedChange?(open)
+                    }
+                )
+                .padding(.trailing, 6)
+                .transition(.opacity)
             }
         }
-        // Extra height so trash + float below slots stay inside the view (and hit-testable area).
-        .frame(maxWidth: .infinity)
-        .frame(minHeight: Self.cellH + (draggingID != nil ? Self.trashOffsetY + 36 : 0))
-        .coordinateSpace(name: Self.dragSpace)
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: ClusterSizeKey.self, value: geo.size)
-            }
-        )
-        .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
         .onAppear { syncOrderFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
             guard draggingID == nil else { return }
@@ -109,6 +122,12 @@ struct GaugeClusterView: View {
         }
         .onChange(of: draggingID) { id in
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
+            if id != nil {
+                onAddRailExpandedChange?(false)
+            }
+        }
+        .onChange(of: showAdd) { can in
+            if !can { onAddRailExpandedChange?(false) }
         }
     }
 
@@ -152,24 +171,6 @@ struct GaugeClusterView: View {
         }
         .frame(width: AccountWidget.cellSize, height: Self.cellH)
         .contentShape(Rectangle())
-    }
-
-    private var trailingAdd: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Menu {
-                VendorMenuItems { adapter in
-                    AccountChromeActions.beginAdd(adapter: adapter)
-                }
-            } label: {
-                GlassPlusLabel(size: 32, symbolSize: 14)
-            }
-            .menuStyle(.borderlessButton)
-            .help("Add account")
-            .padding(.trailing, 6)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        .zIndex(5)
     }
 
     private var trashTarget: some View {

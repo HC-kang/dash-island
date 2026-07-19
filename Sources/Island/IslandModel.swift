@@ -13,6 +13,8 @@ final class IslandModel: ObservableObject {
     @Published private(set) var notch: NotchInfo
     @Published private(set) var size: CGSize
     @Published private(set) var expandedItemCount: Int = 0
+    /// Trailing add rail revealed by chevron hover (grows black body to the right).
+    @Published private(set) var addRailOpen: Bool = false
 
     private let expandedContentHeight: CGFloat = 124
     /// Transparent buffer so lifted widgets + trash can render past the black body.
@@ -23,6 +25,8 @@ final class IslandModel: ObservableObject {
     static let cellGap: CGFloat = 12
     static let horizontalPadding: CGFloat = 32
     static let maxItems: Int = 5
+    static let addChevronWidth: CGFloat = AddRail.chevronWidth
+    static let addRailWidth: CGFloat = AddRail.railWidth
 
     init(notch: NotchInfo = .detectPreferred()) {
         self.notch = notch
@@ -36,14 +40,20 @@ final class IslandModel: ObservableObject {
         }
     }
 
-    /// Black silhouette width (no bleed).
+    /// Black silhouette width (no bleed), including chevron + open add rail.
     var expandedContentWidth: CGFloat {
-        Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount)
+        Self.expandedWidth(
+            notchWidth: notch.width,
+            itemCount: expandedItemCount,
+            canAdd: expandedItemCount < Self.maxItems,
+            addRailOpen: addRailOpen
+        )
     }
 
     func setState(_ new: State) {
         guard new != state else { return }
         state = new
+        if new == .compact { addRailOpen = false }
         recomputeSize()
     }
 
@@ -57,6 +67,14 @@ final class IslandModel: ObservableObject {
         let c = min(Self.maxItems, max(0, count))
         guard c != expandedItemCount else { return }
         expandedItemCount = c
+        if c >= Self.maxItems { addRailOpen = false }
+        recomputeSize()
+    }
+
+    func setAddRailOpen(_ open: Bool) {
+        let capped = open && expandedItemCount < Self.maxItems
+        guard capped != addRailOpen else { return }
+        addRailOpen = capped
         recomputeSize()
     }
 
@@ -64,7 +82,7 @@ final class IslandModel: ObservableObject {
         if state == .compact {
             size = Self.compactSize(for: notch, rimPad: compactRimPad)
         } else {
-            let contentW = Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount)
+            let contentW = expandedContentWidth
             size = CGSize(
                 width: contentW + dragBleed * 2,
                 height: notch.height + expandedContentHeight + dragBleed
@@ -72,14 +90,23 @@ final class IslandModel: ObservableObject {
         }
     }
 
-    /// Floor at the 3-slot layout; 4–5 grow.
-    static func expandedWidth(notchWidth: CGFloat, itemCount: Int) -> CGFloat {
+    /// Floor at the 3-slot layout; 4–5 grow. Optional trailing add chrome.
+    static func expandedWidth(
+        notchWidth: CGFloat,
+        itemCount: Int,
+        canAdd: Bool = false,
+        addRailOpen: Bool = false
+    ) -> CGFloat {
         let n = min(maxItems, max(3, itemCount))
         let content =
             CGFloat(n) * cellSize
             + CGFloat(n - 1) * cellGap
             + horizontalPadding
-        return max(notchWidth, content)
+        let base = max(notchWidth, content)
+        guard canAdd else { return base }
+        // Chevron always when under cap; rail width only when revealed.
+        let trailing = addChevronWidth + (addRailOpen ? addRailWidth : 0)
+        return base + trailing
     }
 
     private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
