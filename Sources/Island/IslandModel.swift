@@ -24,11 +24,10 @@ final class IslandModel: ObservableObject {
     static let cellGap: CGFloat = 12
     static let horizontalPadding: CGFloat = 32
     static let maxItems: Int = 5
-    static let compactTabWidth: CGFloat = CompactVendorMarks.tabWidth
 
     init(notch: NotchInfo = .detectPreferred()) {
         self.notch = notch
-        self.size = Self.compactSize(for: notch, rimPad: 3, tabs: 0)
+        self.size = Self.compactSize(for: notch, rimPad: 3)
     }
 
     var blackHeight: CGFloat {
@@ -36,10 +35,6 @@ final class IslandModel: ObservableObject {
         case .compact: return notch.height
         case .expanded: return notch.height + expandedContentHeight
         }
-    }
-
-    var showsCompactTabs: Bool {
-        expandedItemCount > 0 || ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1"
     }
 
     func setState(_ new: State) {
@@ -56,19 +51,14 @@ final class IslandModel: ObservableObject {
 
     func setExpandedItemCount(_ count: Int) {
         let c = min(Self.maxItems, max(0, count))
-        guard c != expandedItemCount else {
-            // Still recompute compact tabs when count was already set but tabs flag changes.
-            recomputeSize()
-            return
-        }
+        guard c != expandedItemCount else { return }
         expandedItemCount = c
         recomputeSize()
     }
 
     func recomputeSize() {
         if state == .compact {
-            let tabs = showsCompactTabs ? Self.compactTabWidth * 2 : 0
-            size = Self.compactSize(for: notch, rimPad: compactRimPad, tabs: tabs)
+            size = Self.compactSize(for: notch, rimPad: compactRimPad)
         } else {
             size = CGSize(
                 width: Self.expandedWidth(notchWidth: notch.width, itemCount: expandedItemCount),
@@ -88,9 +78,9 @@ final class IslandModel: ObservableObject {
         return max(minW, content)
     }
 
-    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat, tabs: CGFloat) -> CGSize {
+    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
         CGSize(
-            width: max(notch.width + rimPad * 2, 80) + tabs,
+            width: max(notch.width + rimPad * 2, 80),
             height: notch.height + rimPad
         )
     }

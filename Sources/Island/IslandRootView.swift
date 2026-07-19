@@ -52,7 +52,7 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Compact
+    // MARK: - Compact (notch + flowing rim only)
 
     private var compactChrome: some View {
         let nw = model.notch.width
@@ -60,31 +60,15 @@ struct IslandRootView: View {
         let bodyW = nw + bodyOutset * 2
         let bodyH = nh + bodyOutset
         let radius = cornerRadius(forHeight: bodyH)
-        let tabs = model.showsCompactTabs
 
-        return ZStack(alignment: .top) {
-            if tabs {
-                CompactVendorMarks(
-                    tints: compactTints,
-                    notchWidth: bodyW,
-                    notchHeight: nh
-                )
-                .frame(width: model.size.width, height: nh, alignment: .top)
-            }
-
-            ZStack {
-                IslandShape(bottomRadius: radius)
-                    .fill(Color.black)
-                NotchRimPath(bottomRadius: radius)
-                    .stroke(
-                        rimGradient,
-                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
-                    )
-            }
-            .frame(width: bodyW, height: bodyH)
+        return ZStack {
+            IslandShape(bottomRadius: radius)
+                .fill(Color.black)
+            NotchRimGlow(bottomRadius: radius, lineWidth: 1.0, peakOpacity: 0.88, baseOpacity: 0.20)
         }
+        .frame(width: bodyW, height: bodyH)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .contentShape(Rectangle())
+        .contentShape(IslandShape(bottomRadius: radius))
         .onTapGesture {
             collapseTask?.cancel()
             model.setState(.expanded)
@@ -94,28 +78,23 @@ struct IslandRootView: View {
         .accessibilityValue(compactLabel)
     }
 
-    private var compactTints: [VendorTint] {
-        if DemoWidgets.isForced {
-            return [.claude, .codex]
-        }
-        var seen: [VendorTint] = []
-        for account in accountStore.accounts {
-            let t = UsageOrchestrator.tint(for: account.vendorID)
-            if !seen.contains(t) { seen.append(t) }
-            if seen.count == 2 { break }
-        }
-        if seen.isEmpty { return [.neutral] }
-        return seen
-    }
-
-    // MARK: - Expanded
+    // MARK: - Expanded (panel + same flowing rim)
 
     private var expandedChrome: some View {
-        let radius = cornerRadius(forHeight: model.notch.height)
-        return IslandShape(bottomRadius: min(26, radius + 8))
-            .fill(Color.black)
-            .frame(width: model.size.width, height: model.blackHeight)
-            .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+        let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
+        return ZStack {
+            IslandShape(bottomRadius: radius)
+                .fill(Color.black)
+            NotchRimGlow(
+                bottomRadius: radius,
+                lineWidth: 0.95,
+                peakOpacity: 0.72,
+                baseOpacity: 0.16,
+                period: 3.2
+            )
+        }
+        .frame(width: model.size.width, height: model.blackHeight)
+        .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
     }
 
     private var expandedContent: some View {
@@ -142,19 +121,6 @@ struct IslandRootView: View {
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
         min(16, max(11, h * 0.40))
-    }
-
-    private var rimGradient: LinearGradient {
-        LinearGradient(
-            stops: [
-                .init(color: Color.white.opacity(0.38), location: 0),
-                .init(color: Color.white.opacity(0.48), location: 0.4),
-                .init(color: Color.white.opacity(0.68), location: 0.85),
-                .init(color: Color.white.opacity(0.78), location: 1)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
     }
 
     private var compactLabel: String {
