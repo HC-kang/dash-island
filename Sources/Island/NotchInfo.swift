@@ -81,13 +81,17 @@ struct NotchInfo: Equatable {
         )
     }
 
+    /// Visual calibration: nudge the whole island right a hair so the rim
+    /// seats against the hardware cutout (aux gap is often 0.5–1pt left-biased).
+    static let positionNudgeX: CGFloat = 1.25
+
     /// Window origin X so the notch fill’s leading edge lands on `screenMinX`.
     func windowOriginX(windowWidth: CGFloat) -> CGFloat {
         if let minX = screenMinX {
             // Center the (possibly padded) window on the real notch strip.
-            return minX - (windowWidth - width) / 2
+            return minX - (windowWidth - width) / 2 + Self.positionNudgeX
         }
-        return screenMidX - windowWidth / 2
+        return screenMidX - windowWidth / 2 + Self.positionNudgeX
     }
 
     static func menuBarHeight(

@@ -10,9 +10,9 @@ struct IslandRootView: View {
     @State private var showPrefs = false
     @State private var collapseTask: Task<Void, Never>?
 
-    /// Rim sits this many points outside the black notch fill so L/R flanks
-    /// clear the hardware bezel and read against the menu bar.
-    private let rimOutset: CGFloat = 1.25
+    /// Grow the black body this far past the aux-reported notch so the
+    /// hairline rim sits *on* the body edge (no hollow gap to the desktop).
+    private let bodyOutset: CGFloat = 1.0
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -47,28 +47,26 @@ struct IslandRootView: View {
     private var compactNotchRim: some View {
         let nw = model.notch.width
         let nh = model.notch.height
-        let radius = cornerRadius(forHeight: nh)
-        // Rim path is outset so left/right flanks are outside the camera black.
-        let rimW = nw + rimOutset * 2
-        let rimH = nh + rimOutset
+        // Black body matches rim path exactly — fills the former hollow gap.
+        let bodyW = nw + bodyOutset * 2
+        let bodyH = nh + bodyOutset
+        let radius = cornerRadius(forHeight: bodyH)
 
-        return ZStack(alignment: .top) {
-            // Hardware dead-zone fill — exact notch size, pure black, no shadow.
+        return ZStack {
+            // Solid black under the full U, including under the stroke.
             IslandShape(bottomRadius: radius)
                 .fill(Color.black)
-                .frame(width: nw, height: nh)
-                .frame(width: rimW, height: rimH, alignment: .top)
 
-            // Hairline U: left + bottom + right, outside the fill.
-            NotchRimPath(bottomRadius: radius + rimOutset * 0.35)
+            // Hairline on the outer edge of that body (left + bottom + right).
+            NotchRimPath(bottomRadius: radius)
                 .stroke(
                     rimGradient,
                     style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
                 )
-                .frame(width: rimW, height: rimH)
         }
+        .frame(width: bodyW, height: bodyH)
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .contentShape(Rectangle())
+        .contentShape(IslandShape(bottomRadius: radius))
         .onTapGesture {
             collapseTask?.cancel()
             model.setState(.expanded)
