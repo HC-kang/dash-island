@@ -2,7 +2,10 @@ import AppKit
 import SwiftUI
 
 /// Fixed **slots** (default 3). Widgets sit in slots like macOS/iOS home-screen.
-/// Dragging lifts the widget onto the cursor; the home slot shows a gray skeleton.
+/// Drag lifts a floating copy onto the cursor; the home slot shows a gray skeleton.
+///
+/// Order is mutated only in local state while dragging — writing `AccountStore`
+/// mid-drag rebuilds the row and cancels the gesture (freeze bug).
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -11,25 +14,31 @@ struct GaugeClusterView: View {
     var allowsEditing: Bool = true
     var panelBlackHeight: CGFloat = 160
 
+    /// Stable order of account IDs for display (local while dragging).
+    @State private var orderIDs: [AccountID] = []
     @State private var draggingID: AccountID?
-    /// Global cursor during drag (for the floating lift layer).
+    /// Slot index the drag started from (skeleton home).
+    @State private var homeSlot: Int?
     @State private var dragGlobalPoint: CGPoint?
     @State private var inRemoveZone = false
-    @State private var clusterGlobalFrame: CGRect = .zero
     @State private var hoveredSlot: Int?
+    @State private var clusterGlobalFrame: CGRect = .zero
 
     private static let maxSlots = IslandModel.maxItems
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
 
-    /// Always at least 3 slots; grow to match accounts up to 5.
     private var slotCount: Int {
-        max(Self.minSlots, min(Self.maxSlots, max(widgets.count, showEmptyAdd ? 0 : widgets.count)))
+        let filled = max(orderIDs.count, widgets.count)
+        return max(Self.minSlots, min(Self.maxSlots, filled))
+    }
+
+    private var modelByID: [AccountID: WidgetViewModel] {
+        Dictionary(uniqueKeysWithValues: widgets.map { ($0.id, $0) })
     }
 
     var body: some View {
         ZStack {
-            // Always a slot chassis (min 3). Empty accounts = gray shells + center +.
             slotRow
 
             if showEmptyAdd && draggingID == nil {
@@ -42,9 +51,8 @@ struct GaugeClusterView: View {
                 trailingAdd
             }
 
-            // Lifted widget follows the mouse; home slot stays skeleton.
             if let id = draggingID,
-               let model = widgets.first(where: { $0.id == id }),
+               let model = modelByID[id],
                let point = dragGlobalPoint {
                 floatingWidget(model: model, globalPoint: point)
             }
@@ -59,6 +67,12 @@ struct GaugeClusterView: View {
             }
         )
         .onPreferenceChange(ClusterFrameKey.self) { clusterGlobalFrame = $0 }
+        .onAppear { syncOrderFromWidgets() }
+        .onChange(of: widgets.map(\.id)) { ids in
+            // Don't clobber local order mid-drag.
+            guard draggingID == nil else { return }
+            orderIDs = ids
+        }
         .overlay(alignment: .bottom) {
             if draggingID != nil {
                 removeStrip
@@ -70,6 +84,10 @@ struct GaugeClusterView: View {
         }
     }
 
+    private func syncOrderFromWidgets() {
+        orderIDs = widgets.map(\.id)
+    }
+
     // MARK: - Slots
 
     private var slotRow: some View {
@@ -79,34 +97,33 @@ struct GaugeClusterView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.86), value: widgets.map(\.id))
-        .animation(.easeOut(duration: 0.15), value: draggingID)
+        // Only animate slot occupancy when not dragging.
+        .animation(
+            draggingID == nil
+                ? .interactiveSpring(response: 0.3, dampingFraction: 0.86)
+                : nil,
+            value: orderIDs
+        )
     }
 
     @ViewBuilder
     private func slotCell(index: Int) -> some View {
-        let occupant = index < widgets.count ? widgets[index] : nil
-        let isHomeOfDrag = occupant?.id == draggingID
-        let isHoverTarget = hoveredSlot == index && draggingID != nil && !inRemoveZone
+        let occupantID: AccountID? = index < orderIDs.count ? orderIDs[index] : nil
+        let isHome = homeSlot == index && draggingID != nil
+        let isHover = hoveredSlot == index && draggingID != nil && !inRemoveZone
+        let showWidget = occupantID != nil && occupantID != draggingID
 
         ZStack {
-            // Always paint a slot chassis.
             SlotSkeleton(
-                highlighted: isHoverTarget,
-                empty: occupant == nil && !isHomeOfDrag
+                highlighted: isHover || isHome,
+                empty: occupantID == nil || isHome
             )
 
-            if let occupant, !isHomeOfDrag {
-                AccountWidget(model: occupant, isDragging: false, isDropTarget: isHoverTarget)
-                    .highPriorityGesture(allowsEditing ? dragGesture(for: occupant.id) : nil)
-            } else if isHomeOfDrag {
-                // Home slot while lifted — skeleton only (already drawn).
-                Color.clear
-            } else if showEmptyAdd || (showAdd && occupant == nil) {
-                // Empty slot acts as an add target when under cap.
-                Color.clear
-                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .onTapGesture { /* menu via overlay button if needed */ }
+            if showWidget, let oid = occupantID, let model = modelByID[oid] {
+                // Identity is tied to account id so reorder mid-session is fine
+                // *after* drag; during drag this view is not the drag source's twin.
+                AccountWidget(model: model, isDragging: false, isDropTarget: isHover)
+                    .highPriorityGesture(allowsEditing ? dragGesture(for: oid) : nil)
             }
         }
         .frame(width: AccountWidget.cellSize, height: AccountWidget.cellSize + 8)
@@ -144,65 +161,112 @@ struct GaugeClusterView: View {
             .allowsHitTesting(false)
     }
 
-    /// Drawn in an overlay using global→local conversion via preference + fixed position.
-    @ViewBuilder
     private func floatingWidget(model: WidgetViewModel, globalPoint: CGPoint) -> some View {
-        // Position relative to cluster: convert global → local of this ZStack.
         let local = CGPoint(
             x: globalPoint.x - clusterGlobalFrame.minX,
             y: globalPoint.y - clusterGlobalFrame.minY
         )
-        AccountWidget(model: model, isDragging: true, isDropTarget: false)
+        return AccountWidget(model: model, isDragging: true, isDropTarget: false)
             .scaleEffect(1.07)
             .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
-            .position(
-                x: local.x,
-                y: local.y
-            )
+            .position(x: local.x, y: local.y)
             .zIndex(100)
             .allowsHitTesting(false)
     }
 
-    // MARK: - Drag
+    // MARK: - Drag (local order only)
 
     private func dragGesture(for id: AccountID) -> some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .onChanged { value in
                 if draggingID == nil {
                     draggingID = id
+                    homeSlot = orderIDs.firstIndex(of: id)
+                    // Ensure orderIDs is populated.
+                    if orderIDs.isEmpty { syncOrderFromWidgets() }
                 }
                 guard draggingID == id else { return }
 
                 dragGlobalPoint = value.location
                 let remove = isInRemoveZone(value.location)
-                if remove != inRemoveZone { inRemoveZone = remove }
+                inRemoveZone = remove
 
-                if !remove {
-                    let slot = slotIndex(atGlobal: value.location)
-                    hoveredSlot = slot
-                    if let slot {
-                        try? AccountStore.shared.move(id: id, toIndex: slot)
-                    }
-                } else {
+                if remove {
                     hoveredSlot = nil
+                    return
+                }
+
+                if let slot = slotIndex(atGlobal: value.location) {
+                    hoveredSlot = slot
+                    // Local reorder only — do NOT touch AccountStore here.
+                    moveLocal(id: id, toIndex: slot)
                 }
             }
             .onEnded { value in
                 let remove = isInRemoveZone(value.location)
                 let dragged = id
+
                 if !remove, let slot = slotIndex(atGlobal: value.location) {
-                    try? AccountStore.shared.move(id: dragged, toIndex: slot)
+                    moveLocal(id: dragged, toIndex: slot)
                 }
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                    draggingID = nil
-                    dragGlobalPoint = nil
-                    inRemoveZone = false
-                    hoveredSlot = nil
-                }
+
+                let finalOrder = orderIDs
+                draggingID = nil
+                homeSlot = nil
+                dragGlobalPoint = nil
+                inRemoveZone = false
+                hoveredSlot = nil
+
                 if remove {
+                    // Restore store order if we had local moves, then confirm remove.
+                    // orderIDs may already reflect mid-drag moves — fine for index.
                     confirmRemove(id: dragged)
+                    // After cancel, resync from store; after confirm store is updated.
+                    syncOrderFromWidgets()
+                } else {
+                    // Commit local order once.
+                    try? AccountStore.shared.applyOrder(finalOrder)
+                    syncOrderFromWidgets()
                 }
             }
+    }
+
+    /// Reorder `orderIDs` without publishing to the store.
+    private func moveLocal(id: AccountID, toIndex: Int) {
+        guard let from = orderIDs.firstIndex(of: id) else { return }
+        let target = min(max(0, toIndex), max(orderIDs.count - 1, 0))
+        guard from != target else { return }
+        var next = orderIDs
+        let item = next.remove(at: from)
+        let insertAt = min(target, next.count)
+        // Map "desired final index" after removal:
+        var dest = target
+        if from < target { dest = target } // after remove, indices after `from` shift left
+        // Simpler: insert at `target` clamped to next.count
+        dest = min(max(0, target), next.count)
+        // When moving right, after remove the target index should be target (already shifted in array sense)
+        // Example: [A B C D], move A to index 2 → remove A → [B C D], insert at 2 → [B C A D]
+        if from < target {
+            dest = min(target, next.count) // target in original; after remove, slot `target` is at index target-1... 
+            // Standard: final position should be `target`
+            // remove from `from`, then insert at `target` if target < from, else at `target` after shift = target (because we want index target in final array)
+            // Final array index == target:
+            // after remove, insert at: target if from > target else target (wait)
+            // Swift Array move: 
+            // let item = a.remove(at: from); a.insert(item, at: to) where `to` is index in the post-remove array for final position `to` when to < from, or for final position `to` when to > from insert at to-? 
+            // If we want final index == T:
+            // remove at F, then if F < T, insert at T-1? No:
+            // [0:A,1:B,2:C], move 0 to 2: want [B,C,A]. remove 0 → [B,C], insert at 2 → [B,C,A]. insert index = 2 = T (T=2, F=0, F<T, insert at T? but count=2, insert at 2 = append. T after remove max is 2. insert(at:2) works. insert at T when F < T gives insert at 2 = end. Good.
+            // [A,B,C] move 2 to 0: want [C,A,B]. remove 2 → [A,B], insert at 0 → [C,A,B]. insert = T = 0. Good.
+            // [A,B,C] move 0 to 1: want [B,A,C]. remove 0 → [B,C], insert at 1 → [B,A,C]. insert = 1 = T. Good.
+            dest = min(target, next.count)
+        } else {
+            dest = min(target, next.count)
+        }
+        next.insert(item, at: dest)
+        if next != orderIDs {
+            orderIDs = next
+        }
     }
 
     private func slotIndex(atGlobal point: CGPoint) -> Int? {
@@ -215,12 +279,12 @@ struct GaugeClusterView: View {
             : (islandWindow()?.frame.midX ?? point.x)
         let leading = midX - rowW / 2
         let localX = point.x - leading
-        guard localX >= -cell * 0.35, localX <= rowW + cell * 0.35 else { return nil }
+        guard localX >= -cell * 0.4, localX <= rowW + cell * 0.4 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
-        // Don't target empty trailing slots past last widget + 1 (allow append).
-        let maxIndex = min(n - 1, max(widgets.count, 0))
-        return min(index, max(0, maxIndex))
+        // Cap to existing items range (can't land past last real item + empty only as empty).
+        let maxFilled = max(orderIDs.count - 1, 0)
+        return min(index, max(maxFilled, 0))
     }
 
     private func isInRemoveZone(_ globalPoint: CGPoint) -> Bool {
@@ -232,7 +296,6 @@ struct GaugeClusterView: View {
         if !wf.insetBy(dx: -12, dy: -12).contains(globalPoint) {
             return true
         }
-        // Below black expanded body (transparent overflow).
         let blackBottomY = wf.maxY - panelBlackHeight
         return globalPoint.y < blackBottomY - 2
     }
@@ -252,12 +315,12 @@ struct GaugeClusterView: View {
         if alert.runModal() == .alertFirstButtonReturn {
             try? AccountStore.shared.remove(id: id)
         }
+        syncOrderFromWidgets()
     }
 }
 
 // MARK: - Slot skeleton
 
-/// Gray chassis for empty slots and for a widget's home slot while lifted.
 struct SlotSkeleton: View {
     var highlighted: Bool = false
     var empty: Bool = true
@@ -282,7 +345,6 @@ struct SlotSkeleton: View {
                     )
             )
             .overlay {
-                // Soft inner disc hint (gauge silhouette).
                 Circle()
                     .strokeBorder(Color.white.opacity(highlighted ? 0.12 : 0.06), lineWidth: 4)
                     .frame(width: 56, height: 56)

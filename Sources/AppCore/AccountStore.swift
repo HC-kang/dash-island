@@ -89,6 +89,24 @@ final class AccountStore: ObservableObject {
         try persist()
     }
 
+    /// Replace order with an explicit id list (drag commit). Unknown ids ignored.
+    func applyOrder(_ ids: [AccountID]) throws {
+        let map = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
+        var next: [Account] = []
+        next.reserveCapacity(accounts.count)
+        for id in ids {
+            if let account = map[id] { next.append(account) }
+        }
+        // Append any that were missing from ids (safety).
+        for account in accounts where !ids.contains(account.id) {
+            next.append(account)
+        }
+        guard next.map(\.id) != accounts.map(\.id) else { return }
+        accounts = next
+        reindex()
+        try persist()
+    }
+
     /// After adapter `reauthenticate`, stamp auth time and optionally replace credential ref.
     func markAuthenticated(id: AccountID, credentialRef: CredentialRef? = nil) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
