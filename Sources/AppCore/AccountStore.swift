@@ -76,37 +76,14 @@ final class AccountStore: ObservableObject {
         try persist()
     }
 
-    /// Reorder by moving `id` to `toIndex` (0-based, clamped).
+    /// Move `id` so it ends at `toIndex` in the final array (0-based).
     func move(id: AccountID, toIndex: Int) throws {
         guard let from = accounts.firstIndex(where: { $0.id == id }) else { return }
+        let target = min(max(0, toIndex), accounts.count - 1)
+        guard from != target else { return }
         var list = accounts
         let item = list.remove(at: from)
-        let dest = min(max(0, toIndex), list.count)
-        list.insert(item, at: dest)
-        accounts = list
-        reindex()
-        try persist()
-    }
-
-    /// Insert `id` at the index currently occupied by `targetID`.
-    func move(id: AccountID, before targetID: AccountID) throws {
-        guard id != targetID,
-              accounts.contains(where: { $0.id == id }),
-              accounts.contains(where: { $0.id == targetID })
-        else { return }
-        var list = accounts
-        guard let from = list.firstIndex(where: { $0.id == id }) else { return }
-        let item = list.remove(at: from)
-        guard let insertAt = list.firstIndex(where: { $0.id == targetID }) else {
-            list.append(item)
-            accounts = list
-            reindex()
-            try persist()
-            return
-        }
-        list.insert(item, at: insertAt)
-        // Avoid no-op churn.
-        if list.map(\.id) == accounts.map(\.id) { return }
+        list.insert(item, at: target)
         accounts = list
         reindex()
         try persist()

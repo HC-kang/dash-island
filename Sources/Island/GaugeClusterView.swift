@@ -1,19 +1,23 @@
 import AppKit
 import SwiftUI
 
-/// Center-aligned account widgets + always-visible add when under cap.
-/// Drag to reorder (widget-style lift); release outside the island to remove.
+/// Account widgets + trailing add.
+/// - Drag **inside** the expanded panel → reorder (widget-style).
+/// - Drag to the **strip below** the black panel (or fully off-window) → remove confirm.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
     var showEmptyAdd: Bool = false
     var showAdd: Bool = false
     var allowsEditing: Bool = true
+    /// Expanded black body height (notch + content) for remove-zone math.
+    var panelBlackHeight: CGFloat = 160
 
     @State private var draggingID: AccountID?
     @State private var dragTranslation: CGSize = .zero
-    @State private var isOutsideDropZone = false
-    @State private var rowFrame: CGRect = .zero
+    /// Finger is in the below-panel remove strip (or off-window).
+    @State private var inRemoveZone = false
+    @State private var clusterGlobalFrame: CGRect = .zero
 
     private static let maxWidgets = IslandModel.maxItems
     private static let gap: CGFloat = IslandModel.cellGap
@@ -31,10 +35,6 @@ struct GaugeClusterView: View {
             if showAdd {
                 trailingAdd
             }
-
-            if isOutsideDropZone, draggingID != nil {
-                outsideRemoveHint
-            }
         }
         .frame(maxWidth: .infinity)
         .background(
@@ -45,7 +45,17 @@ struct GaugeClusterView: View {
                 )
             }
         )
-        .onPreferenceChange(ClusterFrameKey.self) { rowFrame = $0 }
+        .onPreferenceChange(ClusterFrameKey.self) { clusterGlobalFrame = $0 }
+        // Remove cue sits *under* the black panel, in the transparent overflow.
+        .overlay(alignment: .bottom) {
+            if draggingID != nil {
+                removeStrip
+                    .offset(y: 36)
+                    .opacity(inRemoveZone ? 1 : 0.55)
+                    .scaleEffect(inRemoveZone ? 1.04 : 0.98)
+                    .animation(.easeOut(duration: 0.14), value: inRemoveZone)
+            }
+        }
     }
 
     private var widgetRow: some View {
@@ -55,13 +65,19 @@ struct GaugeClusterView: View {
                 AccountWidget(
                     model: model,
                     isDragging: draggingID == model.id,
-                    isDropTarget: allowsEditing && draggingID != nil && draggingID != model.id
+                    isDropTarget: allowsEditing
+                        && draggingID != nil
+                        && draggingID != model.id
+                        && !inRemoveZone
                 )
-                .opacity(draggingID == model.id ? 0.92 : 1)
+                .opacity(draggingID == model.id ? 0.9 : 1)
                 .zIndex(draggingID == model.id ? 30 : 0)
                 .offset(draggingID == model.id ? dragTranslation : .zero)
-                .gesture(allowsEditing ? dragGesture(for: model.id) : nil)
-                .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: widgets.map(\.id))
+                .highPriorityGesture(allowsEditing ? dragGesture(for: model.id) : nil)
+                .animation(
+                    .interactiveSpring(response: 0.28, dampingFraction: 0.84),
+                    value: widgets.map(\.id)
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -83,23 +99,24 @@ struct GaugeClusterView: View {
             .padding(.trailing, 6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        // Keep + above drag previews but clickable.
         .zIndex(5)
+        .opacity(draggingID == nil ? 1 : 0.25)
+        .allowsHitTesting(draggingID == nil)
     }
 
-    private var outsideRemoveHint: some View {
-        VStack {
-            Spacer()
-            Label("Release to remove", systemImage: "trash")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(Capsule(style: .continuous).fill(Color.red.opacity(0.62)))
-                .padding(.bottom, 2)
-        }
-        .transition(.opacity)
-        .allowsHitTesting(false)
+    /// Lives below the expanded black body — teaches “throw away outside”.
+    private var removeStrip: some View {
+        Label("Release to remove", systemImage: "trash")
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.red.opacity(inRemoveZone ? 0.72 : 0.42))
+            )
+            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+            .allowsHitTesting(false)
     }
 
     // MARK: - Drag
@@ -107,65 +124,89 @@ struct GaugeClusterView: View {
     private func dragGesture(for id: AccountID) -> some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .onChanged { value in
-                if draggingID == nil {
-                    draggingID = id
-                }
+                if draggingID == nil { draggingID = id }
                 guard draggingID == id else { return }
+
                 dragTranslation = value.translation
-                let outside = isOutsideIsland(value.location)
-                if outside != isOutsideDropZone {
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        isOutsideDropZone = outside
-                    }
+                let remove = isInRemoveZone(value.location)
+                if remove != inRemoveZone {
+                    inRemoveZone = remove
                 }
-                if !outside {
-                    reorderIfNeeded(dragged: id, finger: value.location)
+
+                // Inside the panel → live reorder. Never delete here.
+                if !remove {
+                    reorderIfNeeded(dragged: id, fingerGlobal: value.location)
                 }
             }
             .onEnded { value in
-                let outside = isOutsideIsland(value.location)
+                let remove = isInRemoveZone(value.location)
                 let dragged = id
+                // Final reorder pass if still inside.
+                if !remove {
+                    reorderIfNeeded(dragged: dragged, fingerGlobal: value.location)
+                }
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                     dragTranslation = .zero
                     draggingID = nil
-                    isOutsideDropZone = false
+                    inRemoveZone = false
                 }
-                if outside {
+                // Delete only when released in the below-panel / off-window zone.
+                if remove {
                     confirmRemove(id: dragged)
                 }
             }
     }
 
-    /// Outside the island black body (global coords) → remove candidate.
-    private func isOutsideIsland(_ globalPoint: CGPoint) -> Bool {
-        // Prefer the Dash Island borderless window frame.
-        let islandWindows = NSApp.windows.filter {
-            $0.contentView is NSHostingView<IslandRootView> || String(describing: type(of: $0)).contains("Borderless")
+    /// Remove zone = below the black expanded body, or fully outside the island window.
+    private func isInRemoveZone(_ globalPoint: CGPoint) -> Bool {
+        guard let win = islandWindow() else {
+            // Fallback: below the cluster row.
+            return globalPoint.y < clusterGlobalFrame.minY - 8
+                || globalPoint.y > clusterGlobalFrame.maxY + 28
+                || globalPoint.x < clusterGlobalFrame.minX - 40
+                || globalPoint.x > clusterGlobalFrame.maxX + 40
         }
-        let win = islandWindows.first ?? NSApp.windows.first(where: { $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue })
-        guard let win else {
-            // Fallback: outside the measured cluster row.
-            return !rowFrame.insetBy(dx: -24, dy: -40).contains(globalPoint)
+
+        let wf = win.frame
+        // Entirely off the window → remove.
+        if !wf.insetBy(dx: -12, dy: -12).contains(globalPoint) {
+            return true
         }
-        // Black body ≈ top portion of window; use full window with small pad —
-        // leaving the window entirely is the clear "desktop drop" gesture.
-        return !win.frame.insetBy(dx: -6, dy: -6).contains(globalPoint)
+
+        // AppKit: y increases upward. Black body occupies the top `panelBlackHeight`.
+        let blackBottomY = wf.maxY - panelBlackHeight
+        // Transparent overflow under the black silhouette (plus a small band).
+        return globalPoint.y < blackBottomY - 2
     }
 
-    private func reorderIfNeeded(dragged: AccountID, finger: CGPoint) {
-        // Map finger X to index within the centered row frame.
-        guard rowFrame.width > 0, !widgets.isEmpty else { return }
+    private func islandWindow() -> NSWindow? {
+        NSApp.windows.first { $0 is BorderlessFloatingWindow }
+    }
+
+    private func reorderIfNeeded(dragged: AccountID, fingerGlobal: CGPoint) {
+        guard !widgets.isEmpty else { return }
         let n = widgets.count
         let cell = AccountWidget.cellSize
         let stride = cell + Self.gap
         let rowW = CGFloat(n) * cell + CGFloat(max(0, n - 1)) * Self.gap
-        let leading = rowFrame.midX - rowW / 2
-        let localX = finger.x - leading
-        var index = Int((localX / stride).rounded(.down))
+
+        // Prefer cluster geometry; fall back to window mid.
+        let midX: CGFloat
+        if clusterGlobalFrame.width > 1 {
+            midX = clusterGlobalFrame.midX
+        } else if let win = islandWindow() {
+            midX = win.frame.midX
+        } else {
+            return
+        }
+
+        let leading = midX - rowW / 2
+        let localX = fingerGlobal.x - leading
+        var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
-        let target = widgets[index].id
-        guard target != dragged else { return }
-        try? AccountStore.shared.move(id: dragged, before: target)
+
+        // Desired final index for the dragged item.
+        try? AccountStore.shared.move(id: dragged, toIndex: index)
     }
 
     private func confirmRemove(id: AccountID) {
