@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         AccountStore.shared.load()
+        UsageOrchestrator.shared.startAutoRefresh()
         island = IslandWindowController()
         island?.show()
     }

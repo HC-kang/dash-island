@@ -7,6 +7,7 @@ struct TestMain {
         var failures = 0
         failures += BurnRateSuite.run()
         failures += AccountsPersistenceSuite.run()
+        failures += OrchestratorDueSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

@@ -22,8 +22,8 @@ struct GaugeClusterView: View {
 
 @MainActor
 enum DemoWidgets {
-    /// Whether the island should render fake view models (no orchestrator yet,
-    /// or explicit `DASHISLAND_DEMO=1`).
+    /// Whether the island should render fake view models.
+    /// True when accounts are empty, or explicit `DASHISLAND_DEMO=1`.
     static func isEnabled(accountsEmpty: Bool) -> Bool {
         if ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1" {
             return true

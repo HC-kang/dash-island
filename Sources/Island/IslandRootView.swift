@@ -2,6 +2,7 @@ import SwiftUI
 
 struct IslandRootView: View {
     @ObservedObject private var accountStore = AccountStore.shared
+    @ObservedObject private var orchestrator = UsageOrchestrator.shared
 
     var body: some View {
         GaugeClusterView(widgets: widgets)
@@ -15,13 +16,12 @@ struct IslandRootView: View {
     }
 
     private var widgets: [WidgetViewModel] {
-        // Orchestrator lands in a later task; until then, demo fills the island.
+        // Empty accounts (or explicit DASHISLAND_DEMO=1) → demo gauges.
+        // Real accounts → orchestrator live view models.
         if DemoWidgets.isEnabled(accountsEmpty: accountStore.accounts.isEmpty) {
             return DemoWidgets.make()
         }
-        // Real accounts exist but no live VMs yet — keep chrome empty rather than
-        // mixing fake gauges with real account rows.
-        return []
+        return orchestrator.widgets
     }
 
     private var islandBackground: some View {
