@@ -27,3 +27,17 @@
 
 - Commit design or app code into codex-island for this product.
 - Introduce Electron, Rust core, or session-binding in v1.
+
+## Scaffold (Task 1)
+
+- arm64-only `build.sh` → `build/DashIsland.app`, bundle id `dev.dashisland.DashIsland`, LSUIElement, ad-hoc codesign.
+- Window: borderless clear floating at top-center of notched screen (`safeAreaInsets.top > 0`); level `.popUpMenu`; activation `.accessory`.
+- Sources: `App/App.swift`, `Island/{BorderlessFloatingWindow,IslandWindowController,IslandRootView}.swift`.
+
+## Domain (Task 2)
+
+- `Sources/Domain/`: Types, Account, UsageSnapshot (+UsageError), BurnRate, WidgetViewModel, VendorAdapter (+AddAccountResult).
+- Burn math locked: `ratio = v/v_cruise`; first sample ratio 0; negative Δ → 0.
+- Needle: `needleUnit = min(1, ratio/2)` → 0 rest, 1 cruise (0.5), ≥2 redline cap.
+- Tests: `scripts/run-tests.sh` compiles Domain + Tests only (no XCTest).
+- `.gitignore`: `build/`, `.DS_Store`, `.superpowers/`.
