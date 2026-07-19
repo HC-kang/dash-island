@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Fixed **slots** (default 3). Widgets sit in slots like macOS/iOS home-screen.
-/// Drag lifts a floating copy onto the cursor; the home slot shows a gray skeleton.
+/// Fixed slots (default 3). Drag lifts a floating copy; home slot shows skeleton.
 ///
-/// Order is mutated only in local state while dragging — writing `AccountStore`
-/// mid-drag rebuilds the row and cancels the gesture (freeze bug).
+/// Critical: the drag *source* view must stay mounted for the whole gesture.
+/// Hiding it with `if id != dragging` cancels DragGesture mid-flight.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -14,10 +13,8 @@ struct GaugeClusterView: View {
     var allowsEditing: Bool = true
     var panelBlackHeight: CGFloat = 160
 
-    /// Stable order of account IDs for display (local while dragging).
     @State private var orderIDs: [AccountID] = []
     @State private var draggingID: AccountID?
-    /// Slot index the drag started from (skeleton home).
     @State private var homeSlot: Int?
     @State private var dragGlobalPoint: CGPoint?
     @State private var inRemoveZone = false
@@ -69,9 +66,15 @@ struct GaugeClusterView: View {
         .onPreferenceChange(ClusterFrameKey.self) { clusterGlobalFrame = $0 }
         .onAppear { syncOrderFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
-            // Don't clobber local order mid-drag.
             guard draggingID == nil else { return }
             orderIDs = ids
+        }
+        // Tell the window to keep receiving mouse events for the full frame while dragging.
+        .onChange(of: draggingID) { id in
+            NotificationCenter.default.post(
+                name: .dashIslandDragActive,
+                object: id != nil
+            )
         }
         .overlay(alignment: .bottom) {
             if draggingID != nil {
@@ -97,21 +100,14 @@ struct GaugeClusterView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        // Only animate slot occupancy when not dragging.
-        .animation(
-            draggingID == nil
-                ? .interactiveSpring(response: 0.3, dampingFraction: 0.86)
-                : nil,
-            value: orderIDs
-        )
     }
 
     @ViewBuilder
     private func slotCell(index: Int) -> some View {
         let occupantID: AccountID? = index < orderIDs.count ? orderIDs[index] : nil
-        let isHome = homeSlot == index && draggingID != nil
+        let isHome = (homeSlot == index && draggingID != nil)
+            || (occupantID != nil && occupantID == draggingID)
         let isHover = hoveredSlot == index && draggingID != nil && !inRemoveZone
-        let showWidget = occupantID != nil && occupantID != draggingID
 
         ZStack {
             SlotSkeleton(
@@ -119,14 +115,19 @@ struct GaugeClusterView: View {
                 empty: occupantID == nil || isHome
             )
 
-            if showWidget, let oid = occupantID, let model = modelByID[oid] {
-                // Identity is tied to account id so reorder mid-session is fine
-                // *after* drag; during drag this view is not the drag source's twin.
-                AccountWidget(model: model, isDragging: false, isDropTarget: isHover)
-                    .highPriorityGesture(allowsEditing ? dragGesture(for: oid) : nil)
+            // Keep the widget view mounted while dragging so the gesture is not cancelled.
+            if let oid = occupantID, let model = modelByID[oid] {
+                AccountWidget(
+                    model: model,
+                    isDragging: false,
+                    isDropTarget: isHover && oid != draggingID
+                )
+                .opacity(oid == draggingID ? 0.001 : 1) // nearly invisible, still hit-testable source
+                .gesture(allowsEditing ? dragGesture(for: oid) : nil)
             }
         }
         .frame(width: AccountWidget.cellSize, height: AccountWidget.cellSize + 8)
+        .contentShape(Rectangle())
     }
 
     private var trailingAdd: some View {
@@ -162,10 +163,8 @@ struct GaugeClusterView: View {
     }
 
     private func floatingWidget(model: WidgetViewModel, globalPoint: CGPoint) -> some View {
-        let local = CGPoint(
-            x: globalPoint.x - clusterGlobalFrame.minX,
-            y: globalPoint.y - clusterGlobalFrame.minY
-        )
+        let origin = clusterGlobalFrame.origin
+        let local = CGPoint(x: globalPoint.x - origin.x, y: globalPoint.y - origin.y)
         return AccountWidget(model: model, isDragging: true, isDropTarget: false)
             .scaleEffect(1.07)
             .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
@@ -174,16 +173,16 @@ struct GaugeClusterView: View {
             .allowsHitTesting(false)
     }
 
-    // MARK: - Drag (local order only)
+    // MARK: - Drag
 
     private func dragGesture(for id: AccountID) -> some Gesture {
-        DragGesture(minimumDistance: 6, coordinateSpace: .global)
+        DragGesture(minimumDistance: 4, coordinateSpace: .global)
             .onChanged { value in
                 if draggingID == nil {
+                    if orderIDs.isEmpty { syncOrderFromWidgets() }
                     draggingID = id
                     homeSlot = orderIDs.firstIndex(of: id)
-                    // Ensure orderIDs is populated.
-                    if orderIDs.isEmpty { syncOrderFromWidgets() }
+                    NotificationCenter.default.post(name: .dashIslandDragActive, object: true)
                 }
                 guard draggingID == id else { return }
 
@@ -198,7 +197,6 @@ struct GaugeClusterView: View {
 
                 if let slot = slotIndex(atGlobal: value.location) {
                     hoveredSlot = slot
-                    // Local reorder only — do NOT touch AccountStore here.
                     moveLocal(id: id, toIndex: slot)
                 }
             }
@@ -211,66 +209,46 @@ struct GaugeClusterView: View {
                 }
 
                 let finalOrder = orderIDs
+
                 draggingID = nil
                 homeSlot = nil
                 dragGlobalPoint = nil
                 inRemoveZone = false
                 hoveredSlot = nil
+                NotificationCenter.default.post(name: .dashIslandDragActive, object: false)
 
                 if remove {
-                    // Restore store order if we had local moves, then confirm remove.
-                    // orderIDs may already reflect mid-drag moves — fine for index.
                     confirmRemove(id: dragged)
-                    // After cancel, resync from store; after confirm store is updated.
                     syncOrderFromWidgets()
                 } else {
-                    // Commit local order once.
                     try? AccountStore.shared.applyOrder(finalOrder)
-                    syncOrderFromWidgets()
+                    // Demo IDs won't be in the store — keep local order either way.
+                    if !DemoWidgets.isForced {
+                        syncOrderFromWidgets()
+                    }
                 }
             }
     }
 
-    /// Reorder `orderIDs` without publishing to the store.
     private func moveLocal(id: AccountID, toIndex: Int) {
         guard let from = orderIDs.firstIndex(of: id) else { return }
-        let target = min(max(0, toIndex), max(orderIDs.count - 1, 0))
+        guard !orderIDs.isEmpty else { return }
+        let target = min(max(0, toIndex), orderIDs.count - 1)
         guard from != target else { return }
         var next = orderIDs
         let item = next.remove(at: from)
-        let insertAt = min(target, next.count)
-        // Map "desired final index" after removal:
-        var dest = target
-        if from < target { dest = target } // after remove, indices after `from` shift left
-        // Simpler: insert at `target` clamped to next.count
-        dest = min(max(0, target), next.count)
-        // When moving right, after remove the target index should be target (already shifted in array sense)
-        // Example: [A B C D], move A to index 2 → remove A → [B C D], insert at 2 → [B C A D]
-        if from < target {
-            dest = min(target, next.count) // target in original; after remove, slot `target` is at index target-1... 
-            // Standard: final position should be `target`
-            // remove from `from`, then insert at `target` if target < from, else at `target` after shift = target (because we want index target in final array)
-            // Final array index == target:
-            // after remove, insert at: target if from > target else target (wait)
-            // Swift Array move: 
-            // let item = a.remove(at: from); a.insert(item, at: to) where `to` is index in the post-remove array for final position `to` when to < from, or for final position `to` when to > from insert at to-? 
-            // If we want final index == T:
-            // remove at F, then if F < T, insert at T-1? No:
-            // [0:A,1:B,2:C], move 0 to 2: want [B,C,A]. remove 0 → [B,C], insert at 2 → [B,C,A]. insert index = 2 = T (T=2, F=0, F<T, insert at T? but count=2, insert at 2 = append. T after remove max is 2. insert(at:2) works. insert at T when F < T gives insert at 2 = end. Good.
-            // [A,B,C] move 2 to 0: want [C,A,B]. remove 2 → [A,B], insert at 0 → [C,A,B]. insert = T = 0. Good.
-            // [A,B,C] move 0 to 1: want [B,A,C]. remove 0 → [B,C], insert at 1 → [B,A,C]. insert = 1 = T. Good.
-            dest = min(target, next.count)
-        } else {
-            dest = min(target, next.count)
-        }
+        // Final index == target
+        let dest = min(max(0, target), next.count)
         next.insert(item, at: dest)
         if next != orderIDs {
             orderIDs = next
+            homeSlot = next.firstIndex(of: id)
         }
     }
 
     private func slotIndex(atGlobal point: CGPoint) -> Int? {
         let n = slotCount
+        guard n > 0 else { return nil }
         let cell = AccountWidget.cellSize
         let stride = cell + Self.gap
         let rowW = CGFloat(n) * cell + CGFloat(max(0, n - 1)) * Self.gap
@@ -279,23 +257,24 @@ struct GaugeClusterView: View {
             : (islandWindow()?.frame.midX ?? point.x)
         let leading = midX - rowW / 2
         let localX = point.x - leading
-        guard localX >= -cell * 0.4, localX <= rowW + cell * 0.4 else { return nil }
+        guard localX >= -cell * 0.45, localX <= rowW + cell * 0.45 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
-        // Cap to existing items range (can't land past last real item + empty only as empty).
-        let maxFilled = max(orderIDs.count - 1, 0)
-        return min(index, max(maxFilled, 0))
+        if orderIDs.isEmpty { return index }
+        return min(index, orderIDs.count - 1)
     }
 
     private func isInRemoveZone(_ globalPoint: CGPoint) -> Bool {
         guard let win = islandWindow() else {
-            return globalPoint.y < clusterGlobalFrame.minY - 12
-                || globalPoint.y > clusterGlobalFrame.maxY + 32
+            return globalPoint.y > clusterGlobalFrame.maxY + 24
+                || globalPoint.y < clusterGlobalFrame.minY - 16
         }
         let wf = win.frame
-        if !wf.insetBy(dx: -12, dy: -12).contains(globalPoint) {
+        // Fully off window
+        if !wf.insetBy(dx: -16, dy: -16).contains(globalPoint) {
             return true
         }
+        // Below black body (AppKit y↑)
         let blackBottomY = wf.maxY - panelBlackHeight
         return globalPoint.y < blackBottomY - 2
     }
@@ -305,6 +284,12 @@ struct GaugeClusterView: View {
     }
 
     private func confirmRemove(id: AccountID) {
+        // Demo rows are not in AccountStore.
+        guard AccountStore.shared.accounts.contains(where: { $0.id == id }) else {
+            // Local-only demo: drop from orderIDs
+            orderIDs.removeAll { $0 == id }
+            return
+        }
         let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? "this account"
         let alert = NSAlert()
         alert.messageText = "Remove \(label)?"
@@ -358,6 +343,10 @@ private struct ClusterFrameKey: PreferenceKey {
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
     }
+}
+
+extension Notification.Name {
+    static let dashIslandDragActive = Notification.Name("dashIslandDragActive")
 }
 
 // MARK: - Demo data

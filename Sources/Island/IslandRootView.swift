@@ -116,7 +116,7 @@ struct IslandRootView: View {
                 accountCount: accountStore.accounts.count,
                 showEmptyAdd: showEmptyAdd,
                 showAdd: showAdd,
-                allowsEditing: !DemoWidgets.isForced,
+                allowsEditing: true,
                 panelBlackHeight: model.blackHeight
             )
             .padding(.horizontal, 14)

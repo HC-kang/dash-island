@@ -13,6 +13,9 @@ final class IslandWindowController {
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var spaceRevealTask: Task<Void, Never>?
+    private var dragActiveObserver: NSObjectProtocol?
+    /// While true, the full window receives mouse events so drags aren't killed.
+    private var dragActive = false
 
     init() {
         let notch = NotchInfo.detectPreferred()
@@ -70,6 +73,7 @@ final class IslandWindowController {
         window.orderFrontRegardless()
         observeScreenChanges()
         observeSpaceChanges()
+        observeDragActive()
         installMouseTracking()
     }
 
@@ -80,9 +84,26 @@ final class IslandWindowController {
         if let observer = spaceChangeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        if let observer = dragActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         spaceRevealTask?.cancel()
         if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
         if let m = localMouseMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    private func observeDragActive() {
+        dragActiveObserver = NotificationCenter.default.addObserver(
+            forName: .dashIslandDragActive,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                self?.dragActive = (note.object as? Bool) ?? false
+                // Immediately re-evaluate hit testing for the drag.
+                self?.updateMouseEventPassthrough()
+            }
+        }
     }
 
     private func observeScreenChanges() {
@@ -186,10 +207,19 @@ final class IslandWindowController {
             window.ignoresMouseEvents = true
             return
         }
+        // During widget drag the finger often leaves the black body (remove zone /
+        // slot edges). If we ignore events there, DragGesture freezes.
+        if dragActive {
+            window.ignoresMouseEvents = false
+            return
+        }
         let mouse = NSEvent.mouseLocation
         let wf = window.frame
         let hitW = model.state == .compact ? model.notch.width + 6 : model.size.width
-        let hitH = model.blackHeight + (model.state == .compact ? 3 : 0)
+        // Expanded: include full window height (tooltip / remove strip overflow).
+        let hitH = model.state == .compact
+            ? model.blackHeight + 3
+            : model.size.height
         let hit = NSRect(
             x: wf.midX - hitW / 2,
             y: wf.maxY - hitH,
