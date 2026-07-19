@@ -221,26 +221,27 @@ struct GaugeClusterView: View {
                     y: liftOrigin.y + value.translation.height
                 )
                 let nearTrash = isNearTrashLocal(finger)
-                let dropSlot = nearTrash ? nil : (slotIndexAt(localX: finger.x) ?? targetSlot)
+                // Prefer last highlighted slot from onChanged; recompute as fallback.
+                let dropSlot = nearTrash
+                    ? nil
+                    : (targetSlot ?? slotIndexAt(localX: finger.x))
                 let dragged = id
-                let from = homeSlot
+                let from = homeSlot ?? orderIDs.firstIndex(of: dragged)
 
                 draggingID = nil
                 homeSlot = nil
                 dragTranslation = .zero
+                let committedTarget = dropSlot
                 targetSlot = nil
                 magnetizedToTrash = false
 
                 if nearTrash {
                     confirmRemove(id: dragged)
-                    syncOrderFromWidgets()
                     return
                 }
 
-                if let dropSlot, let from {
+                if let dropSlot = committedTarget, let from {
                     commitMove(id: dragged, from: from, to: dropSlot)
-                } else {
-                    syncOrderFromWidgets()
                 }
             }
     }
@@ -282,17 +283,28 @@ struct GaugeClusterView: View {
     }
 
     private func commitMove(id: AccountID, from: Int, to: Int) {
-        guard from != to, from < orderIDs.count else {
-            syncOrderFromWidgets()
-            return
-        }
-        var next = orderIDs
-        let item = next.remove(at: from)
+        guard from != to else { return }
+
+        // Build next order from current orderIDs (or widgets if empty).
+        var next = orderIDs.isEmpty ? widgets.map(\.id) : orderIDs
+        guard let fromIdx = next.firstIndex(of: id) else { return }
+        let item = next.remove(at: fromIdx)
         let dest = min(max(0, to), next.count)
         next.insert(item, at: dest)
+
+        // Optimistic UI first — never immediately re-sync from widgets (race:
+        // orchestrator still holds pre-reorder order for a tick).
         orderIDs = next
-        try? AccountStore.shared.applyOrder(next)
-        if !DemoWidgets.isForced {
+
+        if DemoWidgets.isForced {
+            // Demo rows aren't in AccountStore; local orderIDs is source of truth.
+            return
+        }
+
+        do {
+            try AccountStore.shared.applyOrder(next)
+        } catch {
+            // Roll back visual order on failure.
             syncOrderFromWidgets()
         }
     }

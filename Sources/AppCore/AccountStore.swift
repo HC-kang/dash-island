@@ -101,10 +101,15 @@ final class AccountStore: ObservableObject {
         for account in accounts where !ids.contains(account.id) {
             next.append(account)
         }
-        guard next.map(\.id) != accounts.map(\.id) else { return }
+        let before = accounts.map(\.id)
+        let after = next.map(\.id)
+        guard after != before else { return }
+        // Assign a fresh array so @Published always notifies (even if Equatable tricks).
         accounts = next
         reindex()
         try persist()
+        // Ensure observers see the final sortIndex values.
+        accounts = accounts
     }
 
     /// After adapter `reauthenticate`, stamp auth time and optionally replace credential ref.

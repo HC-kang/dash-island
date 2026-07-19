@@ -59,6 +59,7 @@ final class UsageOrchestrator: ObservableObject {
         accountStore.$accounts
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
+                // Always rebuild so reorder (same set, new order) is reflected.
                 self?.onAccountsChanged()
             }
             .store(in: &cancellables)

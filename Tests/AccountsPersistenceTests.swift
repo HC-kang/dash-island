@@ -149,6 +149,33 @@ enum AccountsPersistenceSuite {
             try assertTrue(other >= 0 && other < 1, "fraction in 0..<1, got \(other)")
         }
 
+        failures += check("AccountStore applyOrder reorders and persists") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let fileURL = dir.appendingPathComponent("accounts.json")
+            let persistence = AccountsPersistence(fileURL: fileURL)
+
+            let idA = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
+            let idB = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
+            let idC = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!
+
+            try runOnMain {
+                let store = AccountStore(persistence: persistence)
+                try store.add(Account(id: idA, vendorID: "fake", label: "A", credentialRef: idA.uuidString, sortIndex: 0, createdAt: Date(), lastAuthenticatedAt: nil))
+                try store.add(Account(id: idB, vendorID: "fake", label: "B", credentialRef: idB.uuidString, sortIndex: 1, createdAt: Date(), lastAuthenticatedAt: nil))
+                try store.add(Account(id: idC, vendorID: "fake", label: "C", credentialRef: idC.uuidString, sortIndex: 2, createdAt: Date(), lastAuthenticatedAt: nil))
+                try store.applyOrder([idC, idA, idB])
+                try assertEqual(store.accounts.map(\.id), [idC, idA, idB])
+                try assertEqual(store.accounts.map(\.sortIndex), [0, 1, 2])
+            }
+
+            try runOnMain {
+                let reloaded = AccountStore(persistence: persistence)
+                reloaded.load()
+                try assertEqual(reloaded.accounts.map(\.id), [idC, idA, idB])
+            }
+        }
+
         return failures
     }
 
