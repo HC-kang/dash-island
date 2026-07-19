@@ -30,7 +30,9 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.backgroundColor = .black
         panel.isFloatingPanel = true
-        panel.level = .floating
+        // Island uses `.popUpMenu`. Floating is *below* that, so prefs opened
+        // under the expanded HUD and looked empty. Sit clearly above the island.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
@@ -44,22 +46,21 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
     func show() {
         NSApp.activate(ignoringOtherApps: true)
         guard let window else { return }
-        if !window.isVisible {
-            // Place near the top-center under the island, not covering it hard.
-            if let screen = NotchInfo.preferredScreen() {
-                let f = screen.visibleFrame
-                let size = window.frame.size
-                let x = f.midX - size.width / 2
-                let y = f.maxY - size.height - 56
-                window.setFrameOrigin(NSPoint(x: x, y: y))
-            } else {
-                window.center()
-            }
+        // Center in the visible frame — never tuck under the notch island.
+        if let screen = NotchInfo.preferredScreen() {
+            let f = screen.visibleFrame
+            let size = window.frame.size
+            let x = f.midX - size.width / 2
+            let y = f.midY - size.height / 2
+            window.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        } else {
+            window.center()
         }
         isOpen = true
         NotificationCenter.default.post(name: .dashIslandPrefsOpenChanged, object: true)
         showWindow(nil)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     override func close() {
