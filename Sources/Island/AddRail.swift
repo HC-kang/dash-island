@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Trailing chevron that expands a slim “+” rail on hover.
-/// The whole chevron+rail strip keeps the rail open while the pointer is over it.
+/// Trailing chevron that expands a slim dashed skeleton pocket with a centered `+`.
 struct AddRail: View {
     var onSelectVendor: (any VendorAdapter) -> Void
     var onExpandedChange: (Bool) -> Void
@@ -11,44 +10,37 @@ struct AddRail: View {
     @State private var closeTask: Task<Void, Never>?
 
     static let chevronWidth: CGFloat = 16
-    /// ~⅓ of a 100pt slot.
+    /// ~⅓ of a 100pt slot — narrow dashed chassis for the add pocket.
     static let railWidth: CGFloat = 36
     static var totalExpandedWidth: CGFloat { chevronWidth + railWidth }
 
     private static let closeGraceNanos: UInt64 = 280_000_000
+    private static let cellH = AccountWidget.cellSize + 8
 
     var body: some View {
         HStack(spacing: 0) {
             Image(systemName: "chevron.compact.right")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(stripHovered || expanded ? 0.55 : 0.28))
-                .frame(width: Self.chevronWidth, height: AccountWidget.cellSize + 8)
+                .frame(width: Self.chevronWidth, height: Self.cellH)
 
             ZStack {
                 if expanded {
-                    // Plus only — no "Add" caption, no menu disclosure chevron.
+                    // Narrow dashed skeleton (slot-style, slim width) + plus only.
                     Menu {
                         VendorMenuItems(onSelect: onSelectVendor)
                     } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.75))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.white.opacity(0.06))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .strokeBorder(
-                                                Color.white.opacity(0.12),
-                                                style: StrokeStyle(lineWidth: 1, dash: [4, 3])
-                                            )
-                                    )
-                            )
+                        ZStack {
+                            SlimAddSkeleton()
+                            Image(systemName: "plus")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.72))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 10)
                     .padding(.trailing, 2)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
@@ -56,7 +48,6 @@ struct AddRail: View {
             .frame(width: expanded ? Self.railWidth : 0, alignment: .leading)
             .clipped()
         }
-        // Entire strip (chevron + open rail) is one hover surface.
         .contentShape(Rectangle())
         .onHover { hovering in
             stripHovered = hovering
@@ -95,7 +86,6 @@ struct AddRail: View {
         closeTask = Task {
             try? await Task.sleep(nanoseconds: Self.closeGraceNanos)
             guard !Task.isCancelled else { return }
-            // Only collapse if the pointer still isn't on the strip.
             if !stripHovered {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
                     expanded = false
@@ -107,5 +97,36 @@ struct AddRail: View {
     private func cancelClose() {
         closeTask?.cancel()
         closeTask = nil
+    }
+}
+
+/// Compact dashed chassis matching slot skeletons, sized for the slim add rail.
+private struct SlimAddSkeleton: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.055),
+                        Color.white.opacity(0.03)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        Color.white.opacity(0.14),
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                    )
+            )
+            .overlay {
+                // Mini gauge ring hint, scaled to narrow width.
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 3)
+                    .frame(width: 22, height: 22)
+                    .offset(y: -4)
+            }
     }
 }
