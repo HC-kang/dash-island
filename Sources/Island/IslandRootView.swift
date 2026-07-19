@@ -28,10 +28,14 @@ struct IslandRootView: View {
         }
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.state)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.size.width)
         .onHover { handleHover($0) }
         .sheet(isPresented: $showPrefs) {
             PrefsSheet(preferences: preferences)
         }
+        .onAppear { syncExpandedItemCount() }
+        .onChange(of: accountStore.accounts.count) { _ in syncExpandedItemCount() }
+        .onChange(of: orchestrator.widgets.count) { _ in syncExpandedItemCount() }
         .onChange(of: showPrefs) { open in
             if open {
                 collapseTask?.cancel()
@@ -39,6 +43,15 @@ struct IslandRootView: View {
             } else if model.state == .expanded {
                 scheduleCollapse()
             }
+        }
+    }
+
+    /// 0 when empty-add; otherwise visible widget count (demo or live).
+    private func syncExpandedItemCount() {
+        if showEmptyAdd {
+            model.setExpandedItemCount(0)
+        } else {
+            model.setExpandedItemCount(widgets.count)
         }
     }
 

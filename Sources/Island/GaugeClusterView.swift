@@ -10,8 +10,8 @@ struct GaugeClusterView: View {
     /// When true, show right-edge dwell chevron/`+` (1…4 accounts, non-demo).
     var showEdgeChrome: Bool = false
 
-    private static let maxWidgets = 5
-    private static let gap: CGFloat = 12
+    private static let maxWidgets = IslandModel.maxItems
+    private static let gap: CGFloat = IslandModel.cellGap
 
     var body: some View {
         ZStack {

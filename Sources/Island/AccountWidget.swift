@@ -7,7 +7,7 @@ struct AccountWidget: View {
     @State private var isHovered = false
 
     /// Outer cell size (gauge sits inside with padding).
-    static let cellSize: CGFloat = 100
+    static let cellSize: CGFloat = IslandModel.cellSize
     private static let gaugeSize: CGFloat = 84
 
     var body: some View {
