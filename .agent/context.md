@@ -28,6 +28,16 @@
 - Commit design or app code into codex-island for this product.
 - Introduce Electron, Rust core, or session-binding in v1.
 
+## Implementation progress (2026-07-19)
+
+Branch `feat/v1-implementation` — plan tasks 1–10 landed via subagent-driven development.
+
+- Scaffold + domain + accounts + gauges + orchestrator + add chrome
+- Adapters: Fake, Claude (read-only OAuth usage), Codex (wham/usage), Grok (cli-chat-proxy billing; no live verify)
+- Prefs sheet: used/remaining + 5/15/30 poll
+- Demo: `DASHISLAND_DEMO=1` only (empty → centered +)
+- Grok concern: contract from Orca; no live HTTP probe this session
+
 ## Scaffold (Task 1)
 
 - arm64-only `build.sh` → `build/DashIsland.app`, bundle id `dev.dashisland.DashIsland`, LSUIElement, ad-hoc codesign.
@@ -107,3 +117,11 @@
 - Usage: `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` then monthly fallback `/v1/billing`. Headers: Bearer + `X-XAI-Token-Auth: xai-grok-cli` + optional `x-userid`.
 - Map: `creditUsagePercent` ÷100 → primary; confirmed weekly with omitted % → 0; monthly `used.val/monthlyLimit.val` when weekly absent; `subscriptionTier` → plan.
 - 401/403 → `.authRequired`, 429 → `.rateLimited`. Parse tests in `Tests/GrokAdapterTests.swift`.
+
+## Prefs + polish (Task 10)
+
+- `PrefsSheet`: display mode (used|remaining) + poll interval segmented 5/15/30 min; binds `PreferencesStore.shared`.
+- Quiet gear bottom-leading of island chrome → sheet; activates app so sheet can key.
+- Gauge rings/needle spring settle (`response: 0.55`, `dampingFraction: 0.88`) via drawn state; first paint snaps.
+- Demo env unchanged: `DASHISLAND_DEMO=1`, optional `DASHISLAND_DEMO_COUNT` ∈ {1,3,5}.
+- README: build/run/demo/tests.
