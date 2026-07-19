@@ -112,19 +112,15 @@ final class IslandWindowController {
 
     private func updateMouseEventPassthrough() {
         let mouse = NSEvent.mouseLocation
-        // Hit the black silhouette only (not the full transparent tooltip tail).
-        let blackH = model.blackHeight
         let wf = window.frame
-        let blackFrame = NSRect(
-            x: wf.midX - silhouetteWidth / 2,
-            y: wf.maxY - blackH,
-            width: silhouetteWidth,
-            height: blackH
-        ).insetBy(dx: -3, dy: -2)
-        window.ignoresMouseEvents = !blackFrame.contains(mouse)
-    }
-
-    private var silhouetteWidth: CGFloat {
-        model.state == .compact ? model.notch.width : model.size.width
+        let hitW = model.state == .compact ? model.notch.width : model.size.width
+        let hitH = model.blackHeight
+        let hit = NSRect(
+            x: wf.midX - hitW / 2,
+            y: wf.maxY - hitH,
+            width: hitW,
+            height: hitH
+        ).insetBy(dx: -2, dy: -2)
+        window.ignoresMouseEvents = !hit.contains(mouse)
     }
 }

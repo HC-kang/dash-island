@@ -12,27 +12,14 @@ struct IslandRootView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // Black silhouette only — never fills the transparent tooltip tail.
-            silhouette
-                .frame(width: silhouetteWidth, height: model.blackHeight)
-                .frame(maxWidth: .infinity, alignment: .top)
-
             if model.state == .expanded {
+                expandedChrome
+                    .transition(.opacity)
                 expandedContent
                     .transition(.opacity.combined(with: .offset(y: -6)))
             } else {
-                // Hit target + a11y over the notch silhouette (no hanging pill).
-                Color.clear
-                    .frame(width: silhouetteWidth, height: model.notch.height)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                    .contentShape(IslandShape(bottomRadius: cornerRadius))
-                    .onTapGesture {
-                        collapseTask?.cancel()
-                        model.setState(.expanded)
-                    }
-                    .accessibilityLabel("Dash Island")
-                    .accessibilityHint("Hover or click to show usage")
-                    .accessibilityValue(compactLabel)
+                compactNotchRim
+                    .transition(.opacity)
             }
         }
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
@@ -51,52 +38,48 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Silhouette
+    // MARK: - Compact: hairline border on the hardware notch
 
-    private var silhouetteWidth: CGFloat {
-        model.state == .compact ? model.notch.width : model.size.width
-    }
+    /// Solid black only in the physical notch dead zone (blends with glass),
+    /// plus a *thin* gradient stroke along the U-edge — not a floating card.
+    private var compactNotchRim: some View {
+        let w = model.notch.width
+        let h = model.notch.height
+        let radius = cornerRadius(forHeight: h)
 
-    private var cornerRadius: CGFloat {
-        // Scale corner with notch height so the U tracks hardware curves.
-        min(18, max(10, model.notch.height * 0.42))
-    }
-
-    private var silhouette: some View {
-        let shape = IslandShape(bottomRadius: cornerRadius)
         return ZStack {
-            shape.fill(Color.black)
-            // Thin gradient outline wrapping the notch / island edge.
-            shape
-                .strokeBorder(outlineGradient, lineWidth: model.state == .compact ? 1.0 : 0.8)
-                .opacity(model.state == .compact ? 0.95 : 0.35)
+            // Exact notch fill — pure black, no material, no shadow.
+            IslandShape(bottomRadius: radius)
+                .fill(Color.black)
+
+            // Hairline rim on the U only (open path — no top edge / no closed box).
+            NotchRimPath(bottomRadius: radius)
+                .stroke(
+                    rimGradient,
+                    style: StrokeStyle(lineWidth: 0.85, lineCap: .round, lineJoin: .round)
+                )
         }
-        .shadow(color: .black.opacity(model.state == .expanded ? 0.45 : 0.25), radius: model.state == .expanded ? 18 : 6, y: 4)
+        .frame(width: w, height: h)
+        .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        .contentShape(IslandShape(bottomRadius: radius))
+        .onTapGesture {
+            collapseTask?.cancel()
+            model.setState(.expanded)
+        }
+        .accessibilityLabel("Dash Island")
+        .accessibilityHint("Hover or click to show usage")
+        .accessibilityValue(compactLabel)
     }
 
-    /// Soft metal edge: brighter mid-bottom, fades at the top corners.
-    private var outlineGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color.white.opacity(0.08),
-                Color.white.opacity(0.42),
-                Color.white.opacity(0.55),
-                Color.white.opacity(0.42),
-                Color.white.opacity(0.08)
-            ],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
+    // MARK: - Expanded chrome (panel under notch)
 
-    private var compactLabel: String {
-        if DemoWidgets.isForced { return "Demo" }
-        let n = accountStore.accounts.count
-        if n == 0 { return "Dash Island" }
-        return n == 1 ? "1 account" : "\(n) accounts"
+    private var expandedChrome: some View {
+        let radius = cornerRadius(forHeight: model.notch.height)
+        return IslandShape(bottomRadius: min(26, radius + 8))
+            .fill(Color.black)
+            .frame(width: model.size.width, height: model.blackHeight)
+            .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
     }
-
-    // MARK: - Expanded content (below notch dead zone)
 
     private var expandedContent: some View {
         ZStack(alignment: .bottomLeading) {
@@ -116,12 +99,36 @@ struct IslandRootView: View {
             .padding(.leading, 10)
             .padding(.bottom, 10)
         }
-        // Content starts under the physical notch — never under the dead pixels.
         .padding(.top, model.notch.height)
         .frame(width: model.size.width, height: model.blackHeight, alignment: .top)
-        // Allow hover tooltips to paint into the transparent window overflow
-        // below the black silhouette (no black gutter).
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
+    }
+
+    private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
+        // Hardware-ish continuous bottom corners scale with notch height.
+        min(16, max(11, h * 0.40))
+    }
+
+    /// Brightest at bottom-center (where the rim is most visible against desktop).
+    private var rimGradient: LinearGradient {
+        LinearGradient(
+            stops: [
+                .init(color: Color.white.opacity(0.15), location: 0),
+                .init(color: Color.white.opacity(0.55), location: 0.35),
+                .init(color: Color.white.opacity(0.70), location: 0.5),
+                .init(color: Color.white.opacity(0.55), location: 0.65),
+                .init(color: Color.white.opacity(0.15), location: 1)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private var compactLabel: String {
+        if DemoWidgets.isForced { return "Demo" }
+        let n = accountStore.accounts.count
+        if n == 0 { return "Dash Island" }
+        return n == 1 ? "1 account" : "\(n) accounts"
     }
 
     private var widgets: [WidgetViewModel] {
@@ -138,8 +145,6 @@ struct IslandRootView: View {
             && accountStore.accounts.count > 0
             && accountStore.accounts.count < AccountStore.maxAccounts
     }
-
-    // MARK: - Hover
 
     private func handleHover(_ hovering: Bool) {
         if hovering {
@@ -160,4 +165,3 @@ struct IslandRootView: View {
         }
     }
 }
-
