@@ -117,9 +117,12 @@ final class IslandWindowController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                // Don't steal focus from a key prefs panel mid-edit.
+                // Don't steal focus from prefs / dialog mid-edit.
                 if PrefsWindowController.shared.isOpen { return }
-                NSApp.activate(ignoringOtherApps: false)
+                if IslandDialogController.shared.isOpen { return }
+                if IslandDialogController.shared.isProgressOpen { return }
+                // Accessory apps need a real activation for Menu / contextMenu to open.
+                NSApp.activate(ignoringOtherApps: true)
                 self?.window.makeKeyAndOrderFront(nil)
                 self?.window.ignoresMouseEvents = false
             }

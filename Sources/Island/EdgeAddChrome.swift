@@ -1,85 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Right-edge dwell chrome
-
-/// Low-contrast trailing chevron; after ≥500ms dwell, fades into a glass `+` menu.
-/// Does **not** reserve layout width for an empty slot — overlays the island edge.
-struct EdgeAddChrome: View {
-    /// Called when the user picks a vendor from the add menu.
-    var onSelectVendor: (any VendorAdapter) -> Void
-
-    @State private var dwellTask: Task<Void, Never>?
-    @State private var showPlus = false
-    @State private var edgeHovered = false
-
-    private static let dwellNanos: UInt64 = 500_000_000
-    private static let stripWidth: CGFloat = 36
-    private static let hitHeight: CGFloat = 88
-
-    var body: some View {
-        ZStack {
-            if showPlus {
-                vendorMenuButton
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
-            } else {
-                chevron
-                    .transition(.opacity)
-            }
-        }
-        .frame(width: Self.stripWidth, height: Self.hitHeight)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            edgeHovered = hovering
-            if hovering {
-                startDwell()
-            } else {
-                cancelDwell(hidePlus: true)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Add account")
-    }
-
-    private var chevron: some View {
-        Image(systemName: "chevron.compact.right")
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Color.white.opacity(edgeHovered ? 0.38 : 0.22))
-            .frame(width: Self.stripWidth, height: Self.hitHeight)
-    }
-
-    private var vendorMenuButton: some View {
-        Menu {
-            VendorMenuItems(onSelect: onSelectVendor)
-        } label: {
-            GlassPlusLabel()
-        }
-        .menuStyle(.borderlessButton)
-        .frame(width: Self.stripWidth, height: Self.hitHeight)
-    }
-
-    private func startDwell() {
-        dwellTask?.cancel()
-        dwellTask = Task {
-            try? await Task.sleep(nanoseconds: Self.dwellNanos)
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                showPlus = true
-            }
-        }
-    }
-
-    private func cancelDwell(hidePlus: Bool) {
-        dwellTask?.cancel()
-        dwellTask = nil
-        if hidePlus {
-            withAnimation(.easeOut(duration: 0.14)) {
-                showPlus = false
-            }
-        }
-    }
-}
-
 // MARK: - Empty-state centered +
 
 /// Single centered glass `+` when there are zero accounts (no dwell game).
@@ -104,6 +25,7 @@ struct VendorMenuItems: View {
     var onSelect: (any VendorAdapter) -> Void
 
     var body: some View {
+        // Product vendors only — Fake is never listed.
         ForEach(VendorRegistry.all.map(\.id), id: \.self) { id in
             if let adapter = VendorRegistry.adapter(for: id) {
                 Button(adapter.displayName) {
@@ -141,100 +63,167 @@ struct GlassPlusLabel: View {
 
 @MainActor
 enum AccountChromeActions {
-    /// Run adapter `beginAdd` → `AccountStore.add` (orchestrator observes accounts).
+    private static var addTask: Task<Void, Never>?
+
+    /// Run adapter `beginAdd` → name prompt → `AccountStore.add`.
+    /// Cancel on progress or name dialog aborts and cleans credential folder.
     static func beginAdd(adapter: any VendorAdapter) {
-        Task {
+        activateForUI()
+        addTask?.cancel()
+
+        IslandDialogController.shared.showProgress(
+            title: "Sign in",
+            message: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
+            vendorID: adapter.id,
+            onCancel: {
+                addTask?.cancel()
+                addTask = nil
+            }
+        )
+
+        addTask = Task {
+            var createdRef: CredentialRef?
+            defer {
+                IslandDialogController.shared.hideProgress()
+                if Task.isCancelled, let ref = createdRef {
+                    try? CredentialStore.removeDirectory(for: ref)
+                }
+            }
+
             do {
                 let result = try await adapter.beginAdd()
-                try AccountStore.shared.add(from: result)
+                createdRef = result.credentialRef
+                if Task.isCancelled {
+                    try? CredentialStore.removeDirectory(for: result.credentialRef)
+                    return
+                }
+
+                IslandDialogController.shared.hideProgress()
+
+                let named = IslandDialogController.shared.runTextPrompt(
+                    title: "Name this account",
+                    message: "Label shown on the island. Cancel discards this sign-in.",
+                    defaultValue: result.label,
+                    confirmTitle: "Add",
+                    vendorID: adapter.id
+                )
+
+                guard let named else {
+                    // Cancel on name dialog → abort add, delete creds.
+                    try? CredentialStore.removeDirectory(for: result.credentialRef)
+                    return
+                }
+
+                var final = result
+                final.label = named
+                try AccountStore.shared.add(from: final)
+            } catch is CancellationError {
+                // User cancelled progress — folder cleaned in defer if ref known.
             } catch let error as AccountStoreError where error == .maxAccountsReached {
-                presentAlert(title: "Account Limit", message: "You can add up to \(AccountStore.maxAccounts) accounts.")
+                presentAlert(
+                    title: "Account limit",
+                    message: "You can add up to \(AccountStore.maxAccounts) accounts."
+                )
             } catch {
-                presentAlert(title: "Couldn’t Add Account", message: error.localizedDescription)
+                if !Task.isCancelled {
+                    presentAlert(title: "Couldn’t add account", message: error.localizedDescription)
+                }
             }
         }
     }
 
     static func rename(accountID: AccountID, currentLabel: String) {
-        guard let next = promptText(
-            title: "Rename Account",
-            message: "Enter a new label for this account.",
+        activateForUI()
+        let vendorID = AccountStore.shared.accounts.first(where: { $0.id == accountID })?.vendorID
+        guard let next = IslandDialogController.shared.runTextPrompt(
+            title: "Rename",
+            message: "Display name for this account on the island.",
             defaultValue: currentLabel,
-            confirmTitle: "Rename"
+            confirmTitle: "Save",
+            vendorID: vendorID
         ) else { return }
-        let trimmed = next.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         do {
-            try AccountStore.shared.rename(id: accountID, label: trimmed)
+            try AccountStore.shared.rename(id: accountID, label: next)
         } catch {
-            presentAlert(title: "Couldn’t Rename", message: error.localizedDescription)
+            presentAlert(title: "Couldn’t rename", message: error.localizedDescription)
         }
     }
 
     static func reauthenticate(account: Account) {
+        activateForUI()
         guard let adapter = VendorRegistry.adapter(for: account.vendorID) else {
-            presentAlert(title: "Reauthenticate", message: "No adapter for vendor “\(account.vendorID)”.")
+            presentAlert(
+                title: "Reauthenticate",
+                message: "No adapter for vendor “\(account.vendorID)”."
+            )
             return
         }
-        Task {
+
+        IslandDialogController.shared.showProgress(
+            title: "Reauthenticate",
+            message: "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes).",
+            vendorID: adapter.id,
+            onCancel: {
+                addTask?.cancel()
+                addTask = nil
+            }
+        )
+
+        addTask?.cancel()
+        addTask = Task {
+            defer { IslandDialogController.shared.hideProgress() }
             do {
                 let newRef = try await adapter.reauthenticate(account.credentialRef)
+                if Task.isCancelled { return }
                 try AccountStore.shared.markAuthenticated(id: account.id, credentialRef: newRef)
                 UsageOrchestrator.shared.refresh(accountID: account.id)
+            } catch is CancellationError {
+                // ignored
             } catch {
-                presentAlert(title: "Reauthenticate Failed", message: error.localizedDescription)
+                if !Task.isCancelled {
+                    presentAlert(title: "Reauthenticate failed", message: error.localizedDescription)
+                }
             }
         }
     }
 
+    /// Confirm then delete. Safe to call from drag `onEnded` (deferred off gesture).
     static func remove(accountID: AccountID, label: String) {
-        let alert = NSAlert()
-        alert.messageText = "Remove Account?"
-        alert.informativeText = "“\(label)” will be removed. Credentials stored for this account will be deleted."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do {
-            try AccountStore.shared.remove(id: accountID)
-        } catch {
-            presentAlert(title: "Couldn’t Remove", message: error.localizedDescription)
+        DispatchQueue.main.async {
+            activateForUI()
+            let ok = IslandDialogController.shared.runConfirm(
+                title: "Remove \(label)?",
+                message: "This removes the account from Dash Island and deletes its stored credentials.",
+                confirmTitle: "Remove",
+                isDestructive: true,
+                showCancel: true
+            )
+            guard ok else { return }
+            do {
+                try AccountStore.shared.remove(id: accountID)
+            } catch {
+                presentAlert(title: "Couldn’t remove", message: error.localizedDescription)
+            }
         }
     }
 
-    // MARK: Alerts
-
-    private static func promptText(
-        title: String,
-        message: String,
-        defaultValue: String,
-        confirmTitle: String
-    ) -> String? {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: confirmTitle)
-        alert.addButton(withTitle: "Cancel")
-
-        let field = NSTextField(string: defaultValue)
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-        field.isEditable = true
-        field.isSelectable = true
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return nil }
-        return field.stringValue
-    }
+    // MARK: - Alerts / activation
 
     private static func presentAlert(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        DispatchQueue.main.async {
+            activateForUI()
+            _ = IslandDialogController.shared.runConfirm(
+                title: title,
+                message: message,
+                confirmTitle: "OK",
+                isDestructive: false,
+                showCancel: false
+            )
+        }
+    }
+
+    static func activateForUI() {
+        NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
     }
 }

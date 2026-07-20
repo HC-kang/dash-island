@@ -9,8 +9,8 @@ enum CodexAdapterSuite {
             {
               "plan_type": "plus",
               "rate_limit": {
-                "primary_window": { "used_percent": 12.5, "reset_at": 1800000000 },
-                "secondary_window": { "used_percent": 34, "reset_at": 1800100000 }
+                "primary_window": { "used_percent": 12.5, "reset_at": 1800000000, "limit_window_seconds": 18000 },
+                "secondary_window": { "used_percent": 34, "reset_at": 1800100000, "limit_window_seconds": 604800 }
               }
             }
             """
@@ -24,6 +24,30 @@ enum CodexAdapterSuite {
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.34, accuracy: 0.0001)
             try assertEqual(snap.primary.resetAt?.timeIntervalSince1970 ?? -1, 1_800_000_000, accuracy: 0.001)
             try assertEqual(snap.secondary?.resetAt?.timeIntervalSince1970 ?? -1, 1_800_100_000, accuracy: 0.001)
+            try assertEqual(snap.primary.kind, UsageWindowKind.fiveHour)
+            try assertEqual(snap.secondary?.kind, UsageWindowKind.weekly)
+        }
+        failures += check("live pro: weekly primary, null secondary stays nil") {
+            // Real 2026 Codex Pro/Plus: primary is 7d (604800s), secondary null.
+            let json = """
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 5,
+                  "limit_window_seconds": 604800,
+                  "reset_after_seconds": 491914,
+                  "reset_at": 1784952032
+                },
+                "secondary_window": null
+              }
+            }
+            """
+            let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))
+            try assertEqual(snap.error, nil as UsageError?)
+            try assertEqual(snap.primary.usedFraction, 0.05, accuracy: 0.0001)
+            try assertEqual(snap.primary.kind, UsageWindowKind.weekly)
+            try assertTrue(snap.secondary == nil, "null secondary_window must not become 0% wk")
         }
         failures += check("used_percent in (0,1] is percent not already-normalized") {
             // 0.5 means 0.5% used → 0.005 fraction (not 50%).
@@ -39,12 +63,12 @@ enum CodexAdapterSuite {
             try assertEqual(snap.primary.usedFraction, 0.005, accuracy: 0.00001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.01, accuracy: 0.00001)
         }
-        failures += check("missing windows → zero fractions, no error") {
+        failures += check("missing windows → zero primary, nil secondary") {
             let json = #"{ "plan_type": "free", "rate_limit": {} }"#
             let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))
             try assertEqual(snap.error, nil as UsageError?)
             try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
-            try assertEqual(snap.secondary?.usedFraction ?? -1, 0, accuracy: 0.0001)
+            try assertTrue(snap.secondary == nil)
             try assertEqual(snap.plan, "free")
         }
         failures += check("missing rate_limit → parse error") {

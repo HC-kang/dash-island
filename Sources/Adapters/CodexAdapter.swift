@@ -61,18 +61,25 @@ struct CodexAdapter: VendorAdapter {
     func beginAdd() async throws -> AddAccountResult {
         let accountID = UUID()
         let ref = accountID.uuidString
-        let dir = try CredentialStore.createDirectory(for: ref)
-        try await runLogin(codexHome: dir)
-        _ = try Self.requireCredentials(codexHome: dir)
-        // Plan lives on the usage endpoint, not auth.json — label is vendor + short ref.
-        let short = String(ref.prefix(8))
-        let label = Self.suggestedLabel(plan: nil, short: short)
-        return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+        do {
+            let dir = try CredentialStore.createDirectory(for: ref)
+            try await runLogin(codexHome: dir)
+            _ = try Self.requireCredentials(codexHome: dir)
+            // Plan lives on the usage endpoint, not auth.json — label is vendor + short ref.
+            let short = String(ref.prefix(8))
+            let label = Self.suggestedLabel(plan: nil, short: short)
+            return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+        } catch {
+            try? CredentialStore.removeDirectory(for: ref)
+            throw error
+        }
     }
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
         do {
+            // Wipe first — existing auth.json makes runLogin return immediately.
+            Self.clearManagedCredentials(codexHome: dir)
             try await runLogin(codexHome: dir)
             _ = try Self.requireCredentials(codexHome: dir)
             return ref
@@ -94,10 +101,26 @@ struct CodexAdapter: VendorAdapter {
 
     // MARK: - Login (managed CODEX_HOME)
 
+    static func clearManagedCredentials(codexHome: URL) {
+        let fm = FileManager.default
+        let paths = [
+            codexHome.appendingPathComponent(authFileName, isDirectory: false),
+            codexHome
+                .appendingPathComponent(".codex", isDirectory: true)
+                .appendingPathComponent(authFileName, isDirectory: false),
+        ]
+        for path in paths where fm.fileExists(atPath: path.path) {
+            try? fm.removeItem(at: path)
+        }
+        NSLog("DashIsland: cleared Codex managed creds at %@", codexHome.path)
+    }
+
     private func runLogin(codexHome: URL) async throws {
         guard let binary = Self.locateCodexBinary() else {
             throw CodexAdapterError.codexBinaryNotFound
         }
+
+        let priorToken = Self.readCredentials(codexHome: codexHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -122,8 +145,18 @@ struct CodexAdapter: VendorAdapter {
         }
 
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
+
+        func isAcceptable(_ creds: CodexCreds) -> Bool {
+            if let priorToken, creds.accessToken == priorToken { return false }
+            return !creds.accessToken.isEmpty
+        }
+
         while Date() < deadline {
-            if Self.readCredentials(codexHome: codexHome) != nil {
+            if Task.isCancelled {
+                if task.isRunning { task.terminate() }
+                throw CancellationError()
+            }
+            if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 if task.isRunning {
                     task.terminate()
@@ -132,18 +165,18 @@ struct CodexAdapter: VendorAdapter {
             }
             if !task.isRunning {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                if Self.readCredentials(codexHome: codexHome) != nil {
+                if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
                     return
                 }
                 throw CodexAdapterError.credentialsMissing(codexHome: codexHome.path)
             }
-            try? await Task.sleep(nanoseconds: Self.pollNanos)
+            try await Task.sleep(nanoseconds: Self.pollNanos)
         }
 
         if task.isRunning {
             task.terminate()
         }
-        if Self.readCredentials(codexHome: codexHome) != nil {
+        if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
             return
         }
         throw CodexAdapterError.loginTimeout(codexHome: codexHome.path)
@@ -236,6 +269,10 @@ struct CodexAdapter: VendorAdapter {
     }
 
     /// Parse `/wham/usage` JSON → snapshot. Exposed for unit tests.
+    ///
+    /// Live Codex Pro/Plus often ships a **weekly** `primary_window`
+    /// (`limit_window_seconds` = 604800) and a null `secondary_window` —
+    /// not a 5h + week pair. Kind is derived from `limit_window_seconds`.
     static func parseUsageResponse(data: Data, fetchedAt: Date = Date()) -> UsageSnapshot {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return errorSnapshot(.parse("parse error"), fetchedAt: fetchedAt)
@@ -244,6 +281,8 @@ struct CodexAdapter: VendorAdapter {
             return errorSnapshot(.parse("missing rate_limit"), fetchedAt: fetchedAt)
         }
         let primary = parseWindow(rateLimit["primary_window"])
+            ?? WindowUsage(usedFraction: 0, kind: .unknown)
+        // Null / missing secondary must stay nil — do not invent a 0% week.
         let secondary = parseWindow(rateLimit["secondary_window"])
         let plan = obj["plan_type"] as? String
         return UsageSnapshot(
@@ -256,21 +295,24 @@ struct CodexAdapter: VendorAdapter {
     }
 
     /// Codex returns `used_percent` in [0, 100] — always ÷100.
-    /// `reset_at` is unix seconds.
-    static func parseWindow(_ obj: Any?) -> WindowUsage {
-        guard let d = obj as? [String: Any] else {
-            return WindowUsage(usedFraction: 0, resetAt: nil, usedTokens: nil, limitTokens: nil)
-        }
+    /// `reset_at` is unix seconds. `limit_window_seconds` → kind (5h / wk / mo).
+    /// Returns `nil` when the window object is absent (JSON null / missing).
+    static func parseWindow(_ obj: Any?) -> WindowUsage? {
+        guard let d = obj as? [String: Any] else { return nil }
         let raw = (d["used_percent"] as? Double)
             ?? (d["used_percent"] as? Int).map(Double.init)
             ?? 0
         let normalized = min(1, max(0, raw / 100.0))
         let resetAt = parseResetAt(d["reset_at"])
+        let limitSeconds = (d["limit_window_seconds"] as? Double)
+            ?? (d["limit_window_seconds"] as? Int).map(Double.init)
+            ?? (d["limit_window_seconds"] as? Int64).map(Double.init)
         return WindowUsage(
             usedFraction: normalized,
             resetAt: resetAt,
             usedTokens: nil,
-            limitTokens: nil
+            limitTokens: nil,
+            kind: .fromLimitSeconds(limitSeconds)
         )
     }
 
@@ -297,7 +339,7 @@ struct CodexAdapter: VendorAdapter {
 
     private static func errorSnapshot(_ error: UsageError, fetchedAt: Date) -> UsageSnapshot {
         UsageSnapshot(
-            primary: WindowUsage(usedFraction: 0, resetAt: nil, usedTokens: nil, limitTokens: nil),
+            primary: WindowUsage(usedFraction: 0, kind: .unknown),
             secondary: nil,
             plan: nil,
             fetchedAt: fetchedAt,

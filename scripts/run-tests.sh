@@ -27,6 +27,8 @@ swiftc \
   -O \
   -framework Combine \
   -framework Security \
+  -framework ServiceManagement \
+  -framework AppKit \
   -o "$OUT" \
   $DOMAIN_SOURCES \
   $INFRA_SOURCES \

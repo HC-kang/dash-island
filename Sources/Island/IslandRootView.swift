@@ -8,9 +8,25 @@ struct IslandRootView: View {
     @ObservedObject private var preferences = PreferencesStore.shared
 
     @State private var prefsOpen = false
+    @State private var dialogOpen = false
+    @State private var menuTracking = false
+    @State private var statusPanelOpen = false
     @State private var collapseTask: Task<Void, Never>?
+    /// Dwell before lazy network refresh on expand (avoids hover-flick burns).
+    @State private var expandRefreshTask: Task<Void, Never>?
 
     private let bodyOutset: CGFloat = 1.0
+    /// Match add-rail dwell philosophy — intentional expand, not mouse graze.
+    private let expandRefreshDwellNs: UInt64 = 400_000_000
+
+    /// Prefs, dialogs, menus, status popover — keep island expanded.
+    private var blockingOverlay: Bool {
+        prefsOpen
+            || dialogOpen
+            || menuTracking
+            || statusPanelOpen
+            || IslandDialogController.shared.isProgressOpen
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -31,15 +47,47 @@ struct IslandRootView: View {
         .onAppear { syncExpandedItemCount() }
         .onChange(of: accountStore.accounts.count) { _ in syncExpandedItemCount() }
         .onChange(of: orchestrator.widgets.count) { _ in syncExpandedItemCount() }
+        .onChange(of: model.state) { newState in
+            if newState == .expanded {
+                scheduleExpandRefresh()
+            } else {
+                expandRefreshTask?.cancel()
+                expandRefreshTask = nil
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .dashIslandPrefsOpenChanged)) { note in
-            let open = (note.object as? Bool) ?? PrefsWindowController.shared.isOpen
-            prefsOpen = open
-            if open {
-                collapseTask?.cancel()
-                model.setState(.expanded)
-            } else if model.state == .expanded {
+            prefsOpen = (note.object as? Bool) ?? PrefsWindowController.shared.isOpen
+            handleOverlayChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandDialogOpenChanged)) { note in
+            dialogOpen = (note.object as? Bool)
+                ?? (IslandDialogController.shared.isOpen || IslandDialogController.shared.isProgressOpen)
+            handleOverlayChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            menuTracking = true
+            collapseTask?.cancel()
+            model.setState(.expanded)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            menuTracking = false
+            // Menu dismissed — collapse only if nothing else is holding us open.
+            if !blockingOverlay {
                 scheduleCollapse()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandStatusPanelOpenChanged)) { note in
+            statusPanelOpen = (note.object as? Bool) ?? false
+            handleOverlayChange()
+        }
+    }
+
+    private func handleOverlayChange() {
+        if blockingOverlay {
+            collapseTask?.cancel()
+            model.setState(.expanded)
+        } else if model.state == .expanded {
+            scheduleCollapse()
         }
     }
 
@@ -142,24 +190,29 @@ struct IslandRootView: View {
     }
 
     private var compactLabel: String {
-        if DemoWidgets.isForced { return "Demo" }
+        if useDemoWidgets { return "Demo" }
         let n = accountStore.accounts.count
         if n == 0 { return "Dash Island" }
         return n == 1 ? "1 account" : "\(n) accounts"
     }
 
+    /// Demo env is ignored whenever real accounts exist on disk — never mask them.
+    private var useDemoWidgets: Bool {
+        DemoWidgets.isForced && accountStore.accounts.isEmpty
+    }
+
     private var widgets: [WidgetViewModel] {
-        if DemoWidgets.isForced { return DemoWidgets.make() }
+        if useDemoWidgets { return DemoWidgets.make() }
         return orchestrator.widgets
     }
 
     private var showEmptyAdd: Bool {
-        !DemoWidgets.isForced && accountStore.accounts.isEmpty
+        !useDemoWidgets && accountStore.accounts.isEmpty
     }
 
-    /// Chevron + add rail whenever under the 5-account cap (demo hides it).
+    /// Chevron + add rail whenever under the 5-account cap (demo empty-state only hides it).
     private var showAdd: Bool {
-        !DemoWidgets.isForced
+        !useDemoWidgets
             && accountStore.accounts.count < AccountStore.maxAccounts
     }
 
@@ -168,9 +221,9 @@ struct IslandRootView: View {
             collapseTask?.cancel()
             collapseTask = nil
             model.setState(.expanded)
-            // Become key so the first drag doesn't require an extra click.
+            // Key + activate so SwiftUI Menu / contextMenu can present.
             NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
-        } else if !prefsOpen {
+        } else if !blockingOverlay {
             scheduleCollapse()
         }
     }
@@ -179,8 +232,18 @@ struct IslandRootView: View {
         collapseTask?.cancel()
         collapseTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled, !prefsOpen else { return }
+            guard !Task.isCancelled, !blockingOverlay else { return }
             model.setState(.compact)
+        }
+    }
+
+    /// After expand settles, ask orchestrator for a lazy refresh (debounced + minPoll).
+    private func scheduleExpandRefresh() {
+        expandRefreshTask?.cancel()
+        expandRefreshTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: expandRefreshDwellNs)
+            guard !Task.isCancelled, model.state == .expanded else { return }
+            orchestrator.onIslandExpanded()
         }
     }
 }

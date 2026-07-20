@@ -20,6 +20,12 @@ RES_DIR="$CONTENTS/Resources"
 rm -rf "$BUILD_DIR"
 mkdir -p "$MACOS_DIR" "$RES_DIR"
 
+# Vendor logo PNGs (white marks for dark island chrome).
+if [ -d Sources/Resources/VendorLogos ]; then
+  mkdir -p "$RES_DIR/VendorLogos"
+  cp -f Sources/Resources/VendorLogos/*.png "$RES_DIR/VendorLogos/" 2>/dev/null || true
+fi
+
 SWIFT_SOURCES=$(find Sources -name '*.swift' | sort)
 
 DEPLOYMENT_TARGET="13.0"
@@ -32,6 +38,7 @@ swiftc \
   -framework AppKit \
   -framework Combine \
   -framework Security \
+  -framework ServiceManagement \
   -o "$MACOS_DIR/$APP_NAME" \
   $SWIFT_SOURCES
 

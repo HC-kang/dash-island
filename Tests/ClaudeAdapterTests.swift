@@ -31,11 +31,12 @@ enum ClaudeAdapterSuite {
             try assertEqual(snap.primary.usedFraction, 0.005, accuracy: 0.00001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.01, accuracy: 0.00001)
         }
-        failures += check("missing windows → zero fractions, no error") {
+        failures += check("missing windows → zero primary, nil secondary") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("{}".utf8), plan: nil)
             try assertEqual(snap.error, nil as UsageError?)
             try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
-            try assertEqual(snap.secondary?.usedFraction ?? -1, 0, accuracy: 0.0001)
+            try assertEqual(snap.primary.kind, UsageWindowKind.fiveHour)
+            try assertTrue(snap.secondary == nil)
         }
         failures += check("invalid JSON → parse error") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("not-json".utf8), plan: nil)
@@ -46,6 +47,37 @@ enum ClaudeAdapterSuite {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
             try assertEqual(snap.primary.usedFraction, 1.0, accuracy: 0.0001)
         }
+        failures += check("limits[] weekly_scoped Fable → extras, not rings") {
+            let json = """
+            {
+              "five_hour": { "utilization": 10 },
+              "seven_day": { "utilization": 20 },
+              "limits": [
+                {
+                  "kind": "weekly_scoped",
+                  "percent": 38,
+                  "is_active": true,
+                  "resets_at": "2026-07-19T20:00:00Z",
+                  "scope": { "model": { "display_name": "Fable" } }
+                },
+                {
+                  "kind": "weekly_scoped",
+                  "percent": 99,
+                  "is_active": false,
+                  "scope": { "model": { "display_name": "Dead" } }
+                }
+              ]
+            }
+            """
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.10, accuracy: 0.0001)
+            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.20, accuracy: 0.0001)
+            try assertEqual(Double(snap.extras.count), 1, accuracy: 0)
+            try assertEqual(snap.extras[0].displayLabel, "Fable")
+            try assertEqual(snap.extras[0].usedFraction, 0.38, accuracy: 0.0001)
+            // Burn stays on 5h — extras excluded.
+            try assertEqual(snap.preferredBurnWindow.kind, UsageWindowKind.fiveHour)
+        }
         failures += check("parse credentials JSON") {
             let json = """
             {"claudeAiOauth":{"accessToken":"at-test","refreshToken":"rt","subscriptionType":"max"}}
@@ -53,6 +85,26 @@ enum ClaudeAdapterSuite {
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
             try assertEqual(creds?.accessToken, "at-test")
             try assertEqual(creds?.subscriptionType, "max")
+        }
+        failures += check("expiresAt milliseconds epoch") {
+            // Claude Code stores expiresAt in ms — we only parse and store it.
+            let ms = 1_784_481_820_799
+            let json = """
+            {"claudeAiOauth":{"accessToken":"at","expiresAt":\(ms)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
+            let expected = Double(ms) / 1000
+            try assertEqual(
+                creds?.expiresAt?.timeIntervalSince1970 ?? -1,
+                expected,
+                accuracy: 0.001
+            )
+        }
+        failures += check("utilization accepts integer JSON numbers") {
+            let json = #"{ "five_hour": { "utilization": 20 }, "seven_day": { "utilization": 3 } }"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.20, accuracy: 0.0001)
+            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.03, accuracy: 0.0001)
         }
         failures += check("empty access token rejected") {
             let json = #"{"claudeAiOauth":{"accessToken":""}}"#

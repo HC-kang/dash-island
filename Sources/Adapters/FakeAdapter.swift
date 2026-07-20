@@ -32,13 +32,15 @@ struct FakeAdapter: VendorAdapter {
                 usedFraction: primary,
                 resetAt: now.addingTimeInterval(5 * 3600),
                 usedTokens: Int64((primary * 100_000).rounded()),
-                limitTokens: 100_000
+                limitTokens: 100_000,
+                kind: .fiveHour
             ),
             secondary: WindowUsage(
                 usedFraction: secondary,
                 resetAt: now.addingTimeInterval(7 * 24 * 3600),
                 usedTokens: nil,
-                limitTokens: nil
+                limitTokens: nil,
+                kind: .weekly
             ),
             plan: "fake-pro",
             fetchedAt: now,

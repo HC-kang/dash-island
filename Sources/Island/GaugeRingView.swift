@@ -13,68 +13,124 @@ struct GaugeRingView: View {
     var tint: VendorTint
     var size: CGFloat = 96
 
-    /// Drawn values (spring toward targets — Apple-quiet, not theatrical).
+    /// Drawn values (spring toward targets).
     @State private var drawnPrimary: Double = 0
     @State private var drawnSecondary: Double = 0
     @State private var drawnHasSecondary: Bool = false
     @State private var drawnBurn: Double = 0
     @State private var drawnPercent: Int = 0
     @State private var didAppear = false
+    @State private var revealTask: Task<Void, Never>?
 
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
 
-    private static let settle = Animation.spring(response: 0.55, dampingFraction: 0.88)
+    /// Rings / % — quiet, quick.
+    private static let ringSettle = Animation.spring(response: 0.55, dampingFraction: 0.88)
+    /// Needle on expand — slow sweep so the user notices motion (rest → target).
+    private static let needleReveal = Animation.spring(response: 1.55, dampingFraction: 0.86)
+    /// Needle while already expanded (live burn updates) — still readable, less theatrical.
+    private static let needleLive = Animation.spring(response: 0.95, dampingFraction: 0.88)
+
+    /// Idle when burn is effectively rest — pause TimelineView to save CPU.
+    private var needleAlive: Bool { drawnBurn > 0.03 }
 
     var body: some View {
-        ZStack {
-            Canvas { context, canvasSize in
-                let s = min(canvasSize.width, canvasSize.height)
-                let c = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-                let scale = s / 96
+        // Timeline drives subtle continuous jitter while burn > 0.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !needleAlive)) { timeline in
+            ZStack {
+                Canvas { context, canvasSize in
+                    let s = min(canvasSize.width, canvasSize.height)
+                    let c = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                    let scale = s / 96
 
-                drawSpeedTrack(context: context, center: c, scale: scale)
-                drawTicks(context: context, center: c, scale: scale)
-                drawUsageRings(context: context, center: c, scale: scale)
-                drawNeedle(context: context, center: c, scale: scale)
-            }
+                    drawSpeedTrack(context: context, center: c, scale: scale)
+                    drawTicks(context: context, center: c, scale: scale)
+                    drawUsageRings(context: context, center: c, scale: scale)
+                    drawNeedle(
+                        context: context,
+                        center: c,
+                        scale: scale,
+                        date: timeline.date
+                    )
+                }
 
-            VStack(spacing: 1) {
-                Text("\(drawnPercent)")
-                    .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color(white: 0.96))
-                    .tracking(-0.4)
-                Text("%")
-                    .font(.system(size: size * 0.083, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.36))
-                    .tracking(0.6)
+                VStack(spacing: 1) {
+                    Text("\(drawnPercent)")
+                        .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.96))
+                        .tracking(-0.4)
+                    Text("%")
+                        .font(.system(size: size * 0.083, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.36))
+                        .tracking(0.6)
+                }
+                .offset(y: 1)
+                .allowsHitTesting(false)
             }
-            .offset(y: 1)
-            .allowsHitTesting(false)
         }
         .frame(width: size, height: size)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(centerPercent) percent")
         .onAppear {
-            applyTargets(animated: false)
-            didAppear = true
+            playExpandReveal()
         }
-        .onChange(of: primaryFraction) { _ in applyTargets(animated: didAppear) }
-        .onChange(of: secondaryFraction ?? -1) { _ in applyTargets(animated: didAppear) }
-        .onChange(of: burnRatio) { _ in applyTargets(animated: didAppear) }
-        .onChange(of: centerPercent) { _ in applyTargets(animated: didAppear) }
+        .onDisappear {
+            revealTask?.cancel()
+            revealTask = nil
+            didAppear = false
+            // Next expand starts from rest again.
+            drawnBurn = 0
+        }
+        .onChange(of: primaryFraction) { _ in applyRingTargets(animated: didAppear) }
+        .onChange(of: secondaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
+        .onChange(of: burnRatio) { _ in
+            guard didAppear else { return }
+            withAnimation(Self.needleLive) {
+                drawnBurn = burnRatio
+            }
+        }
+        .onChange(of: centerPercent) { _ in applyRingTargets(animated: didAppear) }
     }
 
-    private func applyTargets(animated: Bool) {
+    /// Compact → expanded: rings settle, needle slowly rises from rest so motion is visible.
+    private func playExpandReveal() {
+        revealTask?.cancel()
+        // Always mount at rest — if we snap to target, expand feels static.
+        drawnBurn = 0
+        drawnPrimary = 0
+        drawnSecondary = 0
+        drawnHasSecondary = secondaryFraction != nil
+        drawnPercent = 0
+        didAppear = false
+
+        // Brief beat after expand chrome, then animate in.
+        revealTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled else { return }
+
+            withAnimation(Self.ringSettle) {
+                drawnPrimary = primaryFraction
+                drawnSecondary = secondaryFraction ?? 0
+                drawnHasSecondary = secondaryFraction != nil
+                drawnPercent = centerPercent
+            }
+            withAnimation(Self.needleReveal) {
+                drawnBurn = burnRatio
+            }
+            didAppear = true
+        }
+    }
+
+    private func applyRingTargets(animated: Bool) {
         let update = {
             drawnPrimary = primaryFraction
             drawnSecondary = secondaryFraction ?? 0
             drawnHasSecondary = secondaryFraction != nil
-            drawnBurn = burnRatio
             drawnPercent = centerPercent
         }
         if animated {
-            withAnimation(Self.settle, update)
+            withAnimation(Self.ringSettle, update)
         } else {
             update()
         }
@@ -183,9 +239,15 @@ struct GaugeRingView: View {
         }
     }
 
-    private func drawNeedle(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
+    private func drawNeedle(
+        context: GraphicsContext,
+        center: CGPoint,
+        scale: CGFloat,
+        date: Date
+    ) {
         let unit = BurnRate.needleUnit(ratio: drawnBurn)
-        let angle = Self.needleAngleDegrees(unit: unit)
+        let baseAngle = Self.needleAngleDegrees(unit: unit)
+        let angle = baseAngle + Self.needleJitterDegrees(burn: drawnBurn, at: date)
         let tipR: CGFloat = 38 * scale
         let tip = point(center: center, angleDeg: angle, radius: tipR)
         let red = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
@@ -209,6 +271,19 @@ struct GaugeRingView: View {
         let coreR: CGFloat = 0.95 * scale
         let coreRect = CGRect(x: center.x - coreR, y: center.y - coreR, width: coreR * 2, height: coreR * 2)
         context.fill(Path(ellipseIn: coreRect), with: .color(Color(red: 0.10, green: 0.02, blue: 0.02)))
+    }
+
+    /// Multi-frequency micro-wobble in **degrees** while burn > rest.
+    /// Quiet enough to feel like a live instrument, not a screensaver.
+    static func needleJitterDegrees(burn: Double, at date: Date) -> Double {
+        guard burn > 0.03 else { return 0 }
+        let t = date.timeIntervalSinceReferenceDate
+        // Slightly livelier when hotter, still under ~1.4°.
+        let amp = 0.42 + min(0.55, burn * 0.22)
+        let fast = sin(t * 2.15 * .pi) * amp
+        let mid = sin(t * 3.55 * .pi + 0.9) * amp * 0.42
+        let slow = sin(t * 0.55 * .pi + 0.3) * amp * 0.28
+        return fast + mid + slow
     }
 
     // MARK: - Helpers

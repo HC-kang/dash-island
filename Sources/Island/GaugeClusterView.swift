@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Slot grid (min 3). Drag floats a copy; home slot shows skeleton.
-/// Drop on another slot reorders. Drag near trash magnet to remove.
+/// Slot grid (min 3). Skeleton + widget share the same cell (no dual layout).
+/// Drag: long-press then move; neighbors **offset** to open a gap (drop preview).
+/// Widgets keep stable cell identity so gestures/menus stay alive. Trash magnet deletes.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -11,29 +12,35 @@ struct GaugeClusterView: View {
     var allowsEditing: Bool = true
     var panelBlackHeight: CGFloat = 160
 
-    @State private var orderIDs: [AccountID] = []
+    /// Grows island black body when the add rail is revealed.
+    var onAddRailExpandedChange: ((Bool) -> Void)?
+
+    /// Frozen for the whole gesture.
+    @State private var baseOrder: [AccountID] = []
     @State private var draggingID: AccountID?
     @State private var homeSlot: Int?
     @State private var liftOrigin: CGPoint = .zero
     @State private var dragTranslation: CGSize = .zero
-    @State private var targetSlot: Int?
+    /// Gap index = drop preview seat (neighbors pack around it via offset).
+    @State private var gapSlot: Int?
     @State private var magnetizedToTrash = false
     @State private var clusterSize: CGSize = .zero
 
     private static let maxSlots = IslandModel.maxItems
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
-    /// Enter magnet inside this radius; exit only outside + hysteresis.
     private static let trashMagnetEnter: CGFloat = 72
     private static let trashMagnetExit: CGFloat = 96
     private static let dragSpace = "dashIsland.dragSpace"
+    private static let cell = AccountWidget.cellSize
     private static let cellH = AccountWidget.cellSize + 8
     private static let trashSize: CGFloat = 44
-    /// Gap between slot row bottom and trash center.
     private static let trashOffsetY: CGFloat = 52
+    /// Short press keeps context-menu / click free; then drag to reorder.
+    private static let dragLongPress: Double = 0.18
 
     private var slotCount: Int {
-        let filled = max(orderIDs.count, widgets.count)
+        let filled = max(baseOrder.count, widgets.count)
         return max(Self.minSlots, min(Self.maxSlots, filled))
     }
 
@@ -41,31 +48,43 @@ struct GaugeClusterView: View {
         Dictionary(uniqueKeysWithValues: widgets.map { ($0.id, $0) })
     }
 
-    /// Trash center in `dragSpace` — must match the drawn trash `position`.
+    /// Visual slot index for each account while dragging (gap is empty).
+    private var visualSlotByID: [AccountID: Int] {
+        guard let drag = draggingID else {
+            return Dictionary(uniqueKeysWithValues: baseOrder.enumerated().map { ($0.element, $0.offset) })
+        }
+        let others = baseOrder.filter { $0 != drag }
+        let hole = gapSlot ?? homeSlot ?? 0
+        var map: [AccountID: Int] = [:]
+        var oi = 0
+        for i in 0..<slotCount {
+            if i == hole { continue }
+            guard oi < others.count else { break }
+            map[others[oi]] = i
+            oi += 1
+        }
+        if let home = homeSlot {
+            map[drag] = home
+        }
+        return map
+    }
+
     private var trashCenterLocal: CGPoint {
         let w = clusterSize.width > 1 ? clusterSize.width : 300
-        return CGPoint(
-            x: w / 2,
-            y: Self.cellH + Self.trashOffsetY
-        )
+        return CGPoint(x: w / 2, y: Self.cellH + Self.trashOffsetY)
     }
 
     private var floatCenter: CGPoint {
-        if magnetizedToTrash {
-            return trashCenterLocal
-        }
+        if magnetizedToTrash { return trashCenterLocal }
         return CGPoint(
             x: liftOrigin.x + dragTranslation.width,
             y: liftOrigin.y + dragTranslation.height
         )
     }
 
-    /// Grows island black body when the add rail is revealed.
-    var onAddRailExpandedChange: ((Bool) -> Void)?
-
     var body: some View {
         HStack(spacing: 0) {
-            ZStack {
+            ZStack(alignment: .top) {
                 slotRow
 
                 if showEmptyAdd && draggingID == nil {
@@ -92,7 +111,7 @@ struct GaugeClusterView: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(minHeight: Self.cellH + (draggingID != nil ? Self.trashOffsetY + 36 : 0))
+            .frame(height: Self.cellH, alignment: .top)
             .coordinateSpace(name: Self.dragSpace)
             .background(
                 GeometryReader { geo in
@@ -101,38 +120,31 @@ struct GaugeClusterView: View {
             )
             .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
 
-            // Chevron → smooth right expand → slim add pocket.
             if showAdd && draggingID == nil {
                 AddRail(
-                    onSelectVendor: { adapter in
-                        AccountChromeActions.beginAdd(adapter: adapter)
-                    },
-                    onExpandedChange: { open in
-                        onAddRailExpandedChange?(open)
-                    }
+                    onSelectVendor: { AccountChromeActions.beginAdd(adapter: $0) },
+                    onExpandedChange: { onAddRailExpandedChange?($0) }
                 )
                 .padding(.trailing, 6)
-                .transition(.opacity)
             }
         }
-        .onAppear { syncOrderFromWidgets() }
+        .frame(height: Self.cellH, alignment: .top)
+        .onAppear { syncFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
             guard draggingID == nil else { return }
-            orderIDs = ids
+            baseOrder = ids
         }
         .onChange(of: draggingID) { id in
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
-            if id != nil {
-                onAddRailExpandedChange?(false)
-            }
+            if id != nil { onAddRailExpandedChange?(false) }
         }
         .onChange(of: showAdd) { can in
             if !can { onAddRailExpandedChange?(false) }
         }
     }
 
-    private func syncOrderFromWidgets() {
-        orderIDs = widgets.map(\.id)
+    private func syncFromWidgets() {
+        baseOrder = widgets.map(\.id)
     }
 
     // MARK: - Slots
@@ -144,33 +156,61 @@ struct GaugeClusterView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .frame(height: Self.cellH, alignment: .top)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
     }
 
     @ViewBuilder
     private func slotCell(index: Int) -> some View {
-        let occupantID: AccountID? = index < orderIDs.count ? orderIDs[index] : nil
-        let isHome = homeSlot == index && draggingID != nil
-        let isTarget = targetSlot == index && draggingID != nil && !magnetizedToTrash
+        let baseID: AccountID? = index < baseOrder.count ? baseOrder[index] : nil
+        let isGap = draggingID != nil && !magnetizedToTrash && gapSlot == index
+        let isDragHome = homeSlot == index && draggingID != nil
+        // Push offset: slide this cell's widget toward its visual seat (gap layout).
+        let pushX = pushOffsetX(baseIndex: index)
 
         ZStack {
             SlotSkeleton(
-                highlighted: isHome || isTarget,
-                empty: occupantID == nil || isHome
+                highlighted: isGap,
+                empty: baseID == nil || isDragHome || (isGap && baseID == nil)
             )
 
-            if let oid = occupantID, let model = modelByID[oid] {
+            if isGap {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.45), lineWidth: 1.6)
+                    .padding(1)
+                    .allowsHitTesting(false)
+            }
+
+            // Widget stays in its **base** cell for identity/gesture/menu continuity.
+            // Visual reorder = horizontal offset only (not reparenting).
+            if let oid = baseID, let model = modelByID[oid] {
+                let isDragged = draggingID == oid
                 AccountWidget(
                     model: model,
                     isDragging: false,
-                    isDropTarget: isTarget && oid != draggingID
+                    isDropTarget: false
                 )
-                .opacity(oid == draggingID ? 0.001 : 1)
-                .gesture(allowsEditing ? dragGesture(for: oid, slotIndex: index) : nil)
+                .opacity(isDragged ? 0.001 : 1)
+                .offset(x: isDragged ? 0 : pushX)
+                .zIndex(isDragged ? 2 : 1)
+                // simultaneous + long-press: right-click / menus still work.
+                .simultaneousGesture(allowsEditing ? reorderGesture(for: oid, slotIndex: index) : nil)
             }
         }
-        .frame(width: AccountWidget.cellSize, height: Self.cellH)
-        .contentShape(Rectangle())
+        .frame(width: Self.cell, height: Self.cellH)
+        // No clip — pushed neighbors may paint into adjacent cell bounds.
+    }
+
+    /// Horizontal shift so the widget lands in its gap-packed visual slot.
+    private func pushOffsetX(baseIndex: Int) -> CGFloat {
+        guard draggingID != nil,
+              baseIndex < baseOrder.count
+        else { return 0 }
+        let id = baseOrder[baseIndex]
+        if id == draggingID { return 0 }
+        guard let visual = visualSlotByID[id] else { return 0 }
+        let stride = Self.cell + Self.gap
+        return CGFloat(visual - baseIndex) * stride
     }
 
     private var trashTarget: some View {
@@ -190,70 +230,98 @@ struct GaugeClusterView: View {
         .accessibilityLabel("Remove account")
     }
 
-    // MARK: - Drag
+    // MARK: - Drag (long-press then pan — does not steal right-click / menus)
 
-    private func dragGesture(for id: AccountID, slotIndex: Int) -> some Gesture {
-        DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.dragSpace))
+    private func reorderGesture(for id: AccountID, slotIndex: Int) -> some Gesture {
+        LongPressGesture(minimumDuration: Self.dragLongPress)
+            .sequenced(before: DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.dragSpace)))
             .onChanged { value in
-                if draggingID == nil {
-                    if orderIDs.isEmpty { syncOrderFromWidgets() }
-                    draggingID = id
-                    homeSlot = orderIDs.firstIndex(of: id) ?? slotIndex
-                    liftOrigin = slotCenter(index: homeSlot ?? slotIndex)
-                    dragTranslation = .zero
-                    magnetizedToTrash = false
-                }
-                guard draggingID == id else { return }
-
-                dragTranslation = value.translation
-                let finger = CGPoint(
-                    x: liftOrigin.x + value.translation.width,
-                    y: liftOrigin.y + value.translation.height
-                )
-
-                updateTrashMagnet(finger: finger)
-
-                if magnetizedToTrash {
-                    targetSlot = nil
-                } else {
-                    targetSlot = slotIndexAt(localX: finger.x)
+                switch value {
+                case .first(true):
+                    // Armed — wait for drag.
+                    break
+                case .second(true, let drag?):
+                    if draggingID == nil {
+                        beginDrag(id: id, slotIndex: slotIndex)
+                    }
+                    guard draggingID == id else { return }
+                    applyDrag(drag)
+                default:
+                    break
                 }
             }
             .onEnded { value in
-                let finger = CGPoint(
-                    x: liftOrigin.x + value.translation.width,
-                    y: liftOrigin.y + value.translation.height
-                )
-                // Sticky: if we were magnetized, count as trash even if release jitter.
-                let remove = magnetizedToTrash || distanceToTrash(finger) <= Self.trashMagnetEnter
-                let dropSlot = remove ? nil : (targetSlot ?? slotIndexAt(localX: finger.x))
-                let dragged = id
-                let from = homeSlot ?? orderIDs.firstIndex(of: dragged)
-
-                draggingID = nil
-                homeSlot = nil
-                dragTranslation = .zero
-                targetSlot = nil
-                magnetizedToTrash = false
-
-                if remove {
-                    confirmRemove(id: dragged)
-                    return
-                }
-
-                if let dropSlot, let from {
-                    commitMove(id: dragged, from: from, to: dropSlot)
+                switch value {
+                case .second(true, let drag?):
+                    guard draggingID == id else { return }
+                    endDrag(id: id, drag: drag)
+                default:
+                    // Long-press cancelled / no drag — leave order alone.
+                    if draggingID == id {
+                        cancelDrag()
+                    }
                 }
             }
+    }
+
+    private func beginDrag(id: AccountID, slotIndex: Int) {
+        if baseOrder.isEmpty { syncFromWidgets() }
+        draggingID = id
+        homeSlot = baseOrder.firstIndex(of: id) ?? slotIndex
+        gapSlot = homeSlot
+        liftOrigin = slotCenter(index: homeSlot ?? slotIndex)
+        dragTranslation = .zero
+        magnetizedToTrash = false
+        // Key window so drop + trash feel responsive.
+        NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+    }
+
+    private func applyDrag(_ drag: DragGesture.Value) {
+        dragTranslation = drag.translation
+        let finger = CGPoint(
+            x: liftOrigin.x + drag.translation.width,
+            y: liftOrigin.y + drag.translation.height
+        )
+        updateTrashMagnet(finger: finger)
+        if magnetizedToTrash {
+            if gapSlot != homeSlot { gapSlot = homeSlot }
+        } else if let slot = slotIndexAt(localX: finger.x), gapSlot != slot {
+            gapSlot = slot
+        }
+    }
+
+    private func endDrag(id: AccountID, drag: DragGesture.Value) {
+        let finger = CGPoint(
+            x: liftOrigin.x + drag.translation.width,
+            y: liftOrigin.y + drag.translation.height
+        )
+        let remove = magnetizedToTrash || distanceToTrash(finger) <= Self.trashMagnetEnter
+        let dropSlot = remove ? nil : (gapSlot ?? slotIndexAt(localX: finger.x))
+        let from = homeSlot ?? baseOrder.firstIndex(of: id)
+
+        cancelDrag()
+
+        if remove {
+            confirmRemove(id: id)
+            return
+        }
+        if let to = dropSlot, let from {
+            commitMove(id: id, from: from, to: to)
+        }
+    }
+
+    private func cancelDrag() {
+        draggingID = nil
+        homeSlot = nil
+        dragTranslation = .zero
+        gapSlot = nil
+        magnetizedToTrash = false
     }
 
     private func updateTrashMagnet(finger: CGPoint) {
         let d = distanceToTrash(finger)
         if magnetizedToTrash {
-            // Hysteresis — don't drop magnet until clearly away.
-            if d > Self.trashMagnetExit {
-                magnetizedToTrash = false
-            }
+            if d > Self.trashMagnetExit { magnetizedToTrash = false }
         } else if d <= Self.trashMagnetEnter {
             magnetizedToTrash = true
         }
@@ -268,73 +336,69 @@ struct GaugeClusterView: View {
 
     private func slotCenter(index: Int) -> CGPoint {
         let n = slotCount
-        let cell = AccountWidget.cellSize
-        let stride = cell + Self.gap
-        let rowW = CGFloat(n) * cell + CGFloat(max(0, n - 1)) * Self.gap
+        let stride = Self.cell + Self.gap
+        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
         let w = clusterSize.width > 1 ? clusterSize.width : rowW
         let leading = (w - rowW) / 2
-        let x = leading + CGFloat(index) * stride + cell / 2
-        let y = Self.cellH / 2
-        return CGPoint(x: x, y: y)
+        return CGPoint(
+            x: leading + CGFloat(index) * stride + Self.cell / 2,
+            y: Self.cellH / 2
+        )
     }
 
     private func slotIndexAt(localX x: CGFloat) -> Int? {
         let n = slotCount
         guard n > 0 else { return nil }
-        let cell = AccountWidget.cellSize
-        let stride = cell + Self.gap
-        let rowW = CGFloat(n) * cell + CGFloat(max(0, n - 1)) * Self.gap
+        let stride = Self.cell + Self.gap
+        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
         let w = clusterSize.width > 1 ? clusterSize.width : rowW
         let leading = (w - rowW) / 2
         let localX = x - leading
-        guard localX >= -cell * 0.5, localX <= rowW + cell * 0.5 else { return nil }
+        guard localX >= -Self.cell * 0.5, localX <= rowW + Self.cell * 0.5 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
-        if orderIDs.isEmpty { return index }
-        return min(index, max(orderIDs.count - 1, 0))
+        let maxFilled = max(baseOrder.count - 1, 0)
+        return min(index, maxFilled)
     }
 
     private func commitMove(id: AccountID, from: Int, to: Int) {
         guard from != to else { return }
-        var next = orderIDs.isEmpty ? widgets.map(\.id) : orderIDs
+        var next = baseOrder.isEmpty ? widgets.map(\.id) : baseOrder
         guard let fromIdx = next.firstIndex(of: id) else { return }
         let item = next.remove(at: fromIdx)
-        let dest = min(max(0, to), next.count)
+        let dest: Int
+        if to > fromIdx {
+            dest = min(to, next.count)
+        } else {
+            dest = min(max(0, to), next.count)
+        }
         next.insert(item, at: dest)
-        orderIDs = next
+        baseOrder = next
 
-        if DemoWidgets.isForced { return }
+        // Never skip persist for real accounts even if DEMO env is set.
+        if DemoWidgets.isForced && !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
+            return
+        }
 
         do {
             try AccountStore.shared.applyOrder(next)
         } catch {
-            syncOrderFromWidgets()
+            syncFromWidgets()
         }
     }
 
     private func confirmRemove(id: AccountID) {
-        // Demo: drop from local order only.
-        if DemoWidgets.isForced || !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
+        // Demo / unknown id: local only, still confirm-looking snap-back is fine.
+        if !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                orderIDs.removeAll { $0 == id }
+                baseOrder.removeAll { $0 == id }
             }
             return
         }
-
         let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? "this account"
-        let alert = NSAlert()
-        alert.messageText = "Remove \(label)?"
-        alert.informativeText = "This removes the account from Dash Island and deletes its stored credentials."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            try? AccountStore.shared.remove(id: id)
-            orderIDs.removeAll { $0 == id }
-        } else {
-            syncOrderFromWidgets()
-        }
+        // Do not sync here — `remove` presents a deferred confirm. Cancel leaves order
+        // intact; confirm updates via AccountStore → widgets → baseOrder onChange.
+        AccountChromeActions.remove(accountID: id, label: label)
     }
 }
 
@@ -349,8 +413,8 @@ struct SlotSkeleton: View {
             .fill(
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(highlighted ? 0.10 : 0.055),
-                        Color.white.opacity(highlighted ? 0.06 : 0.03)
+                        Color.white.opacity(highlighted ? 0.12 : 0.055),
+                        Color.white.opacity(highlighted ? 0.07 : 0.03)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -359,15 +423,17 @@ struct SlotSkeleton: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        Color.white.opacity(highlighted ? 0.22 : 0.08),
-                        style: StrokeStyle(lineWidth: 1, dash: empty ? [5, 4] : [])
+                        Color.white.opacity(highlighted ? 0.32 : 0.08),
+                        style: StrokeStyle(lineWidth: highlighted ? 1.5 : 1, dash: empty ? [5, 4] : [])
                     )
             )
             .overlay {
-                Circle()
-                    .strokeBorder(Color.white.opacity(highlighted ? 0.12 : 0.06), lineWidth: 4)
-                    .frame(width: 56, height: 56)
-                    .offset(y: -6)
+                if empty {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(highlighted ? 0.16 : 0.06), lineWidth: 4)
+                        .frame(width: 56, height: 56)
+                        .offset(y: -6)
+                }
             }
     }
 }
@@ -385,13 +451,13 @@ extension Notification.Name {
 
 @MainActor
 enum DemoWidgets {
+    /// Env-only flag. Prefer real accounts whenever any exist (see IslandRootView).
     static var isForced: Bool {
         ProcessInfo.processInfo.environment["DASHISLAND_DEMO"] == "1"
     }
 
     static func isEnabled(accountsEmpty: Bool) -> Bool {
-        _ = accountsEmpty
-        return isForced
+        isForced && accountsEmpty
     }
 
     static var count: Int {
@@ -412,57 +478,85 @@ enum DemoWidgets {
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
             title: "claude · home",
+            vendorID: "claude",
             tint: .claude,
             primaryFraction: 0.18,
             secondaryFraction: 0.12,
+            usedPrimaryFraction: 0.18,
             centerPercent: 18,
             burnRatio: 0.0,
-            hoverLines: ["5h  1.8k / 10k", "wk  12k / 100k"],
-            errorCaption: nil
+            hoverWindows: [
+                HoverWindowLine(label: "5h", usage: "1.8k / 10k", resetAt: Date().addingTimeInterval(4 * 3600)),
+                HoverWindowLine(label: "wk", usage: "12k / 100k", resetAt: Date().addingTimeInterval(3 * 86_400))
+            ],
+            errorCaption: nil,
+            isAwaitingFirstSample: false
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
             title: "codex · team",
+            vendorID: "codex",
             tint: .codex,
             primaryFraction: 0.41,
             secondaryFraction: 0.55,
+            usedPrimaryFraction: 0.41,
             centerPercent: 41,
             burnRatio: 1.0,
-            hoverLines: ["5h  4.1k / 10k", "wk  55k / 100k"],
-            errorCaption: nil
+            hoverWindows: [
+                HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(5 * 86_400 + 12 * 3600))
+            ],
+            errorCaption: nil,
+            isAwaitingFirstSample: false
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000003")!,
             title: "claude · work",
+            vendorID: "claude",
             tint: .claude,
             primaryFraction: 0.72,
             secondaryFraction: 0.41,
+            usedPrimaryFraction: 0.72,
             centerPercent: 72,
             burnRatio: 1.8,
-            hoverLines: ["5h  7.2k / 10k", "wk  41k / 100k"],
-            errorCaption: nil
+            hoverWindows: [
+                HoverWindowLine(label: "5h", usage: "72%", resetAt: Date().addingTimeInterval(2 * 3600 + 15 * 60)),
+                HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(4 * 86_400))
+            ],
+            errorCaption: nil,
+            isAwaitingFirstSample: false
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000004")!,
             title: "grok · play",
+            vendorID: "grok",
             tint: .grok,
             primaryFraction: 0.33,
             secondaryFraction: 0.28,
+            usedPrimaryFraction: 0.33,
             centerPercent: 33,
             burnRatio: 0.4,
-            hoverLines: ["5h  3.3k / 10k", "wk  28k / 100k"],
-            errorCaption: nil
+            hoverWindows: [
+                HoverWindowLine(label: "wk", usage: "33%", resetAt: Date().addingTimeInterval(2 * 86_400 + 5 * 3600)),
+                HoverWindowLine(label: "mo", usage: "28k / 150k", resetAt: Date().addingTimeInterval(12 * 86_400))
+            ],
+            errorCaption: nil,
+            isAwaitingFirstSample: false
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000005")!,
             title: "codex · side",
+            vendorID: "codex",
             tint: .codex,
             primaryFraction: 0.09,
             secondaryFraction: nil,
+            usedPrimaryFraction: 0.09,
             centerPercent: 9,
             burnRatio: 0.0,
-            hoverLines: ["5h  0.9k / 10k"],
-            errorCaption: nil
+            hoverWindows: [
+                HoverWindowLine(label: "wk", usage: "9%", resetAt: Date().addingTimeInterval(6 * 86_400))
+            ],
+            errorCaption: nil,
+            isAwaitingFirstSample: false
         ),
     ]
 }

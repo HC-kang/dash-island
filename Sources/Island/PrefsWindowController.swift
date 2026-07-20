@@ -17,7 +17,7 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
         }
         let host = NSHostingController(rootView: root)
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 300),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false

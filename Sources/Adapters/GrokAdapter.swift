@@ -66,17 +66,24 @@ struct GrokAdapter: VendorAdapter {
     func beginAdd() async throws -> AddAccountResult {
         let accountID = UUID()
         let ref = accountID.uuidString
-        let dir = try CredentialStore.createDirectory(for: ref)
-        try await ensureCredentials(grokHome: dir)
-        let session = try Self.requireSession(grokHome: dir)
-        let short = String(ref.prefix(8))
-        let label = Self.suggestedLabel(email: session.email, short: short)
-        return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+        do {
+            let dir = try CredentialStore.createDirectory(for: ref)
+            try await ensureCredentials(grokHome: dir)
+            let session = try Self.requireSession(grokHome: dir)
+            let short = String(ref.prefix(8))
+            let label = Self.suggestedLabel(email: session.email, short: short)
+            return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+        } catch {
+            try? CredentialStore.removeDirectory(for: ref)
+            throw error
+        }
     }
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
         do {
+            // Wipe first — runLogin otherwise returns as soon as old auth.json is seen.
+            Self.clearManagedCredentials(grokHome: dir)
             try await ensureCredentials(grokHome: dir, forceLogin: true)
             _ = try Self.requireSession(grokHome: dir)
             return ref
@@ -103,7 +110,8 @@ struct GrokAdapter: VendorAdapter {
     // MARK: - Login / seed credentials
 
     /// Prefer interactive `grok login` under managed `GROK_HOME`. If the binary
-    /// is missing, fall back to copying a usable default `~/.grok/auth.json`.
+    /// is missing, fall back to copying a usable default `~/.grok/auth.json`
+    /// only for **first add** (`forceLogin == false`) — never on reauth.
     private func ensureCredentials(grokHome: URL, forceLogin: Bool = false) async throws {
         if !forceLogin, Self.readSession(grokHome: grokHome) != nil {
             return
@@ -113,17 +121,33 @@ struct GrokAdapter: VendorAdapter {
             _ = try Self.requireSession(grokHome: grokHome)
             return
         }
-        // beginAdd fallback: seed from the default Grok home when CLI is absent.
+        // beginAdd only: seed from default home when CLI is absent.
         if !forceLogin, try Self.copyDefaultAuthIfPresent(into: grokHome) {
             return
         }
         throw GrokAdapterError.grokBinaryNotFound
     }
 
+    static func clearManagedCredentials(grokHome: URL) {
+        let fm = FileManager.default
+        let paths = [
+            grokHome.appendingPathComponent(authFileName, isDirectory: false),
+            grokHome
+                .appendingPathComponent(".grok", isDirectory: true)
+                .appendingPathComponent(authFileName, isDirectory: false),
+        ]
+        for path in paths where fm.fileExists(atPath: path.path) {
+            try? fm.removeItem(at: path)
+        }
+        NSLog("DashIsland: cleared Grok managed creds at %@", grokHome.path)
+    }
+
     private func runLogin(grokHome: URL) async throws {
         guard let binary = Self.locateGrokBinary() else {
             throw GrokAdapterError.grokBinaryNotFound
         }
+
+        let priorToken = Self.readSession(grokHome: grokHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -144,8 +168,18 @@ struct GrokAdapter: VendorAdapter {
         }
 
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
+
+        func isAcceptable(_ session: GrokSession) -> Bool {
+            if let priorToken, session.accessToken == priorToken { return false }
+            return !session.accessToken.isEmpty
+        }
+
         while Date() < deadline {
-            if Self.readSession(grokHome: grokHome) != nil {
+            if Task.isCancelled {
+                if task.isRunning { task.terminate() }
+                throw CancellationError()
+            }
+            if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 if task.isRunning {
                     task.terminate()
@@ -154,18 +188,18 @@ struct GrokAdapter: VendorAdapter {
             }
             if !task.isRunning {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                if Self.readSession(grokHome: grokHome) != nil {
+                if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
                     return
                 }
                 throw GrokAdapterError.credentialsMissing(grokHome: grokHome.path)
             }
-            try? await Task.sleep(nanoseconds: Self.pollNanos)
+            try await Task.sleep(nanoseconds: Self.pollNanos)
         }
 
         if task.isRunning {
             task.terminate()
         }
-        if Self.readSession(grokHome: grokHome) != nil {
+        if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
             return
         }
         throw GrokAdapterError.loginTimeout(grokHome: grokHome.path)
@@ -296,6 +330,13 @@ struct GrokAdapter: VendorAdapter {
 
     // MARK: - Usage HTTP
 
+    /// How often to hit the monthly billing URL when weekly credits already work.
+    /// Weekly alone drives rings + burn; monthly is a secondary ring only.
+    nonisolated static let monthlyFetchMinInterval: TimeInterval = 15 * 60
+
+    /// Best-effort thrift cache (races only waste an occasional extra fetch).
+    nonisolated(unsafe) private static var monthlyCache: [String: (at: Date, window: WindowUsage?)] = [:]
+
     static func probeUsage(session: GrokSession, fetchedAt: Date) async -> UsageSnapshot {
         let creditsResult = await fetchBilling(url: creditsURL, session: session)
         switch creditsResult {
@@ -311,22 +352,34 @@ struct GrokAdapter: VendorAdapter {
                 )
             }
             let plan = config["subscriptionTier"] as? String
+            let cacheKey = session.userId ?? String(session.accessToken.prefix(16))
+
             if let weekly = mapWeeklyCredits(config) {
+                // Live Grok credits are **weekly**, not 5h. Monthly is optional
+                // secondary — throttle to cut dual HTTP load (was every poll).
+                let monthly = await fetchMonthlyThrottled(session: session, cacheKey: cacheKey, now: fetchedAt)
                 return UsageSnapshot(
                     primary: weekly,
-                    secondary: nil,
+                    secondary: monthly,
                     plan: plan,
                     fetchedAt: fetchedAt,
                     error: nil
                 )
             }
 
-            // Unified-billing accounts often omit weekly %; read default billing view.
+            // No weekly % — monthly-only accounts (always fetch monthly).
             let monthlyResult = await fetchBilling(url: defaultBillingURL, session: session)
             switch monthlyResult {
             case .httpError(let snapshot):
                 return snapshot.withFetchedAt(fetchedAt)
             case .data(let monthlyData):
+                if let monthly = mapMonthlyUsage(
+                    resolveBillingConfig(
+                        (try? JSONSerialization.jsonObject(with: monthlyData) as? [String: Any]) ?? [:]
+                    ) ?? ((try? JSONSerialization.jsonObject(with: monthlyData) as? [String: Any]) ?? [:])
+                ) {
+                    storeMonthlyCache(key: cacheKey, window: monthly, at: fetchedAt)
+                }
                 return parseMonthlyFallback(
                     creditsData: data,
                     monthlyData: monthlyData,
@@ -334,6 +387,34 @@ struct GrokAdapter: VendorAdapter {
                 )
             }
         }
+    }
+
+    /// Monthly billing at most every `monthlyFetchMinInterval` per session key.
+    private static func fetchMonthlyThrottled(
+        session: GrokSession,
+        cacheKey: String,
+        now: Date
+    ) async -> WindowUsage? {
+        let cached = monthlyCache[cacheKey]
+        if let cached, now.timeIntervalSince(cached.at) < monthlyFetchMinInterval {
+            return cached.window
+        }
+
+        let monthlyResult = await fetchBilling(url: defaultBillingURL, session: session)
+        let window: WindowUsage?
+        if case .data(let monthlyData) = monthlyResult {
+            let monthlyRoot = (try? JSONSerialization.jsonObject(with: monthlyData) as? [String: Any]) ?? [:]
+            let monthlyConfig = resolveBillingConfig(monthlyRoot) ?? monthlyRoot
+            window = mapMonthlyUsage(monthlyConfig)
+        } else {
+            window = cached?.window
+        }
+        monthlyCache[cacheKey] = (now, window)
+        return window
+    }
+
+    private static func storeMonthlyCache(key: String, window: WindowUsage?, at: Date) {
+        monthlyCache[key] = (at, window)
     }
 
     private enum BillingFetch {
@@ -398,7 +479,7 @@ struct GrokAdapter: VendorAdapter {
         }
         // No weekly — caller may try monthly fallback. Surface as soft empty for pure parse tests.
         return UsageSnapshot(
-            primary: WindowUsage(usedFraction: 0, resetAt: nil, usedTokens: nil, limitTokens: nil),
+            primary: WindowUsage(usedFraction: 0, kind: .unknown),
             secondary: nil,
             plan: plan,
             fetchedAt: fetchedAt,
@@ -421,7 +502,7 @@ struct GrokAdapter: VendorAdapter {
 
         if let monthly = mapMonthlyUsage(monthlyConfig) {
             return UsageSnapshot(
-                primary: monthly,
+                primary: monthly, // already .monthly kind
                 secondary: nil,
                 plan: plan,
                 fetchedAt: fetchedAt,
@@ -481,7 +562,7 @@ struct GrokAdapter: VendorAdapter {
     }
 
     /// Weekly credits: `creditUsagePercent` always ÷100. Confirmed-weekly with
-    /// omitted percent → 0 (protobuf zero).
+    /// omitted percent → 0 (protobuf zero). Kind is always `.weekly` (not 5h).
     static func mapWeeklyCredits(_ config: [String: Any]) -> WindowUsage? {
         let percent = numberValue(config["creditUsagePercent"])
         if let percent {
@@ -490,7 +571,8 @@ struct GrokAdapter: VendorAdapter {
                 usedFraction: fraction,
                 resetAt: periodEndDate(config),
                 usedTokens: nil,
-                limitTokens: nil
+                limitTokens: nil,
+                kind: .weekly
             )
         }
         if hasConfirmedWeeklyPeriod(config) {
@@ -498,13 +580,15 @@ struct GrokAdapter: VendorAdapter {
                 usedFraction: 0,
                 resetAt: periodEndDate(config),
                 usedTokens: nil,
-                limitTokens: nil
+                limitTokens: nil,
+                kind: .weekly
             )
         }
         return nil
     }
 
     /// Monthly: `used.val / monthlyLimit.val` when limit > 0.
+    /// Absolute counters are kept for burn (much finer than weekly whole-percent).
     static func mapMonthlyUsage(_ config: [String: Any]) -> WindowUsage? {
         guard let limit = moneyVal(config["monthlyLimit"]), limit > 0,
               let used = moneyVal(config["used"])
@@ -513,8 +597,9 @@ struct GrokAdapter: VendorAdapter {
         return WindowUsage(
             usedFraction: fraction,
             resetAt: periodEndDate(config),
-            usedTokens: nil,
-            limitTokens: nil
+            usedTokens: Int64(used.rounded()),
+            limitTokens: Int64(limit.rounded()),
+            kind: .monthly
         )
     }
 
@@ -577,7 +662,7 @@ struct GrokAdapter: VendorAdapter {
 
     static func errorSnapshot(_ error: UsageError, fetchedAt: Date) -> UsageSnapshot {
         UsageSnapshot(
-            primary: WindowUsage(usedFraction: 0, resetAt: nil, usedTokens: nil, limitTokens: nil),
+            primary: WindowUsage(usedFraction: 0, kind: .unknown),
             secondary: nil,
             plan: nil,
             fetchedAt: fetchedAt,

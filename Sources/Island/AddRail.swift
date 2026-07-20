@@ -1,12 +1,14 @@
 import SwiftUI
 
 /// Trailing chevron that expands a slim dashed skeleton pocket with a centered `+`.
+/// Opens after a short dwell (≥500ms) so accidental strip-hover does not grow the body.
 struct AddRail: View {
     var onSelectVendor: (any VendorAdapter) -> Void
     var onExpandedChange: (Bool) -> Void
 
     @State private var expanded = false
     @State private var stripHovered = false
+    @State private var openTask: Task<Void, Never>?
     @State private var closeTask: Task<Void, Never>?
 
     static let chevronWidth: CGFloat = 16
@@ -14,6 +16,7 @@ struct AddRail: View {
     static let railWidth: CGFloat = 36
     static var totalExpandedWidth: CGFloat { chevronWidth + railWidth }
 
+    private static let dwellNanos: UInt64 = 500_000_000
     private static let closeGraceNanos: UInt64 = 280_000_000
     private static let cellH = AccountWidget.cellSize + 8
 
@@ -26,7 +29,6 @@ struct AddRail: View {
 
             ZStack {
                 if expanded {
-                    // Narrow dashed skeleton (slot-style, slim width) + plus only.
                     Menu {
                         VendorMenuItems(onSelect: onSelectVendor)
                     } label: {
@@ -53,8 +55,10 @@ struct AddRail: View {
             stripHovered = hovering
             if hovering {
                 cancelClose()
-                openRail()
+                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+                scheduleOpen()
             } else {
+                cancelOpen()
                 scheduleClose()
             }
         }
@@ -63,6 +67,7 @@ struct AddRail: View {
             onExpandedChange(isOpen)
         }
         .onDisappear {
+            cancelOpen()
             cancelClose()
             if expanded {
                 expanded = false
@@ -73,11 +78,15 @@ struct AddRail: View {
         .accessibilityLabel("Add account")
     }
 
-    private func openRail() {
-        cancelClose()
+    private func scheduleOpen() {
+        cancelOpen()
         guard !expanded else { return }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
-            expanded = true
+        openTask = Task {
+            try? await Task.sleep(nanoseconds: Self.dwellNanos)
+            guard !Task.isCancelled, stripHovered else { return }
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                expanded = true
+            }
         }
     }
 
@@ -92,6 +101,11 @@ struct AddRail: View {
                 }
             }
         }
+    }
+
+    private func cancelOpen() {
+        openTask?.cancel()
+        openTask = nil
     }
 
     private func cancelClose() {
@@ -122,7 +136,6 @@ private struct SlimAddSkeleton: View {
                     )
             )
             .overlay {
-                // Mini gauge ring hint, scaled to narrow width.
                 Circle()
                     .strokeBorder(Color.white.opacity(0.08), lineWidth: 3)
                     .frame(width: 22, height: 22)

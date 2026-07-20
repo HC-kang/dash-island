@@ -126,3 +126,89 @@ Branch `feat/v1-implementation` — plan tasks 1–10 landed via subagent-driven
 - Gauge rings/needle spring settle (`response: 0.55`, `dampingFraction: 0.88`) via drawn state; first paint snaps.
 - Demo env unchanged: `DASHISLAND_DEMO=1`, optional `DASHISLAND_DEMO_COUNT` ∈ {1,3,5}.
 - README: build/run/demo/tests.
+
+## Drag reorder UX (2026-07-19)
+
+- **Downward push bug**: was `minHeight` growing when drag started (trash zone). Fix: fixed cluster height = `cellH`; trash/float paint into window `dragBleed` only.
+- **Drop preview + push**: freeze `baseOrder` mid-drag; `gapSlot` under finger; non-dragged widgets keep stable identity and animate `.position` to packed seats around the gap; gap skeleton highlighted with ring.
+- **Gesture continuity**: dragged id stays mounted at home slot at opacity ~0 (same ForEach identity) so DragGesture does not die when neighbors pack.
+- Commit only on drop via `AccountStore.applyOrder`; no mid-drag store mutation. Demo order local-only.
+
+## Credential persistence (2026-07-19)
+
+- Real path: `~/Library/Application Support/DashIsland/{accounts.json,accounts/<uuid>/}` — outside the `.app` bundle; rebuild never wipes it.
+- Never launch user-facing smoke tests with `DASHISLAND_DEMO=1` — it replaces UI with fake widgets while leaving disk alone (looks like "accounts wiped").
+- Hardening: refuse empty `accounts.json` overwrite unless last account explicitly removed; corrupt file → `accounts.corrupt.<ts>.json` backup, no clobber; orphan folders with valid vendor creds rehydrate into the list on live load only.
+- On launch log: Application Support path + account count.
+
+## Menus + restart “missing accounts” (2026-07-19)
+
+- Root cause of “accounts gone after restart”: process often relaunched with `DASHISLAND_DEMO=1` (inherits from agent shells). Demo replaced UI widgets; disk untouched.
+- Fix: real accounts always win — `useDemoWidgets = DEMO && accounts.isEmpty`. Never mask registered accounts.
+- Menus dead: full-cell `Color.clear` DragGesture overlay ate right-click / Menu hits. Removed; reorder is long-press (~180ms) then drag on the widget itself (offset push, stable cell identity).
+- Accessory app menus need `NSApp.activate(ignoringOtherApps: true)` + `makeKeyAndOrderFront` on hover / add rail / alerts.
+- Launch smoke tests with clean env (`env -i …` or unset DASHISLAND_DEMO). Never leave DEMO=1 processes running for the user.
+
+## Polish pass 1–7 (2026-07-19)
+
+1. Fake removed from product Add menu (`VendorRegistry.all`); Fake remains in `allIncludingDev` for adapter lookup/tests.
+2. `isHot` uses `usedPrimaryFraction` (not Remaining-flipped display %).
+3. Prefs: Quit Dash Island.
+4. Name Cancel aborts add + deletes credential dir; login failure cleans dir; progress Cancel cancels Task + cleanup.
+5. NSMenu begin/end tracking holds expanded island.
+6. Non-modal Sign-in progress panel during CLI OAuth (Cancel supported).
+7. Add rail dwell 500ms; poll age TimelineView 1s; cold-start widget spinner + “waiting for first poll…”.
+
+## Burn window priority (2026-07-19)
+
+- User rule: burn uses **5h → weekly → monthly** kind order.
+- Was wrong: preferred absolute counters first (elevated Grok monthly over everything; ambiguous for multi-window).
+- Now: pick first existing of fiveHour, weekly, monthly. Exception: coarse weekly % + monthly absolute counters → monthly (Grok needle signal).
+- Claude needle stuck: (1) only full 5m poll, (2) API gives integer utilization only — no Δ while % flat. Fix: burn micro-poll includes Claude/Codex every ~3m; still needs a 1% tick to seed needle.
+
+## Claude creds: file only (2026-07-19)
+
+- User: stop poking Keychain every poll — just keep the token we got at login.
+- Was: every `readCredentials` / 401 path hit scoped `Claude Code-credentials-<hash>` + security CLI fallback, rewrite file from keychain.
+- Now: steady-state source of truth = `accounts/<uuid>/.credentials.json` only. Keychain touch only on (1) login capture once if CLI wrote keychain first, (2) reauth wipe of scoped item so CLI re-login is not short-circuited. Never the default global Claude keychain.
+- Expired access token → authRequired / reauth; we still do not OAuth-refresh (would race CLI).
+
+## Burn needle vs integer % (2026-07-19)
+
+- Same formula for 5h/wk/mo: ratio = (Δu/Δt) / v_cruise; v_cruise = remaining/ttr or 1/W(kind). Weekly W is 7d — not 5h constants on weekly samples.
+- User cruise intuition: ~2% of 5h bar per 5 min ≈ cruise (300/ttr with ~4.2h left).
+- Claude API whole-percent → often Δu=0 while actually using. Fixes: (1) coarse baseline = previous sample not 15m lookback, (2) ClaudeActivity from ~/.claude JSONL boosts needle via noteLiveActivity every burn tick, (3) Grok still absolute monthly counters.
+
+## Overnight rate-limit / reauth (2026-07-20)
+
+- Root cause: burn micro-poll hit vendor APIs every 60s (Grok, dual billing) / ~3m (Claude) and on 429/401 only skipped updating lastGood — **no cooldown** → hammered all night.
+- Fix: burn timer is **local Claude logs only** (no network). Usage HTTP only via user poll interval × minPoll (Claude/Grok 5m, Codex 2m). 429 default cooldown 30m; authRequired cooldown 30m (cleared on manual refresh/reauth).
+- Reauth overnight also expected when access tokens expire (we never OAuth-refresh Claude).
+
+## Feature benchmark inventory (2026-07-20)
+
+- Living inventory: `docs/notes/feature-benchmark-inventory.md`
+- References: codex-island (notch HUD, Sparkle, cost/alerts, poll≥5m), orca rate-limits service (15m default, inactive pause, error class, Fable/limits[], multi-account), CodexBar via orca docs (source planner — optional later).
+- P0 closed recently: no network burn poll, cooldowns, 5h→wk→mo burn, file-only Claude creds.
+- Top P1 gaps: Claude `limits[]`/Fable, auth expiry UX + vendor captions, sleep/inactive poll backoff, Grok dual-fetch thrift, status request budget, launch-at-login, Sparkle when public, needle source labeling.
+- Explicit skips: Electron UI, full Orca provider zoo, Claude OAuth refresh, cost/year calendar in v1.
+
+## P1 wave sequential (2026-07-20)
+
+Implemented from feature-benchmark-inventory:
+- U11 Claude limits[] Fable → snapshot.extras (hover only)
+- A06/A07 token expiry notice + vendor reauth captions
+- P06 sleep skip poll; screen lock 30m floor
+- P09 Grok monthly fetch ≤15m cache
+- P10 status budgetCaption + cooldown/next due rows
+- B08 burnSource hover hint (api/local/both)
+- S10 Launch at Login (SMAppService)
+- M06/M08 prefs launch + refresh; default poll 15m
+- R01/R02 plan only: docs/notes/SPARKLE-HOMEBREW-PLAN.md
+
+## Lazy expand poll policy (2026-07-20)
+
+- Fixed background `UsageOrchestrator.backgroundPollSeconds = 15m` — poll interval prefs removed.
+- Expand: IslandRootView dwells 400ms then `onIslandExpanded()` → poll mode `.expand` with interval max(120s, vendor minPoll); cooldowns respected.
+- Fetch concurrency capped at 2. Launch/wake/account-change still seed.
+- Prefs copy: "Background poll every 15m · fresh data when you expand".

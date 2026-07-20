@@ -121,12 +121,51 @@ enum OrchestratorDueSuite {
             try assertEqual(UsageOrchestrator.formatTokens(1_200_000), "1.2m")
         }
 
-        failures += check("PreferencesStore clamps pollSeconds") {
-            try assertEqual(PreferencesStore.clampPoll(300), 300)
-            try assertEqual(PreferencesStore.clampPoll(900), 900)
-            try assertEqual(PreferencesStore.clampPoll(1800), 1800)
-            try assertEqual(PreferencesStore.clampPoll(60), 300)
-            try assertEqual(PreferencesStore.clampPoll(999), 300)
+        failures += check("formatResetRemaining compact 1d 5h style") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            let d5h = now.addingTimeInterval(1 * 86_400 + 5 * 3_600)
+            try assertEqual(
+                UsageOrchestrator.formatResetRemaining(until: d5h, now: now),
+                "1d 5h"
+            )
+            let h12m = now.addingTimeInterval(5 * 3_600 + 12 * 60)
+            try assertEqual(
+                UsageOrchestrator.formatResetRemaining(until: h12m, now: now),
+                "5h 12m"
+            )
+            let mOnly = now.addingTimeInterval(42 * 60)
+            try assertEqual(
+                UsageOrchestrator.formatResetRemaining(until: mOnly, now: now),
+                "42m"
+            )
+            try assertEqual(
+                UsageOrchestrator.formatResetRemaining(until: now.addingTimeInterval(-10), now: now),
+                "now"
+            )
+        }
+
+        failures += check("background poll fixed at 15m") {
+            try assertEqual(UsageOrchestrator.backgroundPollSeconds, 15 * 60, accuracy: 0)
+        }
+
+        failures += check("expand interval floors at 120s and respects minPoll") {
+            try assertEqual(UsageOrchestrator.expandInterval(minPoll: 60), 120, accuracy: 0)
+            try assertEqual(UsageOrchestrator.expandInterval(minPoll: 300), 300, accuracy: 0)
+            try assertEqual(UsageOrchestrator.expandInterval(minPoll: 120), 120, accuracy: 0)
+        }
+
+        failures += check("budget caption mentions 15m background") {
+            let a = Account(
+                id: UUID(),
+                vendorID: "claude",
+                label: "t",
+                credentialRef: "x",
+                sortIndex: 0,
+                createdAt: Date(),
+                lastAuthenticatedAt: nil
+            )
+            let cap = UsageOrchestrator.estimateBudgetCaption(accounts: [a])
+            try assertTrue(cap.contains("15m"), "got \(cap)")
         }
 
         return failures
