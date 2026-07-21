@@ -85,6 +85,51 @@ enum ClaudeAdapterSuite {
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
             try assertEqual(creds?.accessToken, "at-test")
             try assertEqual(creds?.subscriptionType, "max")
+            try assertEqual(creds?.refreshToken, "rt")
+        }
+        failures += check("needsRefresh respects 5m buffer") {
+            let future = Date().addingTimeInterval(10 * 60)
+            let near = Date().addingTimeInterval(2 * 60)
+            let past = Date().addingTimeInterval(-60)
+            let fresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: future, rawJSON: nil
+            )
+            let soon = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: near, rawJSON: nil
+            )
+            let expired = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: past, rawJSON: nil
+            )
+            let noRefresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: past, rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
+            try assertTrue(ClaudeAdapter.needsRefresh(soon))
+            try assertTrue(ClaudeAdapter.needsRefresh(expired))
+            try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
+        }
+        failures += check("applyRefreshedToken merges access + rotated refresh") {
+            let existing = Data("""
+            {"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","subscriptionType":"max","expiresAt":1}}
+            """.utf8)
+            let response = Data("""
+            {"access_token":"new-at","expires_in":3600,"refresh_token":"rt-new"}
+            """.utf8)
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            guard let updated = ClaudeAdapter.applyRefreshedToken(
+                existingJSON: existing,
+                responseJSON: response,
+                now: now
+            ) else {
+                try assertTrue(false, "expected merge")
+                return
+            }
+            let creds = ClaudeAdapter.parseCredentialsJSON(updated)
+            try assertEqual(creds?.accessToken, "new-at")
+            try assertEqual(creds?.refreshToken, "rt-new")
+            try assertEqual(creds?.subscriptionType, "max")
+            let exp = creds?.expiresAt?.timeIntervalSince1970 ?? -1
+            try assertEqual(exp, 1_700_000_000 + 3600, accuracy: 1)
         }
         failures += check("expiresAt milliseconds epoch") {
             // Claude Code stores expiresAt in ms — we only parse and store it.

@@ -19,15 +19,15 @@ struct NotchInfo: Equatable {
 
     static let fallbackWidth: CGFloat = 180
 
+    @MainActor
     static func detectPreferred() -> NotchInfo {
         detect(from: preferredScreen())
     }
 
+    /// Screen hosting the island — respects `TargetDisplayStore`.
+    @MainActor
     static func preferredScreen() -> NSScreen? {
-        if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
-            return notched
-        }
-        return NSScreen.main ?? NSScreen.screens.first
+        DisplayInfo.currentScreen()
     }
 
     static func detect(from screen: NSScreen?) -> NotchInfo {
@@ -81,17 +81,25 @@ struct NotchInfo: Equatable {
         )
     }
 
-    /// Visual calibration: nudge the whole island right a hair so the rim
-    /// seats against the hardware cutout (aux gap is often 0.5–1pt left-biased).
-    static let positionNudgeX: CGFloat = 1.25
+    /// Tiny optical nudge (aux gap is often ~0.5–1pt left-biased on hardware).
+    static let positionNudgeX: CGFloat = 0.5
 
-    /// Window origin X so the notch fill’s leading edge lands on `screenMinX`.
-    func windowOriginX(windowWidth: CGFloat) -> CGFloat {
+    /// Stable horizontal anchor: center of the physical notch strip (+ nudge).
+    /// All window frames must keep `frame.midX == anchoredCenterX` so expand/collapse
+    /// never walks the island sideways.
+    var anchoredCenterX: CGFloat {
+        let center: CGFloat
         if let minX = screenMinX {
-            // Center the (possibly padded) window on the real notch strip.
-            return minX - (windowWidth - width) / 2 + Self.positionNudgeX
+            center = minX + width / 2
+        } else {
+            center = screenMidX
         }
-        return screenMidX - windowWidth / 2 + Self.positionNudgeX
+        return center + Self.positionNudgeX
+    }
+
+    /// Window origin X so the window is centered on `anchoredCenterX`.
+    func windowOriginX(windowWidth: CGFloat) -> CGFloat {
+        anchoredCenterX - windowWidth / 2
     }
 
     static func menuBarHeight(

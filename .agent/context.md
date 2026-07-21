@@ -212,3 +212,36 @@ Implemented from feature-benchmark-inventory:
 - Expand: IslandRootView dwells 400ms then `onIslandExpanded()` → poll mode `.expand` with interval max(120s, vendor minPoll); cooldowns respected.
 - Fetch concurrency capped at 2. Launch/wake/account-change still seed.
 - Prefs copy: "Background poll every 15m · fresh data when you expand".
+
+## Auto OAuth refresh (2026-07-20)
+
+- Managed Claude accounts: proactive refresh when access token within 5m of expiry; reactive on 401. POST platform.claude.com/v1/oauth/token with public Claude Code client_id; persist rotated refresh_token to accounts/<uuid>/.credentials.json only — never default keychain (avoids dual-refresh with user CLI).
+- Managed Codex: refresh via auth.openai.com/oauth/token (client app_EMoamEEZ73f0CkXaXp7hrann); throttle by last_refresh 45m unless force on 401.
+- Reauth still required if refresh_token revoked/expired.
+
+## Lateral drift fix (2026-07-20)
+
+Root cause: expand/collapse resized `NSWindow` while SwiftUI content laid out at full target size (left-biased during intermediate frames). midX-pin on setFrame was not enough; prior binary also lagged source.
+
+Fix (codex-island pattern):
+- `IslandModel.canvasSize` = max expanded footprint (5 slots + rail + bleed).
+- `IslandWindowController.pinCanvas` only on screen/notch/display changes — **never** on compact↔expanded.
+- Root view: draw `model.size` top-centered inside fixed canvas (`.frame(maxWidth: .infinity, …, alignment: .top)`).
+- Hover still hit-tests the visual island, not the full canvas.
+
+## Hover hit tightened (2026-07-20)
+
+Fixed canvas made window huge; expanded hit used `model.size` (incl. dragBleed) and root `onHover` filled the canvas → expand-on-near-miss / stole menu-bar area.
+
+- `IslandModel.hitSize`: compact = notch pill; expanded = black body + 52pt tooltip pad (no bleed).
+- AppKit passthrough uses `hitSize` only; drag still opens full window via `dragActive`.
+- SwiftUI `onHover` on black-body frame only, not outer canvas.
+
+## Reauth false-positive + error tooltip (2026-07-20)
+
+Live: personal Claude access expired; OAuth refresh returned **HTTP 429**, but adapter treated any failed refresh after 401 as `authRequired` → "reauth: claude auth login". Double refresh per poll (proactive+reactive) worsened 429.
+
+Fixes:
+- `ClaudeAdapter.refreshManagedCredentialsDetailed`: distinguish success / 429 rateLimited / 400–403 rejected / other unavailable.
+- One refresh attempt per poll; 429 → `.rateLimited` (auto retry, not reauth).
+- Widget: short `errorCaption` under gauge; full `detailCaption` in downward body hover tooltip (commands + path).

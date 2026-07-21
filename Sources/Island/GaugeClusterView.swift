@@ -490,7 +490,9 @@ enum DemoWidgets {
                 HoverWindowLine(label: "wk", usage: "12k / 100k", resetAt: Date().addingTimeInterval(3 * 86_400))
             ],
             errorCaption: nil,
-            isAwaitingFirstSample: false
+            isAwaitingFirstSample: false,
+            health: .ok,
+            healthTooltip: "ok"
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
@@ -506,7 +508,9 @@ enum DemoWidgets {
                 HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(5 * 86_400 + 12 * 3600))
             ],
             errorCaption: nil,
-            isAwaitingFirstSample: false
+            isAwaitingFirstSample: false,
+            health: .ok,
+            healthTooltip: "ok"
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000003")!,
@@ -523,7 +527,9 @@ enum DemoWidgets {
                 HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(4 * 86_400))
             ],
             errorCaption: nil,
-            isAwaitingFirstSample: false
+            isAwaitingFirstSample: false,
+            health: .warn,
+            healthTooltip: "token expires soon"
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000004")!,
@@ -540,7 +546,9 @@ enum DemoWidgets {
                 HoverWindowLine(label: "mo", usage: "28k / 150k", resetAt: Date().addingTimeInterval(12 * 86_400))
             ],
             errorCaption: nil,
-            isAwaitingFirstSample: false
+            isAwaitingFirstSample: false,
+            health: .ok,
+            healthTooltip: "ok"
         ),
         WidgetViewModel(
             id: UUID(uuidString: "00000000-0000-4000-8000-000000000005")!,
@@ -555,8 +563,10 @@ enum DemoWidgets {
             hoverWindows: [
                 HoverWindowLine(label: "wk", usage: "9%", resetAt: Date().addingTimeInterval(6 * 86_400))
             ],
-            errorCaption: nil,
-            isAwaitingFirstSample: false
+            errorCaption: "reauth: codex login",
+            isAwaitingFirstSample: false,
+            health: .error,
+            healthTooltip: "reauth: codex login"
         ),
     ]
 }

@@ -44,18 +44,22 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 
 /// Anthropic Claude Code usage via `/api/oauth/usage`.
 ///
-/// **Credentials:** after `claude auth login` we copy the access token into
-/// `accounts/<uuid>/.credentials.json` and use **only that file** for polls.
-/// We never call Anthropic's OAuth refresh (token rotation races the CLI) and
-/// we never read the macOS Keychain on the hot path. Scoped keychain is
-/// touched only once after login (seed the file) and on reauth wipe (so the
-/// CLI does not short-circuit on its own leftover item).
+/// **Credentials:** managed `accounts/<uuid>/.credentials.json` only (not the
+/// user's default `~/.claude` keychain). This app **owns** those tokens and
+/// refreshes them via the public Claude Code OAuth client id — same as Orca —
+/// so access expiry does not require manual reauth. We still never touch the
+/// unsuffixed global Keychain item (that would dual-refresh the user's CLI).
 struct ClaudeAdapter: VendorAdapter {
     let id: VendorID = "claude"
     let displayName = "Claude"
     let minPollSeconds = 300
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    /// Public Claude Code OAuth token endpoint (verified against CLI / Orca).
+    private static let oauthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    /// Proactive refresh buffer (matches Claude Code / Orca).
+    private static let expiryBuffer: TimeInterval = 5 * 60
     private static let credentialsFileName = ".credentials.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
@@ -102,29 +106,71 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
         // Hot path: managed file only — no Keychain.
-        guard let creds = Self.readCredentials(configDir: dir) else {
+        guard var creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        // Local expiry is advisory — still probe when slightly stale metadata,
-        // but hard-stop when clearly past expiry so we do not 401-spam.
-        if let exp = creds.expiresAt, exp.timeIntervalSince(now) < -60 {
-            return Self.errorSnapshot(.authRequired, fetchedAt: now)
+
+        // At most one refresh attempt per poll. Double refresh on expiry was
+        // hammering platform.claude.com/v1/oauth/token into 429, which we used
+        // to mis-label as "reauth required".
+        var didRefresh = false
+        if Self.needsRefresh(creds, now: now) {
+            switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
+            case .success(let refreshed):
+                creds = refreshed
+                didRefresh = true
+                NSLog("DashIsland: Claude proactive refresh ok ref=%@", String(ref.prefix(8)))
+            case .rateLimited(let retry):
+                NSLog("DashIsland: Claude refresh rate-limited ref=%@", String(ref.prefix(8)))
+                return Self.errorSnapshot(
+                    .rateLimited(retryAfter: retry ?? now.addingTimeInterval(15 * 60)),
+                    fetchedAt: now
+                )
+            case .rejected:
+                NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
+                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+            case .unavailable(let message):
+                // Access already expired and refresh failed transiently.
+                if Self.isExpired(creds, now: now) {
+                    return Self.errorSnapshot(.unavailable(message), fetchedAt: now)
+                }
+            case .skipped:
+                break
+            }
         }
+
         var snap = await Self.probeUsage(
             token: creds.accessToken,
             plan: creds.subscriptionType,
             fetchedAt: now
         )
-        if snap.error == nil,
-           let exp = creds.expiresAt,
-           exp.timeIntervalSince(now) > 0,
-           exp.timeIntervalSince(now) < 2 * 3600
-        {
-            let mins = Int(exp.timeIntervalSince(now) / 60)
-            snap.notice = mins < 60
-                ? "token expires in \(max(1, mins))m — reauth soon"
-                : "token expires in \(mins / 60)h — reauth soon"
+
+        // Reactive: 401/403 once, only if we have not already refreshed this poll.
+        if case .authRequired = snap.error, !didRefresh {
+            switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
+            case .success(let refreshed):
+                snap = await Self.probeUsage(
+                    token: refreshed.accessToken,
+                    plan: refreshed.subscriptionType,
+                    fetchedAt: Date()
+                )
+                if snap.error == nil {
+                    NSLog("DashIsland: Claude reactive refresh ok ref=%@", String(ref.prefix(8)))
+                }
+            case .rateLimited(let retry):
+                snap = Self.errorSnapshot(
+                    .rateLimited(retryAfter: retry ?? Date().addingTimeInterval(15 * 60)),
+                    fetchedAt: Date()
+                )
+            case .rejected:
+                snap = Self.errorSnapshot(.authRequired, fetchedAt: Date())
+            case .unavailable(let message):
+                snap = Self.errorSnapshot(.unavailable(message), fetchedAt: Date())
+            case .skipped:
+                break
+            }
         }
+
         if snap.error == nil {
             let p = Int((snap.primary.usedFraction * 100).rounded())
             let w = Int(((snap.secondary?.usedFraction ?? 0) * 100).rounded())
@@ -253,6 +299,7 @@ struct ClaudeAdapter: VendorAdapter {
 
     struct ClaudeCreds: Equatable {
         var accessToken: String
+        var refreshToken: String?
         var subscriptionType: String?
         /// Access-token expiry when known (Claude stores epoch **milliseconds**).
         var expiresAt: Date?
@@ -280,7 +327,118 @@ struct ClaudeAdapter: VendorAdapter {
         return readScopedKeychainCredentials(configDir: configDir)
     }
 
-    /// Write app-owned credentials file (not an OAuth refresh — just capture).
+    /// Access token missing expiry, past expiry, or within the 5-minute buffer.
+    static func needsRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
+        guard creds.refreshToken != nil, !(creds.refreshToken ?? "").isEmpty else { return false }
+        guard let exp = creds.expiresAt else { return true }
+        return now.addingTimeInterval(expiryBuffer) >= exp
+    }
+
+    static func isExpired(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
+        guard let exp = creds.expiresAt else { return true }
+        return now >= exp
+    }
+
+    /// Outcome of a managed-folder OAuth refresh (distinguishes 429 from real reauth).
+    enum RefreshOutcome: Equatable {
+        case success(ClaudeCreds)
+        case skipped
+        case rateLimited(Date?)
+        case rejected
+        case unavailable(String)
+    }
+
+    /// Refresh managed-folder tokens only. Rotates refresh_token when the server
+    /// returns a new one (single-use rotation — must persist atomically).
+    static func refreshManagedCredentials(configDir: URL) async -> ClaudeCreds? {
+        if case .success(let creds) = await refreshManagedCredentialsDetailed(configDir: configDir) {
+            return creds
+        }
+        return nil
+    }
+
+    static func refreshManagedCredentialsDetailed(configDir: URL) async -> RefreshOutcome {
+        let path = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
+        guard let data = try? Data(contentsOf: path),
+              let creds = parseCredentialsJSON(data),
+              let refresh = creds.refreshToken, !refresh.isEmpty
+        else { return .skipped }
+
+        var req = URLRequest(url: oauthTokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 12
+        let form: [(String, String)] = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", oauthClientID),
+        ]
+        req.httpBody = form
+            .map { "\($0.0)=\(formEncode($0.1))" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+
+        do {
+            let (respData, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                return .unavailable("token refresh: bad response")
+            }
+            switch http.statusCode {
+            case 200..<300:
+                break
+            case 429:
+                let retry = retryAfterDate(from: http)
+                NSLog("DashIsland: Claude refresh HTTP 429")
+                return .rateLimited(retry)
+            case 400, 401, 403:
+                // invalid_grant / revoked refresh — only full login recovers.
+                let body = String(data: respData, encoding: .utf8) ?? ""
+                NSLog("DashIsland: Claude refresh rejected HTTP %d %@", http.statusCode, body)
+                return .rejected
+            default:
+                NSLog("DashIsland: Claude refresh HTTP %d", http.statusCode)
+                return .unavailable("token refresh HTTP \(http.statusCode)")
+            }
+            guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
+                  let next = parseCredentialsJSON(updated)
+            else {
+                return .unavailable("token refresh parse failed")
+            }
+            try? updated.write(to: path, options: .atomic)
+            return .success(next)
+        } catch {
+            NSLog("DashIsland: Claude refresh failed: %@", error.localizedDescription)
+            return .unavailable("token refresh: \(error.localizedDescription)")
+        }
+    }
+
+    /// Merge token-endpoint JSON into stored credentials blob. Exposed for tests.
+    static func applyRefreshedToken(existingJSON: Data, responseJSON: Data, now: Date = Date()) -> Data? {
+        guard var root = try? JSONSerialization.jsonObject(with: existingJSON) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any],
+              let resp = try? JSONSerialization.jsonObject(with: responseJSON) as? [String: Any],
+              let access = resp["access_token"] as? String,
+              !access.isEmpty
+        else { return nil }
+
+        oauth["accessToken"] = access
+        if let expiresIn = resp["expires_in"] as? Double {
+            oauth["expiresAt"] = Int((now.timeIntervalSince1970 + expiresIn) * 1000)
+        } else if let expiresIn = resp["expires_in"] as? Int {
+            oauth["expiresAt"] = Int((now.timeIntervalSince1970 + Double(expiresIn)) * 1000)
+        }
+        if let newRefresh = resp["refresh_token"] as? String, !newRefresh.isEmpty {
+            oauth["refreshToken"] = newRefresh
+        }
+        if let scope = resp["scope"] as? String, !scope.isEmpty {
+            oauth["scopes"] = scope.split(separator: " ").map(String.init)
+        }
+        root["claudeAiOauth"] = oauth
+        return try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    /// Write app-owned credentials file.
     static func persistCredentialsFile(
         creds: ClaudeCreds,
         configDir: URL,
@@ -295,6 +453,9 @@ struct ClaudeAdapter: VendorAdapter {
             return
         }
         var oauth: [String: Any] = ["accessToken": creds.accessToken]
+        if let refresh = creds.refreshToken {
+            oauth["refreshToken"] = refresh
+        }
         if let plan = creds.subscriptionType {
             oauth["subscriptionType"] = plan
         }
@@ -314,12 +475,19 @@ struct ClaudeAdapter: VendorAdapter {
               let access = oauth["accessToken"] as? String,
               !access.isEmpty
         else { return nil }
+        let refresh = oauth["refreshToken"] as? String
         return ClaudeCreds(
             accessToken: access,
+            refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
             subscriptionType: oauth["subscriptionType"] as? String,
             expiresAt: parseExpiresAt(oauth["expiresAt"] ?? oauth["expires_at"]),
             rawJSON: data
         )
+    }
+
+    private static func formEncode(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
     /// Claude Code writes `expiresAt` as epoch **milliseconds**.

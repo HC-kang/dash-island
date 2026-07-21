@@ -11,18 +11,22 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
     /// Observed by the island so it can stay expanded while prefs is open.
     private(set) var isOpen = false
 
+    private let hosting: NSHostingController<PrefsSheet>
+
     private init() {
         let root = PrefsSheet(preferences: PreferencesStore.shared) {
             PrefsWindowController.shared.close()
         }
-        let host = NSHostingController(rootView: root)
+        hosting = NSHostingController(rootView: root)
+        hosting.sizingOptions = [.intrinsicContentSize]
+
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.contentViewController = host
+        panel.contentViewController = hosting
         panel.title = "Preferences"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
@@ -36,6 +40,8 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
+        // Prevent AppKit from clipping tall content under a tiny content rect.
+        panel.contentMinSize = NSSize(width: 340, height: 280)
         super.init(window: panel)
         panel.delegate = self
     }
@@ -46,16 +52,34 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
     func show() {
         NSApp.activate(ignoringOtherApps: true)
         guard let window else { return }
-        // Center in the visible frame — never tuck under the notch island.
-        if let screen = NotchInfo.preferredScreen() {
+
+        // Rebuild root so display list is fresh.
+        hosting.rootView = PrefsSheet(preferences: PreferencesStore.shared) {
+            PrefsWindowController.shared.close()
+        }
+        hosting.view.layoutSubtreeIfNeeded()
+        var fit = hosting.view.fittingSize
+        if fit.width < 340 { fit.width = 340 }
+        if fit.height < 280 { fit.height = 280 }
+        // Cap absurd heights on many monitors.
+        fit.height = min(fit.height, 640)
+        window.setContentSize(fit)
+
+        // Center on the *target* screen (or main), never under the notch band.
+        let screen = DisplayInfo.currentScreen() ?? NSScreen.main
+        if let screen {
             let f = screen.visibleFrame
             let size = window.frame.size
             let x = f.midX - size.width / 2
-            let y = f.midY - size.height / 2
-            window.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+            let y = f.midY - size.height / 2 - 20
+            window.setFrame(
+                NSRect(x: x, y: y, width: size.width, height: size.height),
+                display: true
+            )
         } else {
             window.center()
         }
+
         isOpen = true
         NotificationCenter.default.post(name: .dashIslandPrefsOpenChanged, object: true)
         showWindow(nil)

@@ -52,6 +52,10 @@ struct CodexAdapter: VendorAdapter {
     let minPollSeconds = 120
 
     private static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    /// OpenAI Auth0-style token endpoint used by Codex CLI.
+    private static let oauthTokenURL = URL(string: "https://auth.openai.com/oauth/token")!
+    /// Public Codex / ChatGPT app client id (from id_token `aud`).
+    private static let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private static let authFileName = "auth.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
@@ -93,10 +97,37 @@ struct CodexAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        guard let creds = Self.readCredentials(codexHome: dir) else {
+        guard var creds = Self.readCredentials(codexHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        return await Self.probeUsage(token: creds.accessToken, accountID: creds.accountID, fetchedAt: now)
+        // Managed CODEX_HOME tokens — refresh before usage if we still have a refresh_token.
+        if let refreshed = await Self.refreshManagedCredentials(codexHome: dir) {
+            // Always try refresh path only when needed; method no-ops if fresh.
+            if refreshed.accessToken != creds.accessToken {
+                creds = refreshed
+                NSLog("DashIsland: Codex refresh ok ref=%@", String(ref.prefix(8)))
+            } else {
+                creds = refreshed
+            }
+        }
+        var snap = await Self.probeUsage(
+            token: creds.accessToken,
+            accountID: creds.accountID,
+            fetchedAt: now
+        )
+        if case .authRequired = snap.error,
+           let refreshed = await Self.refreshManagedCredentials(codexHome: dir, force: true)
+        {
+            snap = await Self.probeUsage(
+                token: refreshed.accessToken,
+                accountID: refreshed.accountID,
+                fetchedAt: Date()
+            )
+            if snap.error == nil {
+                NSLog("DashIsland: Codex reactive refresh ok ref=%@", String(ref.prefix(8)))
+            }
+        }
+        return snap
     }
 
     // MARK: - Login (managed CODEX_HOME)
@@ -200,7 +231,10 @@ struct CodexAdapter: VendorAdapter {
 
     struct CodexCreds: Equatable {
         var accessToken: String
+        var refreshToken: String?
         var accountID: String?
+        /// Path of the auth.json we read (for write-back after refresh).
+        var filePath: URL? = nil
     }
 
     /// Prefer `$CODEX_HOME/auth.json`; fall back to nested `.codex/auth.json`
@@ -214,8 +248,9 @@ struct CodexAdapter: VendorAdapter {
         ]
         for path in candidates {
             if let data = try? Data(contentsOf: path),
-               let creds = parseAuthJSON(data)
+               var creds = parseAuthJSON(data)
             {
+                creds.filePath = path
                 return creds
             }
         }
@@ -229,10 +264,103 @@ struct CodexAdapter: VendorAdapter {
               let access = tokens["access_token"] as? String,
               !access.isEmpty
         else { return nil }
+        let refresh = tokens["refresh_token"] as? String
         return CodexCreds(
             accessToken: access,
+            refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
             accountID: tokens["account_id"] as? String
         )
+    }
+
+    /// Refresh managed auth.json. When `force` is false, only refreshes if we
+    /// have a refresh token (always attempt when token may be stale — Codex
+    /// does not always store access expiry).
+    static func refreshManagedCredentials(
+        codexHome: URL,
+        force: Bool = false
+    ) async -> CodexCreds? {
+        guard let creds = readCredentials(codexHome: codexHome),
+              let refresh = creds.refreshToken, !refresh.isEmpty,
+              let path = creds.filePath,
+              let existing = try? Data(contentsOf: path)
+        else { return force ? nil : readCredentials(codexHome: codexHome) }
+
+        // Without force, skip network if last_refresh is very recent (< 30m)
+        // and access token still works often enough — but we can't know without
+        // probing. Always refresh when force; otherwise refresh if last_refresh
+        // older than 45 minutes when present.
+        if !force {
+            if let root = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],
+               let last = root["last_refresh"] as? String
+            {
+                let iso = ISO8601DateFormatter()
+                iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let plain = ISO8601DateFormatter()
+                plain.formatOptions = [.withInternetDateTime]
+                if let d = iso.date(from: last) ?? plain.date(from: last),
+                   Date().timeIntervalSince(d) < 45 * 60
+                {
+                    return creds
+                }
+            }
+        }
+
+        var req = URLRequest(url: oauthTokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 12
+        let form: [(String, String)] = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", oauthClientID),
+        ]
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        req.httpBody = form
+            .map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: allowed) ?? $0.1)" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                if let http = response as? HTTPURLResponse {
+                    NSLog("DashIsland: Codex refresh HTTP %d", http.statusCode)
+                }
+                return force ? nil : creds
+            }
+            guard let updated = applyRefreshedToken(existingJSON: existing, responseJSON: data) else {
+                return force ? nil : creds
+            }
+            try? updated.write(to: path, options: .atomic)
+            var next = parseAuthJSON(updated)
+            next?.filePath = path
+            return next ?? creds
+        } catch {
+            NSLog("DashIsland: Codex refresh failed: %@", error.localizedDescription)
+            return force ? nil : creds
+        }
+    }
+
+    /// Merge OpenAI token response into auth.json. Exposed for tests.
+    static func applyRefreshedToken(existingJSON: Data, responseJSON: Data, now: Date = Date()) -> Data? {
+        guard var root = try? JSONSerialization.jsonObject(with: existingJSON) as? [String: Any],
+              var tokens = root["tokens"] as? [String: Any],
+              let resp = try? JSONSerialization.jsonObject(with: responseJSON) as? [String: Any],
+              let access = resp["access_token"] as? String,
+              !access.isEmpty
+        else { return nil }
+        tokens["access_token"] = access
+        if let idToken = resp["id_token"] as? String, !idToken.isEmpty {
+            tokens["id_token"] = idToken
+        }
+        if let newRefresh = resp["refresh_token"] as? String, !newRefresh.isEmpty {
+            tokens["refresh_token"] = newRefresh
+        }
+        root["tokens"] = tokens
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        root["last_refresh"] = iso.string(from: now)
+        return try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
     }
 
     // MARK: - Usage HTTP

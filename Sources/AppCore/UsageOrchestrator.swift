@@ -114,9 +114,18 @@ final class UsageOrchestrator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.addObserver(
+            forName: .dashIslandVendorStatusChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.rebuildWidgets() }
+        }
+
         installPowerObservers()
         rescheduleTimer()
         rescheduleBurnTimer()
+        VendorStatusStore.shared.start()
         rebuildWidgets()
         // Launch seed — one background pass so rings aren't empty.
         Task { await pollDueAccounts(mode: .background, forceActive: true) }
@@ -127,6 +136,7 @@ final class UsageOrchestrator: ObservableObject {
         timer = nil
         burnTimer?.invalidate()
         burnTimer = nil
+        VendorStatusStore.shared.stop()
         let wsnc = NSWorkspace.shared.notificationCenter
         let dnc = DistributedNotificationCenter.default()
         for token in powerObservers {
@@ -582,6 +592,21 @@ final class UsageOrchestrator: ObservableObject {
         let awaiting = snap == nil && err == nil
         let notice = lastNotice[account.id] ?? snap?.notice
         let burnSource = burnSourceByAccount[account.id] ?? .none
+        let service = VendorStatusStore.shared.snapshot(for: account.vendorID)
+        let healthPair = AccountHealth.resolve(
+            error: err,
+            notice: awaiting ? nil : notice,
+            awaitingFirst: awaiting,
+            service: service,
+            authCaption: Self.caption(for: err, vendorID: account.vendorID)
+        )
+
+        let shortCaption = Self.caption(for: err, vendorID: account.vendorID)
+        let detail = Self.detailCaption(
+            for: err,
+            vendorID: account.vendorID,
+            credentialRef: account.credentialRef
+        ) ?? (awaiting ? nil : notice)
 
         return WidgetViewModel(
             id: account.id,
@@ -597,9 +622,12 @@ final class UsageOrchestrator: ObservableObject {
             hoverWindows: awaiting
                 ? [HoverWindowLine(label: "…", usage: "waiting for first poll", resetAt: nil)]
                 : Self.hoverWindows(snapshot: snap, mode: mode),
-            errorCaption: Self.caption(for: err, vendorID: account.vendorID),
+            errorCaption: shortCaption,
+            detailCaption: detail,
             noticeCaption: awaiting ? nil : notice,
-            isAwaitingFirstSample: awaiting
+            isAwaitingFirstSample: awaiting,
+            health: healthPair.health,
+            healthTooltip: healthPair.tooltip
         )
     }
 
@@ -624,15 +652,16 @@ final class UsageOrchestrator: ObservableObject {
         }
     }
 
+    /// Short under-widget line (truncated by the cell).
     nonisolated static func caption(for error: UsageError?, vendorID: VendorID = "") -> String? {
         guard let error else { return nil }
         switch error {
         case .authRequired:
             switch vendorID {
-            case "claude": return "reauth: claude auth login"
-            case "codex": return "reauth: codex login"
-            case "grok": return "reauth: grok login --oauth"
-            default: return "reauth required"
+            case "claude": return "reauth: claude"
+            case "codex": return "reauth: codex"
+            case "grok": return "reauth: grok"
+            default: return "reauth needed"
             }
         case .rateLimited:
             return "rate limited"
@@ -641,7 +670,61 @@ final class UsageOrchestrator: ObservableObject {
         case .parse(let message):
             return message.isEmpty ? "parse error" : message
         case .unavailable(let message):
+            // Prefer a short lead-in when the detail is long.
+            if message.lowercased().contains("refresh") {
+                return "refresh failed"
+            }
             return message.isEmpty ? "unavailable" : message
+        }
+    }
+
+    /// Full explanation for the downward hover tooltip.
+    nonisolated static func detailCaption(
+        for error: UsageError?,
+        vendorID: VendorID,
+        credentialRef: CredentialRef
+    ) -> String? {
+        guard let error else { return nil }
+        let home = CredentialStore.directoryURL(for: credentialRef).path
+        switch error {
+        case .authRequired:
+            switch vendorID {
+            case "claude":
+                return """
+                Session rejected (missing, revoked, or refresh token invalid).
+                Widget menu → Reauthenticate, or run:
+                CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
+                """
+            case "codex":
+                return """
+                Codex session rejected. Widget menu → Reauthenticate, or:
+                CODEX_HOME='\(home)' codex login
+                """
+            case "grok":
+                return """
+                Grok session rejected. Widget menu → Reauthenticate, or:
+                GROK_HOME='\(home)' grok login --oauth
+                """
+            default:
+                return "Reauthenticate from the widget menu."
+            }
+        case .rateLimited:
+            return """
+            Rate limited (usage API or OAuth refresh).
+            Dash Island will retry automatically — no re-login needed unless this persists for hours.
+            """
+        case .network(let message):
+            return message.isEmpty ? "Network error — will retry on next poll." : message
+        case .parse(let message):
+            return message.isEmpty ? "Could not parse vendor response." : message
+        case .unavailable(let message):
+            if message.lowercased().contains("refresh") {
+                return """
+                \(message)
+                Access token could not be renewed this poll. Will retry — usually not a full re-login.
+                """
+            }
+            return message.isEmpty ? "Temporarily unavailable." : message
         }
     }
 

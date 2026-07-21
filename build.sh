@@ -39,6 +39,7 @@ swiftc \
   -framework Combine \
   -framework Security \
   -framework ServiceManagement \
+  -framework CoreGraphics \
   -o "$MACOS_DIR/$APP_NAME" \
   $SWIFT_SOURCES
 

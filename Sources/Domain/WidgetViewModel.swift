@@ -10,6 +10,101 @@ struct HoverWindowLine: Equatable, Sendable {
     var resetAt: Date?
 }
 
+/// Traffic-light health for the widget corner dot.
+enum AccountHealth: Equatable, Sendable {
+    case ok
+    case warn
+    case error
+
+    /// Short hover string (English, monospaced-friendly).
+    var defaultLabel: String {
+        switch self {
+        case .ok: return "ok"
+        case .warn: return "warning"
+        case .error: return "error"
+        }
+    }
+
+    /// Derive from account poll state **and** vendor platform status page.
+    static func resolve(
+        error: UsageError?,
+        notice: String?,
+        awaitingFirst: Bool,
+        service: VendorServiceSnapshot? = nil,
+        authCaption: String? = nil
+    ) -> (health: AccountHealth, tooltip: String) {
+        var health: AccountHealth = .ok
+        var parts: [String] = []
+
+        // Platform (status.claude.com / status.openai.com / status.x.ai).
+        if let service {
+            switch service.level {
+            case .operational:
+                break
+            case .unknown:
+                // Don't paint yellow solely for a failed status fetch.
+                parts.append(service.summary)
+            case .degraded:
+                health = .warn
+                parts.append(service.summary)
+            case .outage:
+                health = .error
+                parts.append(service.summary)
+            }
+        }
+
+        // Account / credentials.
+        if awaitingFirst {
+            health = maxHealth(health, .warn)
+            parts.append("waiting for first sample")
+        }
+        if let error {
+            switch error {
+            case .authRequired:
+                health = maxHealth(health, .error)
+                parts.append(authCaption ?? "auth required")
+            case .rateLimited:
+                health = maxHealth(health, .warn)
+                parts.append("rate limited")
+            case .network(let m):
+                health = maxHealth(health, .warn)
+                parts.append(m.isEmpty ? "network error" : m)
+            case .parse(let m):
+                health = maxHealth(health, .error)
+                parts.append(m.isEmpty ? "parse error" : m)
+            case .unavailable(let m):
+                health = maxHealth(health, .warn)
+                parts.append(m.isEmpty ? "unavailable" : m)
+            }
+        }
+        if let notice, !notice.isEmpty {
+            health = maxHealth(health, .warn)
+            parts.append(notice)
+        }
+
+        if parts.isEmpty {
+            if let service, service.level == .operational {
+                return (.ok, service.summary)
+            }
+            return (.ok, "ok")
+        }
+        // Prefer a single readable line; join if both service + account speak.
+        let tip = parts.joined(separator: " · ")
+        return (health, tip)
+    }
+
+    private static func maxHealth(_ a: AccountHealth, _ b: AccountHealth) -> AccountHealth {
+        let rank: (AccountHealth) -> Int = {
+            switch $0 {
+            case .ok: return 0
+            case .warn: return 1
+            case .error: return 2
+            }
+        }
+        return rank(a) >= rank(b) ? a : b
+    }
+}
+
 /// Presentation-ready account widget state. Views render only this model.
 struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var id: AccountID
@@ -29,11 +124,18 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var burnSource: BurnSignalSource = .none
     /// Structured hover rows (usage + reset). Prefer over legacy `hoverLines`.
     var hoverWindows: [HoverWindowLine]
+    /// Short under-widget caption (often truncated).
     var errorCaption: String?
+    /// Full multi-line explanation for the downward hover tooltip.
+    var detailCaption: String? = nil
     /// Soft notice (token expiring, etc.) — not a hard error.
     var noticeCaption: String? = nil
     /// No successful sample yet — show quiet loading skeleton instead of 0%.
     var isAwaitingFirstSample: Bool
+    /// Corner status light.
+    var health: AccountHealth = .ok
+    /// Hover text for the status light.
+    var healthTooltip: String = "ok"
 
     /// Flat strings for accessibility / demos.
     var hoverLines: [String] {
@@ -50,9 +152,21 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
         if let hint = burnSource.hoverHint, burnRatio > 0.03 {
             lines.append(hint)
         }
-        if let noticeCaption, !noticeCaption.isEmpty {
+        if let detailCaption, !detailCaption.isEmpty {
+            lines.append(detailCaption)
+        } else if let noticeCaption, !noticeCaption.isEmpty {
             lines.append(noticeCaption)
+        } else if let errorCaption, !errorCaption.isEmpty {
+            lines.append(errorCaption)
         }
         return lines
+    }
+
+    /// Whether the body hover card has anything to show.
+    var hasHoverBody: Bool {
+        !hoverWindows.isEmpty
+            || !(detailCaption ?? "").isEmpty
+            || !(errorCaption ?? "").isEmpty
+            || !(noticeCaption ?? "").isEmpty
     }
 }

@@ -14,10 +14,15 @@ struct IslandRootView: View {
     @State private var collapseTask: Task<Void, Never>?
     /// Dwell before lazy network refresh on expand (avoids hover-flick burns).
     @State private var expandRefreshTask: Task<Void, Never>?
+    /// Expanded chrome/content visibility — decoupled from `model.state` window size
+    /// so the notch base never unmounts or “pops back in” after a size snap.
+    @State private var showExpandedShell = false
 
     private let bodyOutset: CGFloat = 1.0
     /// Match add-rail dwell philosophy — intentional expand, not mouse graze.
     private let expandRefreshDwellNs: UInt64 = 400_000_000
+    /// Expanded shell tuck-away before window shrinks to compact.
+    private let collapseShellNs: UInt64 = 200_000_000
 
     /// Prefs, dialogs, menus, status popover — keep island expanded.
     private var blockingOverlay: Bool {
@@ -29,30 +34,62 @@ struct IslandRootView: View {
     }
 
     var body: some View {
+        // Layer order (bottom → top):
+        // 1) Notch base — always mounted, always drawn (never if/else with expanded).
+        // 2) Expanded shell — toggled via `showExpandedShell` so size can shrink *after* it leaves.
+        //
+        // NSWindow is a fixed canvas (`model.canvasSize`). Hover/hit only cover the
+        // black body (`hitSize`) — not drag bleed or empty canvas — so nearby
+        // menu-bar / desktop clicks are not stolen.
         ZStack(alignment: .top) {
-            if model.state == .expanded {
+            // Must not participate in expand/collapse animations — otherwise the
+            // notch fill rides the size spring and looks like it bobs vertically.
+            compactNotchBase
+                .allowsHitTesting(!showExpandedShell)
+                .accessibilityHidden(showExpandedShell)
+                .transaction { $0.animation = nil }
+
+            if showExpandedShell {
                 expandedChrome
-                    .transition(.opacity)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: -8)),
+                        removal: .opacity.combined(with: .offset(y: -40))
+                    ))
                 expandedContent
-                    .transition(.opacity.combined(with: .offset(y: -6)))
-            } else {
-                compactChrome
-                    .transition(.opacity)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: -6)),
+                        removal: .opacity.combined(with: .offset(y: -44))
+                    ))
             }
         }
-        .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.state)
-        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.size.width)
+        // Hover target = black body (not bleed). Outer frames only reserve canvas space.
+        .frame(width: hoverWidth, height: hoverHeight, alignment: .top)
+        .contentShape(Rectangle())
         .onHover { handleHover($0) }
-        .onAppear { syncExpandedItemCount() }
+        .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(nil, value: model.size)
+        .animation(nil, value: model.hitSize)
+        .onAppear {
+            syncExpandedItemCount()
+            showExpandedShell = (model.state == .expanded)
+        }
         .onChange(of: accountStore.accounts.count) { _ in syncExpandedItemCount() }
         .onChange(of: orchestrator.widgets.count) { _ in syncExpandedItemCount() }
         .onChange(of: model.state) { newState in
-            if newState == .expanded {
-                scheduleExpandRefresh()
-            } else {
+            // External compact (e.g. follow-cursor hop) must drop the shell too.
+            if newState == .compact {
+                showExpandedShell = false
                 expandRefreshTask?.cancel()
                 expandRefreshTask = nil
+            } else if newState == .expanded {
+                if !showExpandedShell {
+                    // Shell fade only — size already applied without this animation.
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                        showExpandedShell = true
+                    }
+                }
+                scheduleExpandRefresh()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .dashIslandPrefsOpenChanged)) { note in
@@ -67,7 +104,7 @@ struct IslandRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
             menuTracking = true
             collapseTask?.cancel()
-            model.setState(.expanded)
+            expandOpen()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
             menuTracking = false
@@ -85,8 +122,8 @@ struct IslandRootView: View {
     private func handleOverlayChange() {
         if blockingOverlay {
             collapseTask?.cancel()
-            model.setState(.expanded)
-        } else if model.state == .expanded {
+            expandOpen()
+        } else if model.state == .expanded || showExpandedShell {
             scheduleCollapse()
         }
     }
@@ -104,9 +141,11 @@ struct IslandRootView: View {
         }
     }
 
-    // MARK: - Compact
+    // MARK: - Compact notch base (always on)
 
-    private var compactChrome: some View {
+    /// Physical-notch cover only. Geometry from `notch` alone — never tracks
+    /// expanded panel height, so hover in/out must not move it vertically.
+    private var compactNotchBase: some View {
         let nw = model.notch.width
         let nh = model.notch.height
         let bodyW = nw + bodyOutset * 2
@@ -116,14 +155,21 @@ struct IslandRootView: View {
         return ZStack {
             IslandShape(bottomRadius: radius)
                 .fill(Color.black)
-            NotchRimGlow(bottomRadius: radius, lineWidth: 1.0, peakOpacity: 0.88, baseOpacity: 0.20)
+            NotchRimGlow(
+                bottomRadius: radius,
+                lineWidth: 1.35,
+                peakOpacity: 0.95,
+                baseOpacity: 0.28,
+                accent: preferences.rimAccent.color
+            )
         }
-        .frame(width: bodyW, height: bodyH)
-        .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        .frame(width: bodyW, height: bodyH, alignment: .top)
+        // Fill parent width only for centering; height stays notch-sized (not model.size.height).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .contentShape(IslandShape(bottomRadius: radius))
         .onTapGesture {
             collapseTask?.cancel()
-            model.setState(.expanded)
+            expandOpen()
         }
         .accessibilityLabel("Dash Island")
         .accessibilityHint("Hover or click to show usage")
@@ -131,6 +177,10 @@ struct IslandRootView: View {
     }
 
     // MARK: - Expanded (slim: gauges only + notch-ear chrome)
+
+    /// Tight hover/hit rect — matches `model.hitSize` (black body, not canvas bleed).
+    private var hoverWidth: CGFloat { model.hitSize.width }
+    private var hoverHeight: CGFloat { model.hitSize.height }
 
     private var expandedChrome: some View {
         let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
@@ -140,16 +190,18 @@ struct IslandRootView: View {
                 .fill(Color.black)
             NotchRimGlow(
                 bottomRadius: radius,
-                lineWidth: 0.95,
-                peakOpacity: 0.72,
-                baseOpacity: 0.16,
-                period: 3.2
+                lineWidth: 1.4,
+                peakOpacity: 0.92,
+                baseOpacity: 0.24,
+                period: 3.2,
+                accent: preferences.rimAccent.color
             )
         }
-        // Black body = content width only; window is larger for drag bleed.
-        .frame(width: contentW, height: model.blackHeight)
-        .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        // Black body only; parent hover frame is the same width.
+        .frame(width: contentW, height: model.blackHeight, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
+        .allowsHitTesting(false)
     }
 
     private var expandedContent: some View {
@@ -182,7 +234,7 @@ struct IslandRootView: View {
             .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.addRailOpen)
         }
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
-        .frame(width: model.size.width, height: model.size.height, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
@@ -220,7 +272,7 @@ struct IslandRootView: View {
         if hovering {
             collapseTask?.cancel()
             collapseTask = nil
-            model.setState(.expanded)
+            expandOpen()
             // Key + activate so SwiftUI Menu / contextMenu can present.
             NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
         } else if !blockingOverlay {
@@ -228,10 +280,27 @@ struct IslandRootView: View {
         }
     }
 
+    /// Expand drawing size (window stays put), then fade the shell in.
+    private func expandOpen() {
+        // Do NOT wrap setState in withAnimation — springs on `size` shift content.
+        model.setState(.expanded)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+            showExpandedShell = true
+        }
+    }
+
+    /// 1) Tuck expanded shell up (notch base stays put).
+    /// 2) Snap drawing size to compact (window canvas unchanged).
     private func scheduleCollapse() {
         collapseTask?.cancel()
         collapseTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled, !blockingOverlay else { return }
+
+            withAnimation(.easeIn(duration: 0.20)) {
+                showExpandedShell = false
+            }
+            try? await Task.sleep(nanoseconds: collapseShellNs)
             guard !Task.isCancelled, !blockingOverlay else { return }
             model.setState(.compact)
         }

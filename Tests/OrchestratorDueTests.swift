@@ -168,6 +168,80 @@ enum OrchestratorDueSuite {
             try assertTrue(cap.contains("15m"), "got \(cap)")
         }
 
+        failures += check("AccountHealth: ok / warn / error mapping") {
+            let ok = AccountHealth.resolve(error: nil, notice: nil, awaitingFirst: false)
+            try assertEqual(ok.health, AccountHealth.ok)
+            let wait = AccountHealth.resolve(error: nil, notice: nil, awaitingFirst: true)
+            try assertEqual(wait.health, AccountHealth.warn)
+            let rate = AccountHealth.resolve(error: .rateLimited(retryAfter: nil), notice: nil, awaitingFirst: false)
+            try assertEqual(rate.health, AccountHealth.warn)
+            let auth = AccountHealth.resolve(error: .authRequired, notice: nil, awaitingFirst: false)
+            try assertEqual(auth.health, AccountHealth.error)
+            let notice = AccountHealth.resolve(error: nil, notice: "token expires soon", awaitingFirst: false)
+            try assertEqual(notice.health, AccountHealth.warn)
+        }
+
+        failures += check("AccountHealth merges vendor service degradation") {
+            let svc = VendorServiceSnapshot(
+                level: .degraded,
+                summary: "OpenAI: Partial System Degradation",
+                fetchedAt: Date(),
+                sourceURL: "https://status.openai.com"
+            )
+            let r = AccountHealth.resolve(
+                error: nil,
+                notice: nil,
+                awaitingFirst: false,
+                service: svc
+            )
+            try assertEqual(r.health, AccountHealth.warn)
+            try assertTrue(r.tooltip.contains("OpenAI"), "got \(r.tooltip)")
+        }
+
+        failures += check("statuspage indicator mapping") {
+            try assertEqual(VendorStatusStore.levelFromIndicator("none"), ServiceLevel.operational)
+            try assertEqual(VendorStatusStore.levelFromIndicator("minor"), ServiceLevel.degraded)
+            try assertEqual(VendorStatusStore.levelFromIndicator("major"), ServiceLevel.outage)
+            try assertEqual(
+                VendorStatusStore.levelFromComponentStatus("degraded_performance"),
+                ServiceLevel.degraded
+            )
+        }
+
+        failures += check("statuspage parse overall description") {
+            let json = """
+            {
+              "status": { "indicator": "none", "description": "All Systems Operational" },
+              "components": [
+                { "name": "Claude API (api.anthropic.com)", "status": "operational" }
+              ],
+              "incidents": []
+            }
+            """
+            let snap = VendorStatusStore.parseStatuspage(
+                data: Data(json.utf8),
+                vendorLabel: "Claude",
+                preferredComponentNames: ["Claude API"],
+                sourceURL: "https://status.claude.com"
+            )
+            try assertEqual(snap.level, ServiceLevel.operational)
+            try assertTrue(snap.summary.contains("All Systems Operational"))
+        }
+
+        failures += check("xAI RSS treats resolved items as operational") {
+            let xml = """
+            <rss><channel>
+            <item>
+              <title>Something broke</title>
+              <description><![CDATA[<h3>Status: RESOLVED</h3>]]></description>
+              <category>resolved</category>
+            </item>
+            </channel></rss>
+            """
+            let snap = VendorStatusStore.parseXAIRSS(xml: xml)
+            try assertEqual(snap.level, ServiceLevel.operational)
+        }
+
         return failures
     }
 }

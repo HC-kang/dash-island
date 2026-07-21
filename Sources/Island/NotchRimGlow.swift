@@ -9,6 +9,8 @@ struct NotchRimGlow: View {
     var baseOpacity: Double = 0.22
     /// Full loop duration (seconds).
     var period: TimeInterval = 2.8
+    /// Highlight tint (defaults to white/silver).
+    var accent: Color = .white
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
@@ -26,18 +28,18 @@ struct NotchRimGlow: View {
     }
 
     /// Highlight band sweeps around the U via rotating angular stops.
+    /// Peak stops stay near full saturation so neon accents read hot, not washed.
     private func flowingGradient(phase: Double) -> AngularGradient {
-        // Map phase 0…1 → angle so the bright lobe travels continuously.
         let start = Angle.degrees(phase * 360 - 90)
         return AngularGradient(
             gradient: Gradient(stops: [
-                .init(color: Color.white.opacity(baseOpacity), location: 0),
-                .init(color: Color.white.opacity(baseOpacity), location: 0.35),
-                .init(color: Color.white.opacity(peakOpacity * 0.55), location: 0.48),
-                .init(color: Color.white.opacity(peakOpacity), location: 0.55),
-                .init(color: Color.white.opacity(peakOpacity * 0.55), location: 0.62),
-                .init(color: Color.white.opacity(baseOpacity), location: 0.75),
-                .init(color: Color.white.opacity(baseOpacity), location: 1)
+                .init(color: accent.opacity(baseOpacity * 0.85), location: 0),
+                .init(color: accent.opacity(baseOpacity), location: 0.32),
+                .init(color: accent.opacity(min(1, peakOpacity * 0.7)), location: 0.46),
+                .init(color: accent.opacity(min(1, peakOpacity)), location: 0.54),
+                .init(color: accent.opacity(min(1, peakOpacity * 0.7)), location: 0.62),
+                .init(color: accent.opacity(baseOpacity), location: 0.78),
+                .init(color: accent.opacity(baseOpacity * 0.85), location: 1)
             ]),
             center: .center,
             angle: start

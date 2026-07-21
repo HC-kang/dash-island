@@ -29,6 +29,7 @@ swiftc \
   -framework Security \
   -framework ServiceManagement \
   -framework AppKit \
+  -framework CoreGraphics \
   -o "$OUT" \
   $DOMAIN_SOURCES \
   $INFRA_SOURCES \
