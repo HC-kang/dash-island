@@ -665,23 +665,46 @@ struct ClaudeAdapter: VendorAdapter {
         return nil
     }
 
-    /// Anthropic returns `utilization` as a percentage in [0, 100] — always ÷100.
+    /// Anthropic returns `utilization` / `used_percentage` in [0, 100] (may be fractional).
+    /// Prefer absolute token counters when present — finer burn Δ than whole-percent ticks.
     static func parseWindow(_ obj: Any?, kind: UsageWindowKind) -> WindowUsage {
         guard let d = obj as? [String: Any] else {
             return WindowUsage(usedFraction: 0, kind: kind)
         }
+        let usedTok = jsonInt64(d["used_tokens"])
+            ?? jsonInt64(d["tokens_used"])
+            ?? jsonInt64(d["used"])
+        let limitTok = jsonInt64(d["limit_tokens"])
+            ?? jsonInt64(d["tokens_limit"])
+            ?? jsonInt64(d["limit"])
         let raw = jsonNumber(d["utilization"])
+            ?? jsonNumber(d["used_percentage"])
             ?? jsonNumber(d["used_percent"])
             ?? 0
-        let normalized = min(1, max(0, raw / 100.0))
+        // API percent is always [0, 100] (0.5 = half a percent, not 50%).
+        let fromPercent = raw / 100.0
+        let fromAbs: Double? = {
+            guard let u = usedTok, let lim = limitTok, lim > 0 else { return nil }
+            return min(1, max(0, Double(u) / Double(lim)))
+        }()
+        let normalized = min(1, max(0, fromAbs ?? fromPercent))
         let resetAt = parseResetsAt(d["resets_at"])
         return WindowUsage(
             usedFraction: normalized,
             resetAt: resetAt,
-            usedTokens: nil,
-            limitTokens: nil,
+            usedTokens: usedTok,
+            limitTokens: limitTok,
             kind: kind
         )
+    }
+
+    static func jsonInt64(_ value: Any?) -> Int64? {
+        if let i = value as? Int64 { return max(0, i) }
+        if let i = value as? Int { return max(0, Int64(i)) }
+        if let d = value as? Double, d.isFinite { return max(0, Int64(d.rounded())) }
+        if let n = value as? NSNumber { return max(0, n.int64Value) }
+        if let s = value as? String, let d = Double(s) { return max(0, Int64(d.rounded())) }
+        return nil
     }
 
     /// JSONSerialization may box numbers as Int / Double / NSNumber.

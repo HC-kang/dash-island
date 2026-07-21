@@ -44,8 +44,11 @@ enum GrokAdapterError: Error, Equatable, LocalizedError {
 ///
 /// **Credentials:** per-account folder under Application Support
 /// (`accounts/<uuid>/` as `GROK_HOME`). Auth lives at `$GROK_HOME/auth.json`
-/// (issuer-keyed map; preferred `https://auth.x.ai…`). Grok CLI refreshes
-/// tokens itself — we only read. No OIDC refresh from the app.
+/// (issuer-keyed map; preferred `https://auth.x.ai…`).
+///
+/// Managed tokens are **refreshed by this app** via `auth.x.ai/oauth2/token`
+/// (same OIDC client id stored in the session). Refresh tokens rotate —
+/// write-back is atomic. We never touch the user's default `~/.grok` keychain.
 struct GrokAdapter: VendorAdapter {
     let id: VendorID = "grok"
     let displayName = "Grok"
@@ -54,6 +57,8 @@ struct GrokAdapter: VendorAdapter {
 
     private static let creditsURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
     private static let defaultBillingURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing")!
+    /// Verified against live Grok CLI sessions (form body, not JSON).
+    private static let oauthTokenURL = URL(string: "https://auth.x.ai/oauth2/token")!
     private static let authFileName = "auth.json"
     private static let preferredIssuer = "https://auth.x.ai"
     private static let tokenAuthHeader = "xai-grok-cli"
@@ -97,14 +102,52 @@ struct GrokAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        guard let session = Self.readSession(grokHome: dir) else {
+        guard var session = Self.readSession(grokHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
+
+        // Proactive refresh when access is near/past expiry (managed folder only).
         if !Self.isAccessTokenFresh(session) {
-            // CLI refreshes on next run; for managed multi-account, reauth is the clear path.
-            return Self.errorSnapshot(.authRequired, fetchedAt: now)
+            switch await Self.refreshManagedSession(grokHome: dir) {
+            case .success(let next):
+                session = next
+                NSLog("DashIsland: Grok proactive refresh ok ref=%@", String(ref.prefix(8)))
+            case .rateLimited(let retry):
+                return Self.errorSnapshot(
+                    .rateLimited(retryAfter: retry),
+                    fetchedAt: now
+                )
+            case .rejected:
+                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+            case .unavailable(let message):
+                return Self.errorSnapshot(.unavailable(message), fetchedAt: now)
+            case .skipped:
+                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+            }
         }
-        return await Self.probeUsage(session: session, fetchedAt: now)
+
+        var snap = await Self.probeUsage(session: session, fetchedAt: now)
+
+        // Reactive: billing 401/403 → one forced refresh + retry.
+        if case .authRequired = snap.error {
+            switch await Self.refreshManagedSession(grokHome: dir) {
+            case .success(let next):
+                snap = await Self.probeUsage(session: next, fetchedAt: Date())
+                if snap.error == nil {
+                    NSLog("DashIsland: Grok reactive refresh ok ref=%@", String(ref.prefix(8)))
+                }
+            case .rateLimited(let retry):
+                snap = Self.errorSnapshot(
+                    .rateLimited(retryAfter: retry),
+                    fetchedAt: Date()
+                )
+            case .rejected, .skipped:
+                snap = Self.errorSnapshot(.authRequired, fetchedAt: Date())
+            case .unavailable(let message):
+                snap = Self.errorSnapshot(.unavailable(message), fetchedAt: Date())
+            }
+        }
+        return snap
     }
 
     // MARK: - Login / seed credentials
@@ -247,6 +290,19 @@ struct GrokAdapter: VendorAdapter {
         var email: String?
         var teamId: String?
         var expiresAt: Date?
+        /// For managed refresh write-back.
+        var refreshToken: String? = nil
+        var oidcClientID: String? = nil
+        var issuerMapKey: String? = nil
+        var filePath: URL? = nil
+    }
+
+    enum RefreshOutcome: Equatable {
+        case success(GrokSession)
+        case skipped
+        case rateLimited(Date?)
+        case rejected
+        case unavailable(String)
     }
 
     /// Prefer `$GROK_HOME/auth.json`; fall back to nested `.grok/auth.json`
@@ -260,8 +316,9 @@ struct GrokAdapter: VendorAdapter {
         ]
         for path in candidates {
             if let data = try? Data(contentsOf: path),
-               let session = parseAuthJSON(data)
+               var session = parseAuthJSON(data)
             {
+                session.filePath = path
                 return session
             }
         }
@@ -285,12 +342,20 @@ struct GrokAdapter: VendorAdapter {
                   !token.isEmpty
             else { continue }
 
+            let clientID = (entry["oidc_client_id"] as? String)
+                ?? issuerClientID(fromMapKey: key)
             let session = GrokSession(
                 accessToken: token,
                 userId: entry["user_id"] as? String,
                 email: entry["email"] as? String,
                 teamId: entry["team_id"] as? String,
-                expiresAt: parseISODate(entry["expires_at"])
+                expiresAt: parseISODate(entry["expires_at"]),
+                refreshToken: {
+                    let r = entry["refresh_token"] as? String
+                    return (r?.isEmpty == false) ? r : nil
+                }(),
+                oidcClientID: clientID,
+                issuerMapKey: key
             )
             if isPreferred {
                 if isAccessTokenFresh(session) {
@@ -307,6 +372,7 @@ struct GrokAdapter: VendorAdapter {
         }
 
         // Alternate issuers only when no preferred key exists (matches Orca).
+        // Prefer expired preferred over nil so refresh can recover.
         if let expiredPreferred {
             return expiredPreferred
         }
@@ -315,6 +381,106 @@ struct GrokAdapter: VendorAdapter {
         }
         return fallback
     }
+
+    /// `https://auth.x.ai::b1a00492-…` → client id suffix.
+    static func issuerClientID(fromMapKey key: String) -> String? {
+        let parts = key.split(separator: "::", maxSplits: 1).map(String.init)
+        guard parts.count == 2, !parts[1].isEmpty else { return nil }
+        return parts[1]
+    }
+
+    /// Refresh managed auth.json via OIDC token endpoint. Rotates refresh_token.
+    static func refreshManagedSession(grokHome: URL) async -> RefreshOutcome {
+        guard var session = readSession(grokHome: grokHome),
+              let refresh = session.refreshToken, !refresh.isEmpty,
+              let clientID = session.oidcClientID, !clientID.isEmpty,
+              let mapKey = session.issuerMapKey,
+              let path = session.filePath,
+              let existing = try? Data(contentsOf: path),
+              var root = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],
+              var entry = root[mapKey] as? [String: Any]
+        else {
+            return .skipped
+        }
+
+        var req = URLRequest(url: oauthTokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 12
+        let form: [(String, String)] = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", clientID),
+        ]
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        req.httpBody = form
+            .map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: allowed) ?? $0.1)" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                return .unavailable("token refresh: bad response")
+            }
+            switch http.statusCode {
+            case 200..<300:
+                break
+            case 429:
+                NSLog("DashIsland: Grok refresh HTTP 429")
+                return .rateLimited(retryAfterDate(from: http))
+            case 400, 401, 403:
+                let body = String(data: data, encoding: .utf8) ?? ""
+                NSLog("DashIsland: Grok refresh rejected HTTP %d %@", http.statusCode, body)
+                return .rejected
+            default:
+                NSLog("DashIsland: Grok refresh HTTP %d", http.statusCode)
+                return .unavailable("token refresh HTTP \(http.statusCode)")
+            }
+
+            guard let resp = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let access = resp["access_token"] as? String,
+                  !access.isEmpty
+            else {
+                return .unavailable("token refresh parse failed")
+            }
+
+            entry["key"] = access
+            if let newRefresh = resp["refresh_token"] as? String, !newRefresh.isEmpty {
+                entry["refresh_token"] = newRefresh
+            }
+            let expiresIn = (resp["expires_in"] as? Double)
+                ?? (resp["expires_in"] as? Int).map(Double.init)
+                ?? 21_600
+            let exp = Date().addingTimeInterval(expiresIn)
+            entry["expires_at"] = iso8601FractionalUTC.string(from: exp)
+            root[mapKey] = entry
+            guard let updated = try? JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .sortedKeys]
+            ) else {
+                return .unavailable("token refresh encode failed")
+            }
+            try? updated.write(to: path, options: .atomic)
+
+            session.accessToken = access
+            session.refreshToken = (entry["refresh_token"] as? String) ?? refresh
+            session.expiresAt = exp
+            session.filePath = path
+            return .success(session)
+        } catch {
+            NSLog("DashIsland: Grok refresh failed: %@", error.localizedDescription)
+            return .unavailable("token refresh: \(error.localizedDescription)")
+        }
+    }
+
+    private static let iso8601FractionalUTC: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        return f
+    }()
 
     static func isPreferredIssuerKey(_ key: String) -> Bool {
         key == preferredIssuer || key.hasPrefix("\(preferredIssuer)::")

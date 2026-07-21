@@ -33,8 +33,15 @@ struct BurnSample: Equatable, Sendable {
 ///
 /// So a +1% API tick on weekly is a *huge* burn; the same +1% on 5h is ~0.6–1× cruise.
 struct BurnRate: Equatable, Sendable {
+    /// Needle drive — short-horizon pace (recent bursts).
     var ratio: Double
     var sampleCount: Int
+    /// Session-scale pace (slower EWMA). Hover honesty.
+    var longRatio: Double = 0
+    /// Last API sample that moved usage (for “Xm ago” honesty).
+    var lastSampleAt: Date? = nil
+    /// Whether the latest samples lack absolute counters (integer-%).
+    var quantized: Bool = false
 
     static func compute(
         prev: (usedFraction: Double, at: Date)?,
@@ -123,8 +130,14 @@ struct BurnRate: Equatable, Sendable {
 
     // MARK: - EWMA
 
-    /// ~30 min time-constant (half-life ~21 min).
+    /// Session-scale time-constant (half-life ~21 min).
     static let defaultTau: TimeInterval = 30 * 60
+    /// Burst / “right now” time-constant (~3.5 min half-life).
+    static let shortTau: TimeInterval = 5 * 60
+    /// When API only steps in whole percent, attribute a jump to at most this
+    /// much recent activity for the short needle (poll gap would otherwise
+    /// dilute a real 2-minute burn into a 15-minute average).
+    static let quantBurstCap: TimeInterval = 5 * 60
 
     static func ewmaAlpha(dt: TimeInterval, tau: TimeInterval = defaultTau) -> Double {
         guard dt > 0, tau > 0 else { return 1 }
@@ -152,20 +165,29 @@ struct BurnSmoother: Equatable, Sendable {
     static let idleBeforeDecay: TimeInterval = 3 * 60
 
     private(set) var samples: [BurnSample] = []
-    private(set) var smoothedRatio: Double = 0
+    private(set) var shortRatio: Double = 0
+    private(set) var longRatio: Double = 0
     private(set) var lastUpdateAt: Date?
     private(set) var lastPositiveAt: Date?
+    private(set) var lastSampleAt: Date?
     private var seeded = false
+    private var lastQuantized = false
+
+    /// Back-compat alias used by older call sites / logs.
+    var smoothedRatio: Double { shortRatio }
 
     mutating func push(_ sample: BurnSample, tau: TimeInterval = BurnRate.defaultTau) -> BurnRate {
         // Period rollover: large absolute drop, or same-kind reset jump.
         // Do NOT wipe when switching weekly% → monthly counters (different resetAt).
         if shouldReset(for: sample) {
             samples.removeAll()
-            smoothedRatio = 0
+            shortRatio = 0
+            longRatio = 0
             lastUpdateAt = nil
             lastPositiveAt = nil
+            lastSampleAt = nil
             seeded = false
+            lastQuantized = false
         }
 
         // Once we have absolute-counter history, ignore coarse %-only samples
@@ -178,23 +200,29 @@ struct BurnSmoother: Equatable, Sendable {
 
         samples.append(sample)
         trim(now: sample.at)
+        lastSampleAt = sample.at
+        lastQuantized = !sample.hasAbsoluteCounters
 
-        // Always compare to the previous sample. A 15‑minute lookback diluted
-        // integer +1% ticks (Claude/Codex) into ~0.2× cruise — needle looked dead.
-        guard let baseline = samples.dropLast().last else {
+        // Prefer a baseline that actually differs for %-only samples (skip flat
+        // intermediate polls), but never look back more than 45 minutes.
+        guard let baseline = baselineSample(for: sample) else {
             lastUpdateAt = sample.at
             return current
         }
 
-        let rInst = BurnRate.instantRatio(prev: baseline, current: sample)
-        let dt: TimeInterval
-        if let lastUpdateAt {
-            dt = max(0, sample.at.timeIntervalSince(lastUpdateAt))
-        } else {
-            dt = sample.at.timeIntervalSince(baseline.at)
-        }
+        let wallDt = max(1, sample.at.timeIntervalSince(baseline.at))
+        var rInst = BurnRate.instantRatio(prev: baseline, current: sample)
 
-        applyInstant(rInst, at: sample.at, dt: dt, tau: tau)
+        // Integer-% jump over a long poll gap: short needle attributes burn to a
+        // recent burst window so +1% after 15m idle still reads as real activity.
+        if let r = rInst, r > 0, !sample.hasAbsoluteCounters, wallDt > BurnRate.quantBurstCap {
+            let shortDt = BurnRate.quantBurstCap
+            let scale = wallDt / shortDt
+            rInst = min(3, r * scale)
+            applyInstant(rInst, at: sample.at, shortDt: shortDt, longDt: wallDt, tau: tau)
+        } else {
+            applyInstant(rInst, at: sample.at, shortDt: wallDt, longDt: wallDt, tau: tau)
+        }
         lastUpdateAt = sample.at
         return current
     }
@@ -214,54 +242,97 @@ struct BurnSmoother: Equatable, Sendable {
         } else {
             dt = 60
         }
-        applyInstant(r, at: at, dt: dt, tau: tau)
+        // Local activity is a short-horizon signal — feed short EWMA harder.
+        applyInstant(r, at: at, shortDt: min(dt, 90), longDt: max(dt, 60), tau: tau)
         lastUpdateAt = at
         return current
     }
 
     var current: BurnRate {
-        BurnRate(ratio: seeded ? smoothedRatio : 0, sampleCount: samples.count)
+        BurnRate(
+            ratio: seeded ? shortRatio : 0,
+            sampleCount: samples.count,
+            longRatio: seeded ? longRatio : 0,
+            lastSampleAt: lastSampleAt,
+            quantized: lastQuantized
+        )
     }
 
     mutating func reset() {
         samples.removeAll()
-        smoothedRatio = 0
+        shortRatio = 0
+        longRatio = 0
         lastUpdateAt = nil
         lastPositiveAt = nil
+        lastSampleAt = nil
         seeded = false
+        lastQuantized = false
     }
 
     // MARK: Private
 
+    /// Last sample that differs enough for a signal, within 45 minutes.
+    private func baselineSample(for current: BurnSample) -> BurnSample? {
+        let oldest = current.at.addingTimeInterval(-45 * 60)
+        let prior = samples.dropLast().reversed()
+        // Prefer nearest prior with real Δ (absolute or ≥0.5%).
+        for s in prior {
+            if s.at < oldest { break }
+            let du = BurnRate.deltaUsedFraction(from: s, to: current)
+            if abs(du) >= 0.005 { return s }
+            if current.hasAbsoluteCounters, s.hasAbsoluteCounters, abs(du) > 1e-12 {
+                return s
+            }
+        }
+        // Fall back to immediate predecessor.
+        return samples.dropLast().last
+    }
+
     private mutating func applyInstant(
         _ rInst: Double?,
         at: Date,
-        dt: TimeInterval,
+        shortDt: TimeInterval,
+        longDt: TimeInterval,
         tau: TimeInterval
     ) {
+        let longTau = tau
+        let shortTau = BurnRate.shortTau
         if let rInst {
             if rInst > 0 {
                 lastPositiveAt = at
+                let capped = min(rInst, 3)
                 if !seeded {
-                    // Soft-cap seed so one noisy minute doesn't peg redline forever.
-                    smoothedRatio = min(rInst, 3)
+                    shortRatio = capped
+                    longRatio = min(capped, 1.5) // don't seed long at redline from one tick
                     seeded = true
                 } else {
-                    smoothedRatio = BurnRate.ewmaStep(
-                        previous: smoothedRatio,
-                        instant: min(rInst, 3),
-                        dt: max(dt, 1),
-                        tau: tau
+                    shortRatio = BurnRate.ewmaStep(
+                        previous: shortRatio,
+                        instant: capped,
+                        dt: max(shortDt, 1),
+                        tau: shortTau
+                    )
+                    longRatio = BurnRate.ewmaStep(
+                        previous: longRatio,
+                        instant: capped,
+                        dt: max(longDt, 1),
+                        tau: longTau
                     )
                 }
             } else if seeded {
                 // Explicit drop in usage — ease toward rest.
                 lastPositiveAt = nil
-                smoothedRatio = BurnRate.ewmaStep(
-                    previous: smoothedRatio,
+                shortRatio = BurnRate.ewmaStep(
+                    previous: shortRatio,
                     instant: 0,
-                    dt: max(dt, 1),
-                    tau: tau
+                    dt: max(shortDt, 1),
+                    tau: shortTau
+                )
+                longRatio = BurnRate.ewmaStep(
+                    previous: longRatio,
+                    instant: 0,
+                    dt: max(longDt, 1),
+                    tau: longTau
                 )
             }
         } else if seeded {
@@ -269,11 +340,17 @@ struct BurnSmoother: Equatable, Sendable {
             if let lastPositiveAt,
                at.timeIntervalSince(lastPositiveAt) >= Self.idleBeforeDecay
             {
-                smoothedRatio = BurnRate.ewmaStep(
-                    previous: smoothedRatio,
+                shortRatio = BurnRate.ewmaStep(
+                    previous: shortRatio,
                     instant: 0,
-                    dt: max(dt, 1),
-                    tau: tau * 3
+                    dt: max(shortDt, 1),
+                    tau: shortTau * 2
+                )
+                longRatio = BurnRate.ewmaStep(
+                    previous: longRatio,
+                    instant: 0,
+                    dt: max(longDt, 1),
+                    tau: longTau * 3
                 )
             }
         }

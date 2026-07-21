@@ -352,7 +352,7 @@ struct AccountWidget: View {
         }
     }
 
-    /// Usage windows only — warnings live on the caption tip.
+    /// Usage windows only — burn is the red needle, not a debug caption.
     private var usageTooltip: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             VStack(alignment: .leading, spacing: 2) {

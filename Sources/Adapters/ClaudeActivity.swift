@@ -3,9 +3,11 @@ import Foundation
 /// Local Claude Code session activity for burn needle when `/api/oauth/usage`
 /// only reports whole-percent utilization (flat for long stretches of real use).
 ///
-/// Reads `~/.claude/projects/**/*.jsonl` (and `~/.config/claude/projects`).
-/// Does **not** touch Keychain or network. Multi-account island accounts share
-/// this host-wide signal — good enough when the user is actively running Claude Code.
+/// Prefers **managed account** project trees under `CLAUDE_CONFIG_DIR` when the
+/// island account owns that folder; falls back to host-wide `~/.claude/projects`
+/// (shared signal) so a normal CLI login still moves the needle.
+///
+/// Does **not** touch Keychain or network.
 enum ClaudeActivity {
     /// Lookback for "are you burning right now".
     static let defaultWindow: TimeInterval = 3 * 60
@@ -19,9 +21,10 @@ enum ClaudeActivity {
     /// ~25k weighted tokens / 3 min ≈ cruise (1.0); scales up to 3.
     static func liveBurnRatio(
         window: TimeInterval = defaultWindow,
-        now: Date = Date()
+        now: Date = Date(),
+        configDir: URL? = nil
     ) -> Double {
-        let tokens = recentWeightedTokens(window: window, now: now)
+        let tokens = recentWeightedTokens(window: window, now: now, configDir: configDir)
         guard tokens > 0 else { return 0 }
         // Tuned so a normal assistant turn with a few k new tokens moves the needle,
         // while a heavy burst pegs toward redline.
@@ -30,14 +33,40 @@ enum ClaudeActivity {
         return min(3, max(0, ratio))
     }
 
+    /// Whether the last signal used managed-folder logs (vs host-wide fallback).
+    static func usedScopedLogs(configDir: URL?, window: TimeInterval = defaultWindow, now: Date = Date()) -> Bool {
+        guard let configDir else { return false }
+        return recentWeightedTokens(window: window, now: now, roots: projectRoots(for: configDir)) > 0
+    }
+
     static func recentWeightedTokens(
         window: TimeInterval = defaultWindow,
-        now: Date = Date()
+        now: Date = Date(),
+        configDir: URL? = nil
+    ) -> Int {
+        if let configDir {
+            let scoped = recentWeightedTokens(
+                window: window,
+                now: now,
+                roots: projectRoots(for: configDir)
+            )
+            if scoped > 0 { return scoped }
+        }
+        // Host-wide fallback (user's normal `claude` without CLAUDE_CONFIG_DIR).
+        return recentWeightedTokens(window: window, now: now, roots: hostProjectRoots())
+    }
+
+    // MARK: - Internals
+
+    private static func recentWeightedTokens(
+        window: TimeInterval,
+        now: Date,
+        roots: [URL]
     ) -> Int {
         let cutoff = now.addingTimeInterval(-window)
         var total = 0
         let fm = FileManager.default
-        for root in projectRoots() {
+        for root in roots {
             guard let enumerator = fm.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -58,9 +87,16 @@ enum ClaudeActivity {
         return total
     }
 
-    // MARK: - Internals
+    /// Managed `CLAUDE_CONFIG_DIR` layouts Claude Code may write under.
+    static func projectRoots(for configDir: URL) -> [URL] {
+        [
+            configDir.appendingPathComponent("projects", isDirectory: true),
+            configDir.appendingPathComponent(".claude/projects", isDirectory: true),
+            configDir.appendingPathComponent("session-env", isDirectory: true),
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
 
-    private static func projectRoots() -> [URL] {
+    static func hostProjectRoots() -> [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
             home.appendingPathComponent(".claude/projects", isDirectory: true),

@@ -23,8 +23,12 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let expandDebounceFloor: TimeInterval = 120
     /// Max concurrent vendor HTTP fetches (multi-account spike control).
     nonisolated static let maxFetchConcurrency = 2
-    /// Default HTTP 429 cooldown when the snapshot does not supply `retryAfter`.
-    nonisolated static let rateLimitCooldown: TimeInterval = 30 * 60
+    /// Default HTTP 429 / OAuth-refresh throttle when the vendor omits Retry-After.
+    /// Prefer a long quiet window over thrashing Anthropic/OpenAI token endpoints —
+    /// short cooldowns just re-429 and keep the chip red all day.
+    nonisolated static let rateLimitCooldown: TimeInterval = 2 * 60 * 60
+    /// Hard cap even if Retry-After is huge (or missing and streak is high).
+    nonisolated static let rateLimitCooldownMax: TimeInterval = 6 * 60 * 60
     /// After auth failure, back off so we do not 401-spam overnight.
     nonisolated static let authFailureCooldown: TimeInterval = 30 * 60
     /// While the Mac is asleep / screen locked, floor poll spacing.
@@ -64,6 +68,8 @@ final class UsageOrchestrator: ObservableObject {
     private var lastError: [AccountID: UsageError] = [:]
     /// Per-account 429 / auth cooldown end times.
     private var cooldownUntil: [AccountID: Date] = [:]
+    /// Consecutive rate-limit hits → longer quiet windows (1×, 2×, 3× base… capped).
+    private var rateLimitStreak: [AccountID: Int] = [:]
     /// Soft notices (token expiring soon).
     private var lastNotice: [AccountID: String] = [:]
 
@@ -270,19 +276,20 @@ final class UsageOrchestrator: ObservableObject {
     }
 
     /// **No network.** Refresh Claude needles from local session logs only.
+    /// Prefers managed `CLAUDE_CONFIG_DIR` project trees per account; host-wide fallback.
     private func sampleLocalBurnActivity() {
         guard !polling, !systemAsleep else { return }
         guard accountStore.accounts.contains(where: { $0.vendorID == "claude" }) else { return }
 
         let now = Date()
-        let claudeActivity = ClaudeActivity.liveBurnRatio(now: now)
-        guard claudeActivity > 0 else { return }
-
         var changed = false
         for account in accountStore.accounts where account.vendorID == "claude" {
+            let dir = CredentialStore.directoryURL(for: account.credentialRef)
+            let ratio = ClaudeActivity.liveBurnRatio(now: now, configDir: dir)
+            guard ratio > 0 else { continue }
             var smoother = burnByAccount[account.id] ?? BurnSmoother()
             let before = smoother.current.ratio
-            _ = smoother.noteLiveActivity(ratio: claudeActivity, at: now)
+            _ = smoother.noteLiveActivity(ratio: ratio, at: now)
             burnByAccount[account.id] = smoother
             mergeBurnSource(accountID: account.id, local: true)
             if abs(smoother.current.ratio - before) > 1e-6 { changed = true }
@@ -346,6 +353,7 @@ final class UsageOrchestrator: ObservableObject {
         lastError = lastError.filter { live.contains($0.key) }
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
+        rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
     }
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
@@ -369,6 +377,10 @@ final class UsageOrchestrator: ObservableObject {
         }
 
         let now = Date()
+        // Free expired cooldown slots only — keep lastError until a *success*
+        // so we do not look healthy, re-hit the vendor, and paint red again.
+        expireCooldowns(now: now)
+
         let inactive = screenLocked && !forceActive && mode == .background
         var due: [Account] = []
         for account in accounts {
@@ -385,12 +397,15 @@ final class UsageOrchestrator: ObservableObject {
                     ? max(Self.backgroundPollSeconds, Self.inactivePollFloor)
                     : Self.backgroundPollSeconds
             case .expand:
+                // Expand is lazy refresh — still respect rate-limit quiet windows
+                // (do not let hover thrash OAuth token endpoints).
                 interval = Self.expandInterval(minPoll: minPoll)
             case .force:
                 // Manual refresh already cleared lastFetch; still floor minPoll
                 // if we didn't clear (shouldn't happen).
                 interval = minPoll
             }
+
             if Self.isDue(
                 lastFetch: lastFetchAt[account.id],
                 now: now,
@@ -467,8 +482,22 @@ final class UsageOrchestrator: ObservableObject {
 
             switch error {
             case .rateLimited(let retryAfter):
-                cooldownUntil[accountID] = retryAfter
-                    ?? now.addingTimeInterval(Self.rateLimitCooldown)
+                let streak = (rateLimitStreak[accountID] ?? 0) + 1
+                rateLimitStreak[accountID] = streak
+                // 2h, 4h, 6h… from streak; vendor Retry-After wins if longer (then cap).
+                let backoff = Self.rateLimitCooldown * Double(min(streak, 3))
+                let fromVendor = retryAfter.map { $0.timeIntervalSince(now) } ?? 0
+                let wait = min(
+                    Self.rateLimitCooldownMax,
+                    max(Self.rateLimitCooldown, max(backoff, fromVendor))
+                )
+                cooldownUntil[accountID] = now.addingTimeInterval(max(wait, 60))
+                NSLog(
+                    "DashIsland: rate-limit quiet account=%@ streak=%d wait=%.0fm",
+                    String(accountID.uuidString.prefix(8)),
+                    streak,
+                    wait / 60
+                )
             case .authRequired:
                 // Stop overnight 401 loops; user reauth / manual refresh clears this.
                 cooldownUntil[accountID] = now.addingTimeInterval(Self.authFailureCooldown)
@@ -485,9 +514,10 @@ final class UsageOrchestrator: ObservableObject {
             return
         }
 
-        // Success: clear error + cooldown, push burn smoother.
+        // Success: clear error + cooldown + streak, push burn smoother.
         lastError[accountID] = nil
         cooldownUntil[accountID] = nil
+        rateLimitStreak[accountID] = nil
         lastSuccessAt[accountID] = now
         lastNotice[accountID] = snapshot.notice
         lastGood[accountID] = snapshot
@@ -496,7 +526,16 @@ final class UsageOrchestrator: ObservableObject {
 
     // MARK: - View models
 
+    /// Drop cooldown keys that have elapsed so the account can be scheduled again.
+    /// Does **not** clear `lastError` — that waits for a successful fetch.
+    private func expireCooldowns(now: Date) {
+        for (id, until) in cooldownUntil where until <= now {
+            cooldownUntil[id] = nil
+        }
+    }
+
     private func rebuildWidgets() {
+        expireCooldowns(now: Date())
         let mode = preferences.displayMode
         widgets = accountStore.accounts.map { account in
             makeViewModel(account: account, mode: mode)
@@ -623,6 +662,9 @@ final class UsageOrchestrator: ObservableObject {
             centerPercent: awaiting ? 0 : Int((primaryFraction * 100).rounded()),
             burnRatio: awaiting ? 0 : burn.ratio,
             burnSource: awaiting ? .none : burnSource,
+            burnLongRatio: awaiting ? 0 : burn.longRatio,
+            burnSampleAt: awaiting ? nil : burn.lastSampleAt,
+            burnQuantized: awaiting ? false : burn.quantized,
             hoverWindows: awaiting
                 ? [HoverWindowLine(label: "…", usage: "waiting for first poll", resetAt: nil)]
                 : Self.hoverWindows(snapshot: snap, mode: mode),
@@ -717,8 +759,9 @@ final class UsageOrchestrator: ObservableObject {
             }
         case .rateLimited:
             return """
-            Rate limited (usage API or OAuth refresh).
-            Will retry automatically — no re-login needed unless this persists for hours.
+            Vendor rate-limited (usage API or OAuth token refresh).
+            Dash Island backs off for a long quiet window and retries later —
+            not on every hover. Last-good numbers stay on the rings. No re-login needed.
             """
         case .network(let message):
             return message.isEmpty ? "Network error — will retry on next poll." : message

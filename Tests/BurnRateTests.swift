@@ -251,6 +251,32 @@ enum BurnRateSuite {
             try assertTrue(sm.samples.contains(where: \.hasAbsoluteCounters))
         }
 
+        failures += check("dual EWMA: short reacts faster than long") {
+            var s = BurnSmoother()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            // Absolute reset epoch must stay stable (API resets_at), not now+remaining.
+            let reset = t0.addingTimeInterval(5 * 3600)
+            _ = s.push(BurnSample(usedFraction: 0.10, at: t0, resetAt: reset, kind: .fiveHour))
+            // Spike: +2% in 60s.
+            let t1 = t0.addingTimeInterval(60)
+            _ = s.push(BurnSample(usedFraction: 0.12, at: t1, resetAt: reset, kind: .fiveHour))
+            let afterSpike = s.current
+            try assertTrue(afterSpike.ratio + 1e-9 >= afterSpike.longRatio, "short should be ≥ long after spike")
+            try assertTrue(afterSpike.sampleCount >= 2, "keeps samples")
+            try assertTrue(afterSpike.quantized, "percent-only samples are quantized")
+        }
+
+        failures += check("quant jump over long gap inflates short needle") {
+            var s = BurnSmoother()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            let reset = t0.addingTimeInterval(4 * 3600)
+            _ = s.push(BurnSample(usedFraction: 0.20, at: t0, resetAt: reset, kind: .fiveHour))
+            // +1% after 15 minutes idle — without quantBurstCap short would look dead.
+            let t1 = t0.addingTimeInterval(15 * 60)
+            let r = s.push(BurnSample(usedFraction: 0.21, at: t1, resetAt: reset, kind: .fiveHour))
+            try assertTrue(r.ratio > 0.3, "quant burst should still move short needle, got \(r.ratio)")
+        }
+
         failures += check("BurnSmoother resets on large absolute drop") {
             var sm = BurnSmoother()
             let t0 = Date(timeIntervalSince1970: 1_700_000_000)
