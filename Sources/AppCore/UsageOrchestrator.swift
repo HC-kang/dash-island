@@ -607,6 +607,10 @@ final class UsageOrchestrator: ObservableObject {
             vendorID: account.vendorID,
             credentialRef: account.credentialRef
         ) ?? (awaiting ? nil : notice)
+        let checkedAt = lastFetchAt[account.id]
+        let successAt = lastSuccessAt[account.id]
+        let cool = cooldownUntil[account.id]
+        let retryAt = cool.flatMap { $0 > Date() ? $0 : nil }
 
         return WidgetViewModel(
             id: account.id,
@@ -625,6 +629,9 @@ final class UsageOrchestrator: ObservableObject {
             errorCaption: shortCaption,
             detailCaption: detail,
             noticeCaption: awaiting ? nil : notice,
+            lastCheckedAt: checkedAt,
+            lastSuccessAt: successAt,
+            retryAt: retryAt,
             isAwaitingFirstSample: awaiting,
             health: healthPair.health,
             healthTooltip: healthPair.tooltip
@@ -711,7 +718,7 @@ final class UsageOrchestrator: ObservableObject {
         case .rateLimited:
             return """
             Rate limited (usage API or OAuth refresh).
-            Dash Island will retry automatically — no re-login needed unless this persists for hours.
+            Will retry automatically — no re-login needed unless this persists for hours.
             """
         case .network(let message):
             return message.isEmpty ? "Network error — will retry on next poll." : message
@@ -726,6 +733,60 @@ final class UsageOrchestrator: ObservableObject {
             }
             return message.isEmpty ? "Temporarily unavailable." : message
         }
+    }
+
+    /// Relative age: `3m ago`, `2h ago`, `1d ago`.
+    nonisolated static func formatAgeAgo(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        let total = Int(seconds.rounded(.down))
+        if total < 60 { return "<1m ago" }
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3_600
+        let mins = (total % 3_600) / 60
+        if days > 0 {
+            return hours > 0 ? "\(days)d \(hours)h ago" : "\(days)d ago"
+        }
+        if hours > 0 {
+            return mins > 0 ? "\(hours)h \(mins)m ago" : "\(hours)h ago"
+        }
+        return "\(mins)m ago"
+    }
+
+    /// Compact age for under-widget captions: `3m`, `2h`, `1d`.
+    nonisolated static func formatCompactAge(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        let total = Int(seconds.rounded(.down))
+        if total < 60 { return "<1m" }
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3_600
+        let mins = (total % 3_600) / 60
+        if days > 0 { return "\(days)d" }
+        if hours > 0 { return "\(hours)h" }
+        return "\(mins)m"
+    }
+
+    /// Timing lines for error tips: checked / retry / last ok.
+    nonisolated static func formatErrorTimingLines(
+        lastCheckedAt: Date?,
+        lastSuccessAt: Date?,
+        retryAt: Date?,
+        now: Date = Date()
+    ) -> [String] {
+        var lines: [String] = []
+        if let checked = lastCheckedAt {
+            lines.append("checked \(formatAgeAgo(since: checked, now: now))")
+        }
+        if let retry = retryAt, retry > now,
+           let remaining = formatResetRemaining(until: retry, now: now)
+        {
+            lines.append("retry in \(remaining)")
+        } else if lastCheckedAt != nil, retryAt == nil {
+            lines.append("retry on next poll")
+        }
+        if let ok = lastSuccessAt {
+            lines.append("last ok \(formatAgeAgo(since: ok, now: now))")
+        }
+        return lines
     }
 
     /// Hover rows: primary + secondary rings, then scoped extras (Fable, …).

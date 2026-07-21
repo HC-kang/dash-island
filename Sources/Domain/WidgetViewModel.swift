@@ -130,6 +130,12 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var detailCaption: String? = nil
     /// Soft notice (token expiring, etc.) — not a hard error.
     var noticeCaption: String? = nil
+    /// Last vendor poll attempt (ok or fail) — for “checked Xm ago”.
+    var lastCheckedAt: Date? = nil
+    /// Last clean usage sample, if any.
+    var lastSuccessAt: Date? = nil
+    /// When the current 429/auth cooldown ends (auto-retry).
+    var retryAt: Date? = nil
     /// No successful sample yet — show quiet loading skeleton instead of 0%.
     var isAwaitingFirstSample: Bool
     /// Corner status light.
