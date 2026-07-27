@@ -67,10 +67,16 @@ enum AccountChromeActions {
 
     /// Run adapter `beginAdd` → name prompt → `AccountStore.add`.
     /// Cancel on progress or name dialog aborts and cleans credential folder.
+    /// Claude uses **browser OAuth** (`claude auth login`) so the token has
+    /// `user:profile` for `/api/oauth/usage`. Plain `setup-token` is model-only
+    /// and Anthropic rejects it for usage with 403.
     static func beginAdd(adapter: any VendorAdapter) {
         activateForUI()
         addTask?.cancel()
+        beginAddBrowserLogin(adapter: adapter)
+    }
 
+    private static func beginAddBrowserLogin(adapter: any VendorAdapter) {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
             message: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
@@ -109,7 +115,6 @@ enum AccountChromeActions {
                 )
 
                 guard let named else {
-                    // Cancel on name dialog → abort add, delete creds.
                     try? CredentialStore.removeDirectory(for: result.credentialRef)
                     return
                 }
@@ -118,7 +123,6 @@ enum AccountChromeActions {
                 final.label = named
                 try AccountStore.shared.add(from: final)
             } catch is CancellationError {
-                // User cancelled progress — folder cleaned in defer if ref known.
             } catch let error as AccountStoreError where error == .maxAccountsReached {
                 presentAlert(
                     title: "Account limit",
@@ -161,7 +165,9 @@ enum AccountChromeActions {
 
         IslandDialogController.shared.showProgress(
             title: "Reauthenticate",
-            message: "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes).",
+            message: account.vendorID == "claude"
+                ? "Browser OAuth login required (needs user:profile for usage). setup-token alone is rejected by Anthropic. Completing login may take up to 3 minutes."
+                : "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes).",
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()

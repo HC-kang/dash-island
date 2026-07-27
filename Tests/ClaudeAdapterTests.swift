@@ -173,6 +173,38 @@ enum ClaudeAdapterSuite {
             try assertEqual(VendorRegistry.adapter(for: "claude")?.displayName, "Claude")
             try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 300)
         }
+        failures += check("setup-token is long-lived and skips refresh") {
+            let tok = "sk-ant-oat01-" + String(repeating: "x", count: 80)
+            let json = "{\"claudeAiOauth\":{\"accessToken\":\"\(tok)\",\"dashIslandLongLived\":true}}"
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
+            try assertTrue(creds != nil)
+            try assertTrue(ClaudeAdapter.isLongLived(creds!))
+            try assertTrue(!ClaudeAdapter.needsRefresh(creds!))
+            try assertTrue(!ClaudeAdapter.isExpired(creds!))
+        }
+        failures += check("normalizePastedToken accepts sk-ant- line") {
+            // Real tokens are ~100+ chars; short strings must fail.
+            let short = "sk-ant-oat01-tooshort"
+            try assertTrue(ClaudeAdapter.normalizePastedToken(short) == nil)
+            let ok = "sk-ant-oat01-" + String(repeating: "a", count: 80)
+            let messy = "  \(ok)  \n"
+            let t = ClaudeAdapter.normalizePastedToken(messy)
+            try assertTrue(t?.hasPrefix("sk-ant-oat01-") == true)
+            try assertTrue(ClaudeAdapter.normalizePastedToken("not-a-token") == nil)
+        }
+        failures += check("CLI oauth with refresh still needs refresh near expiry") {
+            let expMs = Int((Date().timeIntervalSince1970 - 60) * 1000)
+            let json = """
+            {"claudeAiOauth":{"accessToken":"sk-ant-oat01-short","refreshToken":"sk-ant-ort01-refresh-token-value-here","expiresAt":\(expMs)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
+            try assertTrue(creds != nil)
+            // Has refresh → not treated as setup-token long-lived solely by oat prefix if refresh present
+            // actually access is oat but has refresh - isLongLived checks longLived flag first, then !hasRefresh && looksLike
+            // has refresh so isLongLived false unless flagged
+            try assertTrue(!ClaudeAdapter.isLongLived(creds!))
+            try assertTrue(ClaudeAdapter.needsRefresh(creds!))
+        }
         return failures
     }
 }

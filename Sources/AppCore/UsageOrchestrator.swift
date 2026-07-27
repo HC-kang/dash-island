@@ -707,7 +707,7 @@ final class UsageOrchestrator: ObservableObject {
         switch error {
         case .authRequired:
             switch vendorID {
-            case "claude": return "reauth: claude"
+            case "claude": return "reauth: browser login"
             case "codex": return "reauth: codex"
             case "grok": return "reauth: grok"
             default: return "reauth needed"
@@ -719,8 +719,11 @@ final class UsageOrchestrator: ObservableObject {
         case .parse(let message):
             return message.isEmpty ? "parse error" : message
         case .unavailable(let message):
-            // Prefer a short lead-in when the detail is long.
-            if message.lowercased().contains("refresh") {
+            let lower = message.lowercased()
+            if lower.contains("setup-token") || lower.contains("user:profile") {
+                return "need browser login"
+            }
+            if lower.contains("refresh") {
                 return "refresh failed"
             }
             return message.isEmpty ? "unavailable" : message
@@ -740,8 +743,9 @@ final class UsageOrchestrator: ObservableObject {
             switch vendorID {
             case "claude":
                 return """
-                Session rejected (missing, revoked, or refresh token invalid).
-                Widget menu → Reauthenticate, or run:
+                Claude OAuth rejected (invalid token or missing user:profile).
+                setup-token is for model calls only — usage API needs full browser login.
+                Widget menu → Reauthenticate, or:
                 CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
                 """
             case "codex":
@@ -758,6 +762,13 @@ final class UsageOrchestrator: ObservableObject {
                 return "Reauthenticate from the widget menu."
             }
         case .rateLimited:
+            if vendorID == "claude" {
+                return """
+                Claude OAuth token refresh is rate-limited (not your 5h/wk usage quota).
+                App waits a long quiet window then retries — last-good rings stay.
+                If this lasts many hours: Reauthenticate with browser login (not setup-token).
+                """
+            }
             return """
             Vendor rate-limited (usage API or OAuth token refresh).
             Dash Island backs off for a long quiet window and retries later —
@@ -768,7 +779,15 @@ final class UsageOrchestrator: ObservableObject {
         case .parse(let message):
             return message.isEmpty ? "Could not parse vendor response." : message
         case .unavailable(let message):
-            if message.lowercased().contains("refresh") {
+            let lower = message.lowercased()
+            if lower.contains("setup-token") || lower.contains("user:profile") {
+                return """
+                \(message)
+                CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
+                (Do not use setup-token for the usage meter.)
+                """
+            }
+            if lower.contains("refresh") {
                 return """
                 \(message)
                 Access token could not be renewed this poll. Will retry — usually not a full re-login.

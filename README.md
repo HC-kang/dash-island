@@ -82,8 +82,10 @@ Launch at Login is available in the island preferences (gear in the notch ears w
 ## Use
 
 1. Hover the island (or the top-center fallback bar on non-notch displays) to expand.
-2. **+** / chevron → add Claude, Codex, or Grok (browser login into a **managed** folder under Application Support — not your default CLI home).
-3. Rings = quota used (or remaining — prefs). **Red needle** = burn pace vs even cruise (not a debug dump).
+2. **+** / chevron → add Claude, Codex, or Grok (credentials go in a **managed** folder under Application Support — not your default CLI home).
+   - **Claude:** browser OAuth via `claude auth login --claudeai` under that folder (needs `user:profile` for usage).  
+     Note: `claude setup-token` is **not** enough for the usage meter — Anthropic returns 403 missing scope.
+3. Rings = quota used (or remaining — prefs). **Red needle** = burn pace vs even cruise.
 4. Gear in the notch ear → display mode, rim accent, target display, launch at login.
 
 Credentials live only on your Mac:
