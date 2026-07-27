@@ -25,6 +25,8 @@ struct GaugeClusterView: View {
     @State private var gapSlot: Int?
     @State private var magnetizedToTrash = false
     @State private var clusterSize: CGSize = .zero
+    /// Slot whose tooltip is open — must outrank later HStack siblings.
+    @State private var elevatedWidgetID: AccountID?
 
     private static let maxSlots = IslandModel.maxItems
     private static let minSlots = 3
@@ -158,6 +160,7 @@ struct GaugeClusterView: View {
         .frame(maxWidth: .infinity, alignment: .center)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
+        .onPreferenceChange(WidgetHoverElevatePreference.self) { elevatedWidgetID = $0 }
     }
 
     @ViewBuilder
@@ -167,6 +170,7 @@ struct GaugeClusterView: View {
         let isDragHome = homeSlot == index && draggingID != nil
         // Push offset: slide this cell's widget toward its visual seat (gap layout).
         let pushX = pushOffsetX(baseIndex: index)
+        let isElevated = baseID != nil && baseID == elevatedWidgetID
 
         ZStack {
             SlotSkeleton(
@@ -192,13 +196,22 @@ struct GaugeClusterView: View {
                 )
                 .opacity(isDragged ? 0.001 : 1)
                 .offset(x: isDragged ? 0 : pushX)
-                .zIndex(isDragged ? 2 : 1)
                 // simultaneous + long-press: right-click / menus still work.
                 .simultaneousGesture(allowsEditing ? reorderGesture(for: oid, slotIndex: index) : nil)
             }
         }
         .frame(width: Self.cell, height: Self.cellH)
+        // Sibling order in the HStack paints later slots on top — raise the
+        // whole cell when its tip is open so tooltips cover neighbors.
+        .zIndex(slotZIndex(isElevated: isElevated, isDragHome: isDragHome, index: index))
         // No clip — pushed neighbors may paint into adjacent cell bounds.
+    }
+
+    /// Hovered tip > drag-home ghost > natural left-to-right stack.
+    private func slotZIndex(isElevated: Bool, isDragHome: Bool, index: Int) -> Double {
+        if isElevated { return 80 }
+        if isDragHome { return 2 }
+        return Double(index)
     }
 
     /// Horizontal shift so the widget lands in its gap-packed visual slot.

@@ -422,15 +422,29 @@ struct CodexAdapter: VendorAdapter {
         )
     }
 
-    /// Codex returns `used_percent` in [0, 100] — always ÷100.
+    /// Codex returns `used_percent` in [0, 100] (sometimes fractional).
+    /// Prefer absolute token/credit counters when the payload includes them.
     /// `reset_at` is unix seconds. `limit_window_seconds` → kind (5h / wk / mo).
     /// Returns `nil` when the window object is absent (JSON null / missing).
     static func parseWindow(_ obj: Any?) -> WindowUsage? {
         guard let d = obj as? [String: Any] else { return nil }
+        let usedTok = jsonInt64(d["used_tokens"])
+            ?? jsonInt64(d["tokens_used"])
+            ?? jsonInt64(d["used"])
+        let limitTok = jsonInt64(d["limit_tokens"])
+            ?? jsonInt64(d["tokens_limit"])
+            ?? jsonInt64(d["limit"])
         let raw = (d["used_percent"] as? Double)
             ?? (d["used_percent"] as? Int).map(Double.init)
+            ?? (d["used_percent"] as? Int64).map(Double.init)
             ?? 0
-        let normalized = min(1, max(0, raw / 100.0))
+        // Percent is always [0, 100] (0.5 = half a percent).
+        let fromPercent = raw / 100.0
+        let fromAbs: Double? = {
+            guard let u = usedTok, let lim = limitTok, lim > 0 else { return nil }
+            return min(1, max(0, Double(u) / Double(lim)))
+        }()
+        let normalized = min(1, max(0, fromAbs ?? fromPercent))
         let resetAt = parseResetAt(d["reset_at"])
         let limitSeconds = (d["limit_window_seconds"] as? Double)
             ?? (d["limit_window_seconds"] as? Int).map(Double.init)
@@ -438,10 +452,19 @@ struct CodexAdapter: VendorAdapter {
         return WindowUsage(
             usedFraction: normalized,
             resetAt: resetAt,
-            usedTokens: nil,
-            limitTokens: nil,
+            usedTokens: usedTok,
+            limitTokens: limitTok,
             kind: .fromLimitSeconds(limitSeconds)
         )
+    }
+
+    private static func jsonInt64(_ value: Any?) -> Int64? {
+        if let i = value as? Int64 { return max(0, i) }
+        if let i = value as? Int { return max(0, Int64(i)) }
+        if let d = value as? Double, d.isFinite { return max(0, Int64(d.rounded())) }
+        if let n = value as? NSNumber { return max(0, n.int64Value) }
+        if let s = value as? String, let d = Double(s) { return max(0, Int64(d.rounded())) }
+        return nil
     }
 
     static func parseResetAt(_ value: Any?) -> Date? {

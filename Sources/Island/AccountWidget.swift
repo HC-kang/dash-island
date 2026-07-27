@@ -112,8 +112,8 @@ struct AccountWidget: View {
         // Must not inherit the cell's ~100pt width proposal (that forced the
         // skinny column wrap). Size like the status tip: content-driven, wide.
         .overlay(alignment: .bottom) {
-            if captionHovered, !statusHovered, let tip = captionDetailText {
-                captionTooltip(text: tip, isError: model.errorCaption != nil)
+            if captionHovered, !statusHovered, captionDetailBody != nil || hasCaptionTiming {
+                captionTooltip(isError: model.errorCaption != nil)
                     .offset(y: 44)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .allowsHitTesting(false)
@@ -124,14 +124,18 @@ struct AccountWidget: View {
         .overlay(alignment: .topTrailing) {
             if statusHovered {
                 statusTooltip
-                    .fixedSize()
                     .offset(x: -2, y: Self.statusHit + 6)
                     .transition(.opacity)
                     .allowsHitTesting(false)
                     .zIndex(30)
             }
         }
-        .zIndex(isHovered || statusHovered || captionHovered ? 5 : 0)
+        // Elevate this *slot* in GaugeClusterView’s HStack (sibling zIndex only
+        // works between slots — an inner zIndex cannot paint over later widgets).
+        .preference(
+            key: WidgetHoverElevatePreference.self,
+            value: (isHovered || statusHovered || captionHovered) ? model.id : nil
+        )
         .contextMenu {
             managedContextMenu
         }
@@ -160,21 +164,35 @@ struct AccountWidget: View {
         model.usedPrimaryFraction >= 0.7 || model.burnRatio >= 1.5
     }
 
-    private var captionDetailText: String? {
+    private var captionDetailBody: String? {
         if let detail = model.detailCaption, !detail.isEmpty { return detail }
         if let err = model.errorCaption, !err.isEmpty { return err }
         if let notice = model.noticeCaption, !notice.isEmpty { return notice }
         return nil
     }
 
+    private var hasCaptionTiming: Bool {
+        model.lastCheckedAt != nil || model.retryAt != nil || model.lastSuccessAt != nil
+    }
+
     /// Truncated under-gauge line with its own hover hit target (like status chip).
     @ViewBuilder
     private var warningCaption: some View {
-        if let caption = model.errorCaption, !caption.isEmpty {
-            captionLabel(caption, isError: true)
-        } else if let notice = model.noticeCaption, !notice.isEmpty {
-            captionLabel(notice, isError: false)
+        if model.errorCaption != nil || model.noticeCaption != nil {
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                let isError = model.errorCaption != nil
+                let text = liveShortCaption(now: context.date)
+                captionLabel(text, isError: isError)
+            }
         }
+    }
+
+    /// `rate limited · 3m` when we know the last poll time.
+    private func liveShortCaption(now: Date) -> String {
+        let base = model.errorCaption ?? model.noticeCaption ?? ""
+        guard let checked = model.lastCheckedAt else { return base }
+        let age = UsageOrchestrator.formatCompactAge(since: checked, now: now)
+        return "\(base) · \(age)"
     }
 
     private func captionLabel(_ text: String, isError: Bool) -> some View {
@@ -243,9 +261,23 @@ struct AccountWidget: View {
     }
 
     private var statusTooltip: some View {
-        Text(model.healthTooltip)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(Color(white: 0.92))
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            let timing = UsageOrchestrator.formatErrorTimingLines(
+                lastCheckedAt: model.errorCaption != nil ? model.lastCheckedAt : nil,
+                lastSuccessAt: model.errorCaption != nil ? model.lastSuccessAt : nil,
+                retryAt: model.errorCaption != nil ? model.retryAt : nil,
+                now: context.date
+            )
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.healthTooltip)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(white: 0.92))
+                ForEach(Array(timing.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.62))
+                }
+            }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
@@ -257,23 +289,47 @@ struct AccountWidget: View {
                     )
                     .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
             )
+            .fixedSize()
+        }
     }
 
     /// Preferred reading width for multi-line warning tips (status chip uses
     /// single-line `fixedSize()`; long auth/rate-limit copy needs a card width).
     private static let captionTipWidth: CGFloat = 268
 
-    private func captionTooltip(text: String, isError: Bool) -> some View {
+    private func captionTooltip(isError: Bool) -> some View {
         // Explicit width so overlay does not clamp to the 100pt cell proposal.
-        Text(text)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(
-                isError
-                    ? Color(red: 0.98, green: 0.62, blue: 0.55)
-                    : Color(red: 0.95, green: 0.82, blue: 0.45)
+        // TimelineView keeps “checked / retry in” fresh while the tip is open.
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            let body = captionDetailBody ?? ""
+            let timing = UsageOrchestrator.formatErrorTimingLines(
+                lastCheckedAt: model.lastCheckedAt,
+                lastSuccessAt: model.lastSuccessAt,
+                retryAt: model.retryAt,
+                now: context.date
             )
-            .multilineTextAlignment(.leading)
-            .lineSpacing(2)
+            VStack(alignment: .leading, spacing: 6) {
+                if !body.isEmpty {
+                    Text(body)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(
+                            isError
+                                ? Color(red: 0.98, green: 0.62, blue: 0.55)
+                                : Color(red: 0.95, green: 0.82, blue: 0.45)
+                        )
+                        .multilineTextAlignment(.leading)
+                        .lineSpacing(2)
+                }
+                if !timing.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(timing.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                .foregroundStyle(Color(white: 0.72))
+                        }
+                    }
+                }
+            }
             .frame(width: Self.captionTipWidth, alignment: .leading)
             .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, 10)
@@ -293,9 +349,10 @@ struct AccountWidget: View {
                     .frame(width: 10, height: 5)
                     .offset(y: -5)
             }
+        }
     }
 
-    /// Usage windows only — warnings live on the caption tip.
+    /// Usage windows only — burn is the red needle, not a debug caption.
     private var usageTooltip: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             VStack(alignment: .leading, spacing: 2) {
@@ -354,5 +411,16 @@ private struct Triangle: Shape {
         p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
         p.closeSubpath()
         return p
+    }
+}
+
+/// Hovering a widget tip must raise its **slot** above later HStack siblings.
+enum WidgetHoverElevatePreference: PreferenceKey {
+    static var defaultValue: AccountID? { nil }
+
+    static func reduce(value: inout AccountID?, nextValue: () -> AccountID?) {
+        if let next = nextValue() {
+            value = next
+        }
     }
 }

@@ -122,6 +122,12 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var burnRatio: Double
     /// API Δ vs local session activity (hover honesty).
     var burnSource: BurnSignalSource = .none
+    /// Session-scale EWMA (slower than needle). Hover honesty.
+    var burnLongRatio: Double = 0
+    /// Last usage sample that fed the needle.
+    var burnSampleAt: Date? = nil
+    /// Integer-% API (Claude/Codex) — needle has ±1% quant uncertainty.
+    var burnQuantized: Bool = false
     /// Structured hover rows (usage + reset). Prefer over legacy `hoverLines`.
     var hoverWindows: [HoverWindowLine]
     /// Short under-widget caption (often truncated).
@@ -130,6 +136,12 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var detailCaption: String? = nil
     /// Soft notice (token expiring, etc.) — not a hard error.
     var noticeCaption: String? = nil
+    /// Last vendor poll attempt (ok or fail) — for “checked Xm ago”.
+    var lastCheckedAt: Date? = nil
+    /// Last clean usage sample, if any.
+    var lastSuccessAt: Date? = nil
+    /// When the current 429/auth cooldown ends (auto-retry).
+    var retryAt: Date? = nil
     /// No successful sample yet — show quiet loading skeleton instead of 0%.
     var isAwaitingFirstSample: Bool
     /// Corner status light.
@@ -149,9 +161,7 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
                 lines.append("\(row.label)  \(row.usage)")
             }
         }
-        if let hint = burnSource.hoverHint, burnRatio > 0.03 {
-            lines.append(hint)
-        }
+        // Burn is the red needle only — no engineer debug lines for end users.
         if let detailCaption, !detailCaption.isEmpty {
             lines.append(detailCaption)
         } else if let noticeCaption, !noticeCaption.isEmpty {
