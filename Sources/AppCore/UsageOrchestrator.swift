@@ -713,7 +713,7 @@ final class UsageOrchestrator: ObservableObject {
             default: return "reauth needed"
             }
         case .rateLimited:
-            return "rate limited"
+            return vendorID == "claude" ? "token quiet" : "rate limited"
         case .network(let message):
             return message.isEmpty ? "network error" : message
         case .parse(let message):
@@ -722,6 +722,9 @@ final class UsageOrchestrator: ObservableObject {
             let lower = message.lowercased()
             if lower.contains("setup-token") || lower.contains("user:profile") {
                 return "need browser login"
+            }
+            if lower.contains("token quiet") || lower.contains("access expired") {
+                return "token quiet"
             }
             if lower.contains("refresh") {
                 return "refresh failed"
@@ -764,9 +767,9 @@ final class UsageOrchestrator: ObservableObject {
         case .rateLimited:
             if vendorID == "claude" {
                 return """
-                Claude OAuth token refresh is rate-limited (not your 5h/wk usage quota).
-                App waits a long quiet window then retries — last-good rings stay.
-                If this lasts many hours: Reauthenticate with browser login (not setup-token).
+                Claude OAuth refresh is rate-limited (not your 5h/wk usage quota).
+                App is in a long quiet window — last-good rings stay; no re-login required yet.
+                Opening Claude Code for this account can renew tokens without wiping logins.
                 """
             }
             return """
@@ -785,6 +788,14 @@ final class UsageOrchestrator: ObservableObject {
                 \(message)
                 CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
                 (Do not use setup-token for the usage meter.)
+                """
+            }
+            if lower.contains("token quiet") || lower.contains("access expired") {
+                return """
+                \(message)
+                Last-good usage stays on the rings. Prefer opening Claude Code once over
+                repeated Reauthenticate (hard refresh storms can 429 the token host).
+                CLAUDE_CONFIG_DIR='\(home)' claude
                 """
             }
             if lower.contains("refresh") {
