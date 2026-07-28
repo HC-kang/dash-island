@@ -87,25 +87,30 @@ enum ClaudeAdapterSuite {
             try assertEqual(creds?.subscriptionType, "max")
             try assertEqual(creds?.refreshToken, "rt")
         }
-        failures += check("needsRefresh respects 5m buffer") {
-            let future = Date().addingTimeInterval(10 * 60)
+        failures += check("needsRefresh respects buffer and hard-expiry") {
+            let future = Date().addingTimeInterval(30 * 60)
             let near = Date().addingTimeInterval(2 * 60)
-            let past = Date().addingTimeInterval(-60)
+            let slightlyPast = Date().addingTimeInterval(-10 * 60)
+            let longPast = Date().addingTimeInterval(-3 * 3600)
             let fresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: future, rawJSON: nil
             )
             let soon = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: near, rawJSON: nil
             )
-            let expired = ClaudeAdapter.ClaudeCreds(
-                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: past, rawJSON: nil
+            let softExpired = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
+            )
+            let hardExpired = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: longPast, rawJSON: nil
             )
             let noRefresh = ClaudeAdapter.ClaudeCreds(
-                accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: past, rawJSON: nil
+                accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
             )
             try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
             try assertTrue(ClaudeAdapter.needsRefresh(soon))
-            try assertTrue(ClaudeAdapter.needsRefresh(expired))
+            try assertTrue(ClaudeAdapter.needsRefresh(softExpired))
+            try assertTrue(ClaudeAdapter.needsRefresh(hardExpired) == false)
             try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
         }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
@@ -171,7 +176,26 @@ enum ClaudeAdapterSuite {
         failures += check("registry includes claude") {
             try assertTrue(VendorRegistry.adapter(for: "claude") != nil)
             try assertEqual(VendorRegistry.adapter(for: "claude")?.displayName, "Claude")
-            try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 300)
+            try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 1_800)
+        }
+        failures += check("hard-expired token refuses refresh attempt") {
+            let expMs = Int((Date().timeIntervalSince1970 - 3 * 3600) * 1000) // 3h dead
+            let json = """
+            {"claudeAiOauth":{"accessToken":"sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","refreshToken":"sk-ant-ort01-refresh-token-value-here-xxxx","expiresAt":\(expMs)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
+            try assertTrue(ClaudeAdapter.isHardExpired(creds))
+            try assertTrue(!ClaudeAdapter.canAttemptRefresh(creds))
+            try assertTrue(!ClaudeAdapter.shouldRefresh(creds))
+        }
+        failures += check("slightly stale token may refresh") {
+            let expMs = Int((Date().timeIntervalSince1970 - 10 * 60) * 1000) // 10m past
+            let json = """
+            {"claudeAiOauth":{"accessToken":"sk-ant-oat01-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","refreshToken":"sk-ant-ort01-refresh-token-value-here-yyyy","expiresAt":\(expMs)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
+            try assertTrue(ClaudeAdapter.canAttemptRefresh(creds))
+            try assertTrue(ClaudeAdapter.shouldRefresh(creds))
         }
         failures += check("setup-token is long-lived and skips refresh") {
             let tok = "sk-ant-oat01-" + String(repeating: "x", count: 80)
