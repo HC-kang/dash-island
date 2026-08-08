@@ -21,9 +21,11 @@ final class IslandModel: ObservableObject {
     /// Trailing add rail revealed by chevron hover (grows black body to the right).
     @Published private(set) var addRailOpen: Bool = false
 
-    private let expandedContentHeight: CGFloat = 124
-    /// Transparent buffer so lifted widgets + trash can render past the black body.
-    private let dragBleed: CGFloat = 112
+    /// Fits `AccountWidget.cellHeight` (gauge + title + caption slot) under the notch.
+    private let expandedContentHeight: CGFloat = 136
+    /// Transparent buffer so lifted widgets + trash + hang-down tips render past the black body.
+    /// Must clear long caption tooltips (~180pt) and the trash magnet.
+    private let dragBleed: CGFloat = 220
     private let compactRimPad: CGFloat = 3
 
     static let cellSize: CGFloat = 100
@@ -80,7 +82,8 @@ final class IslandModel: ObservableObject {
     }
 
     /// Extra height under the expanded body so tip-down hover cards stay interactive.
-    static let tooltipHitPad: CGFloat = 72
+    /// Long Claude auth copy needs ~160–200pt; keep headroom past the caret.
+    static let tooltipHitPad: CGFloat = 200
 
     func setState(_ new: State) {
         guard new != state else { return }
@@ -143,8 +146,8 @@ final class IslandModel: ObservableObject {
 
     static func canvasSize(
         for notch: NotchInfo,
-        dragBleed: CGFloat = 112,
-        expandedContentHeight: CGFloat = 124
+        dragBleed: CGFloat = 220,
+        expandedContentHeight: CGFloat = 136
     ) -> CGSize {
         let contentW = expandedWidth(
             notchWidth: notch.width,

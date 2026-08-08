@@ -245,3 +245,24 @@ Fixes:
 - `ClaudeAdapter.refreshManagedCredentialsDetailed`: distinguish success / 429 rateLimited / 400–403 rejected / other unavailable.
 - One refresh attempt per poll; 429 → `.rateLimited` (auto retry, not reauth).
 - Widget: short `errorCaption` under gauge; full `detailCaption` in downward body hover tooltip (commands + path).
+
+## Burn motion UI (2026-07-29)
+
+- `Sources/Domain/BurnMotion.swift` — continuous tier smoothstep (rest/cruise/hot/redline) from design brief; jitter envelope ≤ amp (weights sum 1); per-account phaseOffset 0.2–1.85s.
+- `GaugeRingView` — energy trail, track highlight, rest breath 15fps / hot 30fps, bloom blur only past cruise, tip halo only deep overdrive.
+- `AccountWidget` — continuous border warmth/fill lift from burn (no bounce).
+- Brief: `notes/dash-island-burn-ui-motion-brief.md` (gitignored notes). DO-NOT: rainbow, bounce, strobe, particles, phase-lock all widgets.
+
+## Claude adopt-before-refresh (2026-07-31)
+
+- Hermes pattern ported to `ClaudeAdapter`: re-read scoped keychain+file before any `oauth/token` POST; if live access/refresh is fresher & usable (60s buffer), adopt+persist and skip refresh.
+- `RefreshOutcome.adopted`; reactive path adopts first then refreshes.
+- Hard-expired quiet still avoids POST unless adopt heals.
+- Web landscape: usage monitors (ccusage local JSONL; VS Code tracker / Claude-Code-Usage-Monitor / claude-usage crate hit `/api/oauth/usage`); 3rd-party inference OAuth increasingly ToS-restricted; subprocess/CLI ownership is the compliant alternative for agents.
+
+## File-only Claude credentials (2026-07-31)
+
+- Steady-state: only `accounts/<uuid>/.credentials.json` — no Keychain read on poll/refresh.
+- Keychain scoped item: login capture once + clear on reauth only (never global `Claude Code-credentials`).
+- Multi-account = separate dirs/files; process-wide refresh gate still serializes token endpoint.
+- Quiet UX: "Reauthenticate this account" (not "open Claude Code" for managed folders).

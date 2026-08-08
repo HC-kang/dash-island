@@ -35,7 +35,7 @@ struct GaugeClusterView: View {
     private static let trashMagnetExit: CGFloat = 96
     private static let dragSpace = "dashIsland.dragSpace"
     private static let cell = AccountWidget.cellSize
-    private static let cellH = AccountWidget.cellSize + 8
+    private static let cellH = AccountWidget.cellHeight
     private static let trashSize: CGFloat = 44
     private static let trashOffsetY: CGFloat = 52
     /// Short press keeps context-menu / click free; then drag to reorder.

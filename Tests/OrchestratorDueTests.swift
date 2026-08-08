@@ -5,6 +5,46 @@ enum OrchestratorDueSuite {
         print("UsageOrchestrator.due")
         var failures = 0
 
+        failures += check("usage soft vs hard failure kinds") {
+            try assertEqual(
+                UsageSnapshotMerge.failureKind(.rateLimited(retryAfter: nil)),
+                UsageFailureKind.soft
+            )
+            try assertEqual(
+                UsageSnapshotMerge.failureKind(.authRequired),
+                UsageFailureKind.hard
+            )
+            try assertEqual(
+                UsageSnapshotMerge.failureKind(.network("timeout")),
+                UsageFailureKind.soft
+            )
+            try assertEqual(
+                UsageSnapshotMerge.failureKind(
+                    .unavailable("access expired — token quiet (no refresh storm)")
+                ),
+                UsageFailureKind.soft
+            )
+            try assertEqual(
+                UsageSnapshotMerge.failureKind(
+                    .unavailable("setup-token can’t read usage (no user:profile)")
+                ),
+                UsageFailureKind.hard
+            )
+            try assertTrue(
+                UsageSnapshotMerge.shouldRetainPreviousRings(
+                    previous: UsageSnapshot(
+                        primary: WindowUsage(usedFraction: 0.4, kind: .fiveHour),
+                        secondary: nil,
+                        plan: nil,
+                        fetchedAt: Date()
+                    )
+                )
+            )
+            try assertTrue(
+                !UsageSnapshotMerge.shouldRetainPreviousRings(previous: nil)
+            )
+        }
+
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
 
         failures += check("never fetched is always due") {

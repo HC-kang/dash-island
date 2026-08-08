@@ -14,7 +14,7 @@ struct CenteredAddButton: View {
             GlassPlusLabel(size: 40, symbolSize: 16)
         }
         .menuStyle(.borderlessButton)
-        .frame(maxWidth: .infinity, minHeight: AccountWidget.cellSize + 8)
+        .frame(maxWidth: .infinity, minHeight: AccountWidget.cellHeight)
         .accessibilityLabel("Add account")
     }
 }
