@@ -44,17 +44,18 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 
 /// Anthropic Claude Code usage via `/api/oauth/usage`.
 ///
-/// **Credentials:** managed `accounts/<uuid>/.credentials.json` only (not the
-/// user's default `~/.claude` keychain).
+/// **Credentials (multi-account safe):** each account owns
+/// `accounts/<uuid>/.credentials.json` only. Steady-state never reads Keychain.
+/// Scoped Keychain is used **once** at login capture (CLI may write KC first),
+/// then copied into the file; reauth clears file + that scoped item only.
+/// Never touch the unsuffixed global `Claude Code-credentials` item.
 ///
 /// Two auth modes:
 /// 1. **Long-lived setup-token** (`claude setup-token` → paste) — no refresh;
-///    stable for months; preferred for Dash Island.
+///    often lacks `user:profile` for usage.
 /// 2. **CLI OAuth** (`claude auth login`) — short access + refresh_token. We
-///    refresh via the public Claude Code client id, with a **process-wide**
+///    own refresh via the public Claude Code client id, with a **process-wide**
 ///    gate so multi-account polls do not 429-storm `oauth/token`.
-///
-/// Never touch the unsuffixed global Keychain item (dual-refresh invalidates CLI).
 struct ClaudeAdapter: VendorAdapter {
     let id: VendorID = "claude"
     let displayName = "Claude"
@@ -186,13 +187,8 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
 
-        // File first; if missing/stale, pull fresher scoped Keychain (CLI may have refreshed).
-        var creds = Self.readCredentials(configDir: dir)
-        if let synced = Self.syncFromScopedKeychainIfFresher(configDir: dir, file: creds) {
-            creds = synced
-            NSLog("DashIsland: Claude keychain→file sync ref=%@", String(ref.prefix(8)))
-        }
-        guard var creds else {
+        // Steady-state: managed file only (one file per account — multi-account safe).
+        guard var creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
 
@@ -219,11 +215,10 @@ struct ClaudeAdapter: VendorAdapter {
             return Self.logUsage(snap, ref: ref)
         }
 
-        // --- Short-lived CLI OAuth ---
-        // 1) If access is still usable → probe only (no token-endpoint traffic).
-        // 2) If near expiry or slightly stale → one gated refresh.
-        // 3) If long-dead → do NOT hit oauth/token (429 + possible login-family wipe);
-        //    keep last-good via soft error until user opens Claude Code or reauths.
+        // --- Short-lived CLI OAuth (we own refresh for this account's file) ---
+        // 1) usable access → probe only
+        // 2) near / slightly stale → gated refresh → write this file only
+        // 3) hard-expired → quiet (no token-endpoint storm); user reauths this account
 
         var didRefresh = false
         if Self.shouldRefresh(creds, now: now) {
@@ -252,24 +247,21 @@ struct ClaudeAdapter: VendorAdapter {
                 break
             }
         } else if Self.isHardExpired(creds, now: now) {
-            // Too stale to refresh safely — soft failure, orchestrator keeps rings.
             return Self.errorSnapshot(
                 .unavailable(
-                    "access expired — token quiet (no refresh storm). Open Claude Code once or Reauthenticate"
+                    "access expired — token quiet (no refresh storm). Reauthenticate this account"
                 ),
                 fetchedAt: now
             )
         }
 
-        // Access still good enough to try usage.
         var snap = await Self.probeUsage(
             token: creds.accessToken,
             plan: creds.subscriptionType,
             fetchedAt: now
         )
 
-        // Reactive refresh only if token was still in the "slightly stale" window
-        // and we have not already refreshed this poll.
+        // Reactive refresh if usage 401/403 and we are still inside the safe window.
         if case .authRequired = snap.error, !didRefresh, Self.canAttemptRefresh(creds, now: now) {
             switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
             case .success(let refreshed):
@@ -296,16 +288,15 @@ struct ClaudeAdapter: VendorAdapter {
             case .skipped:
                 snap = Self.errorSnapshot(
                     .unavailable(
-                        "access expired — token quiet (no refresh storm). Open Claude Code once or Reauthenticate"
+                        "access expired — token quiet (no refresh storm). Reauthenticate this account"
                     ),
                     fetchedAt: Date()
                 )
             }
         } else if case .authRequired = snap.error, Self.isHardExpired(creds, now: now) {
-            // Dead token + too late to refresh → soft, not "reauth right now".
             snap = Self.errorSnapshot(
                 .unavailable(
-                    "access expired — token quiet (no refresh storm). Open Claude Code once or Reauthenticate"
+                    "access expired — token quiet (no refresh storm). Reauthenticate this account"
                 ),
                 fetchedAt: now
             )
@@ -574,33 +565,6 @@ struct ClaudeAdapter: VendorAdapter {
         return now >= exp.addingTimeInterval(maxStaleForRefresh)
     }
 
-    /// If CLI refreshed the scoped Keychain item, copy it into our file when fresher.
-    static func syncFromScopedKeychainIfFresher(
-        configDir: URL,
-        file: ClaudeCreds?
-    ) -> ClaudeCreds? {
-        guard let kc = readScopedKeychainCredentials(configDir: configDir) else { return nil }
-        if isLongLived(kc) { return nil }
-
-        let fileExp = file?.expiresAt ?? .distantPast
-        let kcExp = kc.expiresAt ?? .distantPast
-        let fileDead = file.map { isExpired($0) } ?? true
-        let kcAlive = !isExpired(kc)
-
-        // Prefer keychain when it has a later expiry, or file is dead and KC is live.
-        guard kcExp > fileExp + 30 || (fileDead && kcAlive) else { return nil }
-        guard !kc.accessToken.isEmpty else { return nil }
-
-        var merged = kc
-        // Keep refresh from whichever side still has one.
-        if merged.refreshToken == nil || merged.refreshToken?.isEmpty == true {
-            merged.refreshToken = file?.refreshToken
-        }
-        merged.longLived = false
-        persistCredentialsFile(creds: merged, configDir: configDir, overwrite: true)
-        return readCredentials(configDir: configDir)
-    }
-
     /// Outcome of a managed-folder OAuth refresh (distinguishes 429 from real reauth).
     enum RefreshOutcome: Equatable {
         case success(ClaudeCreds)
@@ -610,8 +574,9 @@ struct ClaudeAdapter: VendorAdapter {
         case unavailable(String)
     }
 
-    /// Refresh managed-folder tokens only. Rotates refresh_token when the server
-    /// returns a new one (single-use rotation — must persist atomically).
+    /// Refresh this account's managed file only. Rotates refresh_token when the
+    /// server returns a new one (single-use — must persist atomically).
+    /// Never reads Keychain; multi-account isolation is path-based.
     static func refreshManagedCredentials(configDir: URL) async -> ClaudeCreds? {
         if case .success(let creds) = await refreshManagedCredentialsDetailed(configDir: configDir) {
             return creds
@@ -621,16 +586,28 @@ struct ClaudeAdapter: VendorAdapter {
 
     static func refreshManagedCredentialsDetailed(configDir: URL) async -> RefreshOutcome {
         let path = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
+        // Re-read file under gate so concurrent multi-account polls see latest write.
         guard let data = try? Data(contentsOf: path),
               let creds = parseCredentialsJSON(data),
               let refresh = creds.refreshToken, !refresh.isEmpty
         else { return .skipped }
 
-        // Global gate: one quiet window for the whole process (claim before HTTP).
+        // Global gate: serialize token-endpoint traffic across all Claude accounts.
         if let waitUntil = await refreshGate.blockIfCooling() {
             return .rateLimited(waitUntil)
         }
         await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+
+        // Fresh read after waiting — another account's poll may have finished.
+        guard let data = try? Data(contentsOf: path),
+              let creds = parseCredentialsJSON(data),
+              let refresh = creds.refreshToken, !refresh.isEmpty
+        else { return .skipped }
+
+        // If file was refreshed by another of our polls while we waited, skip POST.
+        if !isExpired(creds) && !shouldRefresh(creds) {
+            return .success(creds)
+        }
 
         var req = URLRequest(url: oauthTokenURL)
         req.httpMethod = "POST"

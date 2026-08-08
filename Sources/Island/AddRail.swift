@@ -18,7 +18,7 @@ struct AddRail: View {
 
     private static let dwellNanos: UInt64 = 500_000_000
     private static let closeGraceNanos: UInt64 = 280_000_000
-    private static let cellH = AccountWidget.cellSize + 8
+    private static let cellH = AccountWidget.cellHeight
 
     var body: some View {
         HStack(spacing: 0) {

@@ -5,6 +5,10 @@ import SwiftUI
 /// Geometry matches design brainstorm v5 (viewBox 96, center 48):
 /// - Outer brand ring r≈31 stroke 5.5; inner cool steel r≈25 (flush).
 /// - Speed ticks outside rings; rest 7:30 → cruise 1:00 → redline 4:30.
+///
+/// Burn motion (Apple-instrument language via `BurnMotion`):
+/// quiet at rest → soft trail + micro-wobble at cruise → warm bloom past cruise.
+/// No strobe, bounce, or rainbow — continuous energy only.
 struct GaugeRingView: View {
     var primaryFraction: Double
     var secondaryFraction: Double?
@@ -12,6 +16,8 @@ struct GaugeRingView: View {
     var burnRatio: Double
     var tint: VendorTint
     var size: CGFloat = 96
+    /// Desyncs Timeline breath/jitter across widgets (≥0.2s).
+    var phaseOffset: TimeInterval = 0
 
     /// Drawn values (spring toward targets).
     @State private var drawnPrimary: Double = 0
@@ -24,34 +30,41 @@ struct GaugeRingView: View {
 
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
+    private static let burnRed = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
+    private static let burnSoft = Color(red: 0.97, green: 0.44, blue: 0.42)
 
     /// Rings / % — quiet, quick.
     private static let ringSettle = Animation.spring(response: 0.55, dampingFraction: 0.88)
     /// Needle on expand — slow sweep so the user notices motion (rest → target).
     private static let needleReveal = Animation.spring(response: 1.55, dampingFraction: 0.86)
-    /// Needle while already expanded (live burn updates) — still readable, less theatrical.
-    private static let needleLive = Animation.spring(response: 0.95, dampingFraction: 0.88)
+    /// Live burn updates — brief ~220–280ms settle, critically damped (no rubber).
+    private static let needleLive = Animation.spring(response: 0.26, dampingFraction: 0.96)
 
-    /// Idle when burn is effectively rest — pause TimelineView to save CPU.
-    private var needleAlive: Bool { drawnBurn > 0.03 }
+    /// Always breathe while mounted (brief rest floor); FPS drops below cruise.
+    private var timelineInterval: TimeInterval {
+        BurnMotion.energy(ratio: drawnBurn) < 0.35 ? (1.0 / 15.0) : (1.0 / 30.0)
+    }
 
     var body: some View {
-        // Timeline drives subtle continuous jitter while burn > 0.
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !needleAlive)) { timeline in
+        // Timeline: rest barely alive at 15fps; hot+ at 30fps. Never strobe.
+        TimelineView(.animation(minimumInterval: timelineInterval, paused: !didAppear)) { timeline in
             ZStack {
                 Canvas { context, canvasSize in
                     let s = min(canvasSize.width, canvasSize.height)
                     let c = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
                     let scale = s / 96
+                    let date = timeline.date
 
+                    drawAmbientBloom(context: context, center: c, scale: scale, date: date)
                     drawSpeedTrack(context: context, center: c, scale: scale)
+                    drawEnergyTrail(context: context, center: c, scale: scale)
                     drawTicks(context: context, center: c, scale: scale)
                     drawUsageRings(context: context, center: c, scale: scale)
                     drawNeedle(
                         context: context,
                         center: c,
                         scale: scale,
-                        date: timeline.date
+                        date: date
                     )
                 }
 
@@ -138,6 +151,30 @@ struct GaugeRingView: View {
 
     // MARK: - Drawing
 
+    /// Warm center haze past light activity — breath modulates, never blinks off.
+    private func drawAmbientBloom(
+        context: GraphicsContext,
+        center: CGPoint,
+        scale: CGFloat,
+        date: Date
+    ) {
+        let base = BurnMotion.bloomOpacity(ratio: drawnBurn)
+        guard base > 0.004 else { return }
+        let breath = BurnMotion.breath(at: date, ratio: drawnBurn, phaseOffset: phaseOffset)
+        let op = base * breath
+        let r: CGFloat = (22 + BurnMotion.overdrive(ratio: drawnBurn) * 6) * scale
+        let rect = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)
+        var ctx = context
+        // Blur only past cruise — rest/cruise stay cheap hairline chrome.
+        if BurnMotion.energy(ratio: drawnBurn) >= 0.35 {
+            ctx.addFilter(.blur(radius: 6 * scale))
+        }
+        ctx.fill(
+            Path(ellipseIn: rect),
+            with: .color(Self.burnSoft.opacity(op))
+        )
+    }
+
     private func drawSpeedTrack(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
         let r: CGFloat = 42 * scale
         // Arc rest (7:30) → redline (4:30) the long way (270° clockwise).
@@ -154,12 +191,69 @@ struct GaugeRingView: View {
             with: .color(Color.white.opacity(0.08)),
             style: StrokeStyle(lineWidth: 0.9 * scale, lineCap: .round)
         )
+
+        // Active sector highlight: rest → current needle base (no jitter).
+        let highlight = BurnMotion.trackHighlightOpacity(ratio: drawnBurn)
+        guard highlight > 0.01 else { return }
+        let unit = BurnRate.needleUnit(ratio: drawnBurn)
+        let endDeg = Self.needleAngleDegrees(unit: unit)
+        var lit = Path()
+        lit.addArc(
+            center: center,
+            radius: r,
+            startAngle: .degrees(135),
+            endAngle: .degrees(endDeg),
+            clockwise: false
+        )
+        context.stroke(
+            lit,
+            with: .color(Self.burnSoft.opacity(highlight)),
+            style: StrokeStyle(lineWidth: 1.15 * scale, lineCap: .round)
+        )
+    }
+
+    /// Soft fan under the needle from rest → tip — reads as swept energy, not a progress bar.
+    private func drawEnergyTrail(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
+        let op = BurnMotion.trailOpacity(ratio: drawnBurn)
+        guard op > 0.01 else { return }
+        let unit = BurnRate.needleUnit(ratio: drawnBurn)
+        let endDeg = Self.needleAngleDegrees(unit: unit)
+        // Don't draw a full loop artifact when near rest.
+        guard unit > 0.02 else { return }
+
+        let innerR: CGFloat = 34 * scale
+        let outerR: CGFloat = 41 * scale
+
+        var ring = Path()
+        ring.addArc(
+            center: center,
+            radius: (innerR + outerR) / 2,
+            startAngle: .degrees(135),
+            endAngle: .degrees(endDeg),
+            clockwise: false
+        )
+
+        let outer = context
+        outer.stroke(
+            ring,
+            with: .color(Self.burnSoft.opacity(BurnMotion.trailOuterOpacity(ratio: drawnBurn))),
+            style: StrokeStyle(lineWidth: (outerR - innerR) * 0.85, lineCap: .round)
+        )
+
+        var core = context
+        core.addFilter(.blur(radius: 0.8 * scale))
+        core.stroke(
+            ring,
+            with: .color(Self.burnRed.opacity(op)),
+            style: StrokeStyle(lineWidth: 2.2 * scale, lineCap: .round)
+        )
     }
 
     private func drawTicks(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
         let innerR: CGFloat = 40 * scale
         let outerR: CGFloat = 44 * scale
         let majorOuterR: CGFloat = 44.5 * scale
+        let e = BurnMotion.energy(ratio: drawnBurn)
 
         // Quiet ticks along rest → cruise (7:30, 9, 10:30, 12).
         let quietAngles: [Double] = [135, 180, 225, 270]
@@ -170,28 +264,38 @@ struct GaugeRingView: View {
                 angleDeg: deg,
                 innerR: innerR,
                 outerR: outerR,
-                color: Color.white.opacity(0.34),
+                color: Color.white.opacity(0.34 + e * 0.06),
                 width: 1.05 * scale
             )
         }
 
-        // Cruise pip (~1 o'clock).
+        // Cruise pip (~1 o'clock) — brightens when near cruise pace.
         let cruise: Double = 300 // 1:00
+        let pipBoost = BurnMotion.cruisePipBoost(ratio: drawnBurn)
+        let pipOp = 0.52 + pipBoost
         strokeTick(
             context: context,
             center: center,
             angleDeg: cruise,
             innerR: innerR,
             outerR: majorOuterR,
-            color: Color.white.opacity(0.52),
+            color: Color.white.opacity(pipOp),
             width: 1.15 * scale
         )
         let pip = point(center: center, angleDeg: cruise, radius: majorOuterR + 1.2 * scale)
-        let pipRect = CGRect(x: pip.x - 1.55 * scale, y: pip.y - 1.55 * scale,
-                             width: 3.1 * scale, height: 3.1 * scale)
-        context.fill(Path(ellipseIn: pipRect), with: .color(Color.white.opacity(0.52)))
+        let pipR: CGFloat = (1.55 + pipBoost * 0.35) * scale
+        let pipRect = CGRect(x: pip.x - pipR, y: pip.y - pipR, width: pipR * 2, height: pipR * 2)
+        context.fill(Path(ellipseIn: pipRect), with: .color(Color.white.opacity(pipOp)))
+        if pipBoost > 0.05 {
+            var glow = context
+            glow.addFilter(.blur(radius: 1.2 * scale))
+            let gR = pipR * 1.8
+            let gRect = CGRect(x: pip.x - gR, y: pip.y - gR, width: gR * 2, height: gR * 2)
+            glow.fill(Path(ellipseIn: gRect), with: .color(Color.white.opacity(pipBoost * 0.35)))
+        }
 
-        // Redline ticks (3, 4, 4:30).
+        // Redline ticks (3, 4, 4:30) — slightly more present in overdrive.
+        let od = BurnMotion.overdrive(ratio: drawnBurn)
         let redAngles: [Double] = [0, 30, 45]
         for deg in redAngles {
             strokeTick(
@@ -200,7 +304,7 @@ struct GaugeRingView: View {
                 angleDeg: deg,
                 innerR: innerR,
                 outerR: outerR,
-                color: Color(red: 0.97, green: 0.44, blue: 0.44).opacity(0.38), // #f87171
+                color: Color(red: 0.97, green: 0.44, blue: 0.44).opacity(0.38 + od * 0.18),
                 width: 1.05 * scale
             )
         }
@@ -211,6 +315,7 @@ struct GaugeRingView: View {
         // Flush: outer centerline = inner centerline + stroke.
         let outerR: CGFloat = 31 * scale
         let innerR: CGFloat = 25 * scale
+        let glowBoost = BurnMotion.brandRingGlowBoost(ratio: drawnBurn)
 
         // Track underlays.
         strokeRing(context: context, center: center, radius: outerR, fraction: 1,
@@ -224,7 +329,12 @@ struct GaugeRingView: View {
         let p = clamped(drawnPrimary)
         if p > 0.0005 {
             var ctx = context
-            ctx.addFilter(.shadow(color: brand.opacity(0.35), radius: 2 * scale, x: 0, y: 0))
+            ctx.addFilter(.shadow(
+                color: brand.opacity(0.35 + glowBoost),
+                radius: (2 + glowBoost * 4) * scale,
+                x: 0,
+                y: 0
+            ))
             strokeRing(context: ctx, center: center, radius: outerR, fraction: p,
                        color: brand, lineWidth: stroke)
         }
@@ -247,43 +357,65 @@ struct GaugeRingView: View {
     ) {
         let unit = BurnRate.needleUnit(ratio: drawnBurn)
         let baseAngle = Self.needleAngleDegrees(unit: unit)
-        let angle = baseAngle + Self.needleJitterDegrees(burn: drawnBurn, at: date)
+        let angle = baseAngle + BurnMotion.needleJitterDegrees(
+            ratio: drawnBurn,
+            at: date,
+            phaseOffset: phaseOffset
+        )
         let tipR: CGFloat = 38 * scale
         let tip = point(center: center, angleDeg: angle, radius: tipR)
-        let red = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
+        let red = Self.burnRed
+        let widthScale = BurnMotion.needleWidthScale(ratio: drawnBurn)
+        let lineW = 1.35 * scale * CGFloat(widthScale)
 
         var path = Path()
         path.move(to: center)
         path.addLine(to: tip)
 
-        var glow = context
-        glow.addFilter(.shadow(color: red.opacity(0.55), radius: 2.2 * scale, x: 0, y: 0))
-        glow.stroke(
-            path,
-            with: .color(red),
-            style: StrokeStyle(lineWidth: 1.35 * scale, lineCap: .round)
-        )
+        // Tip halo only deep overdrive — amp-first; avoid stacking FX past hot.
+        let od = BurnMotion.overdrive(ratio: drawnBurn)
+        if od > 0.55 {
+            let tipHaloR: CGFloat = (1.6 + od * 0.9) * scale
+            var halo = context
+            halo.addFilter(.blur(radius: 1.2 * scale))
+            let hRect = CGRect(
+                x: tip.x - tipHaloR,
+                y: tip.y - tipHaloR,
+                width: tipHaloR * 2,
+                height: tipHaloR * 2
+            )
+            halo.fill(Path(ellipseIn: hRect), with: .color(red.opacity(0.12 + od * 0.10)))
+        }
+
+        let glowα = BurnMotion.needleGlowOpacity(ratio: drawnBurn)
+        if glowα > 0.02 {
+            var glow = context
+            glow.addFilter(.shadow(
+                color: red.opacity(glowα),
+                radius: BurnMotion.needleGlowRadius(ratio: drawnBurn) * scale,
+                x: 0,
+                y: 0
+            ))
+            glow.stroke(
+                path,
+                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: drawnBurn))),
+                style: StrokeStyle(lineWidth: lineW, lineCap: .round)
+            )
+        } else {
+            context.stroke(
+                path,
+                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: drawnBurn))),
+                style: StrokeStyle(lineWidth: lineW, lineCap: .round)
+            )
+        }
 
         // Hub.
-        let hubR: CGFloat = 2.25 * scale
+        let hubR: CGFloat = (2.25 + BurnMotion.energy(ratio: drawnBurn) * 0.25) * scale
         let hubRect = CGRect(x: center.x - hubR, y: center.y - hubR, width: hubR * 2, height: hubR * 2)
         context.fill(Path(ellipseIn: hubRect), with: .color(red))
         let coreR: CGFloat = 0.95 * scale
         let coreRect = CGRect(x: center.x - coreR, y: center.y - coreR, width: coreR * 2, height: coreR * 2)
         context.fill(Path(ellipseIn: coreRect), with: .color(Color(red: 0.10, green: 0.02, blue: 0.02)))
-    }
-
-    /// Multi-frequency micro-wobble in **degrees** while burn > rest.
-    /// Quiet enough to feel like a live instrument, not a screensaver.
-    static func needleJitterDegrees(burn: Double, at date: Date) -> Double {
-        guard burn > 0.03 else { return 0 }
-        let t = date.timeIntervalSinceReferenceDate
-        // Slightly livelier when hotter, still under ~1.4°.
-        let amp = 0.42 + min(0.55, burn * 0.22)
-        let fast = sin(t * 2.15 * .pi) * amp
-        let mid = sin(t * 3.55 * .pi + 0.9) * amp * 0.42
-        let slow = sin(t * 0.55 * .pi + 0.3) * amp * 0.28
-        return fast + mid + slow
     }
 
     // MARK: - Helpers
@@ -301,6 +433,11 @@ struct GaugeRingView: View {
         }
     }
 
+    /// Back-compat for tests / call sites that still pass burn into the old helper.
+    static func needleJitterDegrees(burn: Double, at date: Date, phaseOffset: TimeInterval = 0) -> Double {
+        BurnMotion.needleJitterDegrees(ratio: burn, at: date, phaseOffset: phaseOffset)
+    }
+
     private func strokeRing(
         context: GraphicsContext,
         center: CGPoint,
@@ -311,9 +448,7 @@ struct GaugeRingView: View {
     ) {
         let f = clamped(fraction)
         guard f > 0 else { return }
-        // Start at 12 o'clock, sweep clockwise (screen: start -90°, clockwise = false in addArc? ).
-        // SwiftUI Path.addArc clockwise:true goes counter-clockwise on screen with y-down.
-        // We want clockwise from 12 o'clock: start -90°, end -90° + 360*f, clockwise: false.
+        // Start at 12 o'clock, sweep clockwise (screen: start -90°, end -90° + 360*f).
         var path = Path()
         let start = Angle.degrees(-90)
         let end = Angle.degrees(-90 + 360 * f)

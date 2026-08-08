@@ -6,6 +6,7 @@ struct TestMain {
     static func main() {
         var failures = 0
         failures += BurnRateSuite.run()
+        failures += BurnMotionSuite.run()
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += ClaudeAdapterSuite.run()

@@ -14,11 +14,17 @@ struct AccountWidget: View {
     /// Hover on the under-gauge warning/notice line only.
     @State private var captionHovered = false
 
-    /// Outer cell size (gauge sits inside with padding).
+    /// Outer cell width (gauge sits inside with padding).
     static let cellSize: CGFloat = IslandModel.cellSize
-    private static let gaugeSize: CGFloat = 84
+    /// Fixed cell height — room for gauge + title + caption slot without vertical reflow.
+    static let cellHeight: CGFloat = IslandModel.cellSize + 20
+    private static let gaugeSize: CGFloat = 80
+    /// Always reserved so error captions never push the gauge/title up.
+    private static let captionSlotHeight: CGFloat = 15
     /// Invisible hit pad so a 6pt dot is actually reachable.
     private static let statusHit: CGFloat = 18
+    /// Gap between cell bottom and the top edge of hang-down tips.
+    private static let tipGap: CGFloat = 8
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -30,7 +36,8 @@ struct AccountWidget: View {
                         centerPercent: model.centerPercent,
                         burnRatio: model.burnRatio,
                         tint: model.tint,
-                        size: Self.gaugeSize
+                        size: Self.gaugeSize,
+                        phaseOffset: BurnMotion.phaseOffset(for: model.id)
                     )
                     .opacity(model.isAwaitingFirstSample ? 0.22 : 1)
 
@@ -40,6 +47,7 @@ struct AccountWidget: View {
                             .colorScheme(.dark)
                     }
                 }
+                .frame(width: Self.gaugeSize, height: Self.gaugeSize)
 
                 Text(model.title)
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
@@ -47,36 +55,19 @@ struct AccountWidget: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: Self.cellSize - 8)
+                    .frame(height: 11)
 
-                warningCaption
+                // Fixed slot: empty cells keep the same metrics as captioned ones.
+                captionSlot
+                    .frame(height: Self.captionSlotHeight)
+                    .frame(maxWidth: Self.cellSize - 10)
             }
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-            .frame(width: Self.cellSize, height: Self.cellSize + 8)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color(white: isHot ? 0.09 : 0.07),
-                                Color(white: 0.03)
-                            ],
-                            center: .init(x: 0.5, y: 0.40),
-                            startRadius: 0,
-                            endRadius: 70
-                        )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(
-                                isDropTarget
-                                    ? Color.white.opacity(0.35)
-                                    : Color.white.opacity(isHot || isHovered || isDragging ? 0.14 : 0.06),
-                                lineWidth: isDropTarget ? 1.5 : 1
-                            )
-                    )
-                    .shadow(color: isDragging ? Color.black.opacity(0.45) : .clear, radius: isDragging ? 12 : 0, y: 6)
-            )
+            .padding(.top, 6)
+            .padding(.bottom, 4)
+            // Top-align so growing captions cannot center-shift the gauge upward.
+            .frame(width: Self.cellSize, height: Self.cellHeight, alignment: .top)
+            .background(cellBackground)
+            .animation(.easeOut(duration: 0.55), value: model.burnRatio)
             .overlay(alignment: .topLeading) {
                 VendorLogoBadge(vendorID: model.vendorID)
                     .padding(.top, 7)
@@ -96,14 +87,15 @@ struct AccountWidget: View {
                 .padding(.trailing, 4)
                 .zIndex(20)
         }
-        .frame(width: Self.cellSize, height: Self.cellSize + 8)
+        .frame(width: Self.cellSize, height: Self.cellHeight)
         .scaleEffect(isDragging ? 1.06 : 1)
-        // Usage tip (body only) — not when status/caption own the cursor.
-        .overlay(alignment: .bottom) {
+        // Tips hang **below** the cell (top of tip at cell bottom).
+        // Bottom-aligned overlays grow upward and pierce the notch — never do that.
+        .overlay(alignment: .top) {
             if isHovered, !statusHovered, !captionHovered, !model.hoverWindows.isEmpty {
                 usageTooltip
                     .fixedSize()
-                    .offset(y: 44)
+                    .offset(y: Self.cellHeight + Self.tipGap)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .allowsHitTesting(false)
             }
@@ -111,10 +103,11 @@ struct AccountWidget: View {
         // Warning/notice detail — only while the caption line is hovered.
         // Must not inherit the cell's ~100pt width proposal (that forced the
         // skinny column wrap). Size like the status tip: content-driven, wide.
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .top) {
             if captionHovered, !statusHovered, captionDetailBody != nil || hasCaptionTiming {
                 captionTooltip(isError: model.errorCaption != nil)
-                    .offset(y: 44)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .offset(y: Self.cellHeight + Self.tipGap)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .allowsHitTesting(false)
                     .zIndex(25)
@@ -164,6 +157,63 @@ struct AccountWidget: View {
         model.usedPrimaryFraction >= 0.7 || model.burnRatio >= 1.5
     }
 
+    /// Continuous card energy from burn (Apple-quiet: lift fill / warm edge, no bounce).
+    private var cellBackground: some View {
+        let burn = model.burnRatio
+        let lift = BurnMotion.cellFillLift(ratio: burn)
+        let borderBoost = BurnMotion.cellBorderBoost(ratio: burn)
+        let warmth = BurnMotion.cellBorderWarmth(ratio: burn)
+        let baseBorder: Double = {
+            if isDropTarget { return 0.35 }
+            if isHot || isHovered || isDragging { return 0.14 }
+            return 0.06
+        }()
+        let borderOp = min(0.28, baseBorder + borderBoost)
+        // White edge → slight warm red as pace rises past cruise.
+        let w = min(1, max(0, warmth))
+        let borderColor = isDropTarget
+            ? Color.white
+            : Color(
+                red: 1.0 * (1 - w) + 0.97 * w,
+                green: 1.0 * (1 - w) + 0.48 * w,
+                blue: 1.0 * (1 - w) + 0.42 * w
+            )
+        let warmAccent = Color(red: 0.97, green: 0.48, blue: 0.42)
+
+        return RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(
+                RadialGradient(
+                    colors: [
+                        Color(white: min(0.12, (isHot ? 0.09 : 0.07) + lift)),
+                        Color(white: 0.03)
+                    ],
+                    center: .init(x: 0.5, y: 0.40),
+                    startRadius: 0,
+                    endRadius: 70
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(
+                        borderColor.opacity(borderOp),
+                        lineWidth: isDropTarget ? 1.5 : 1
+                    )
+            )
+            // Faint warm outer veil only in overdrive — soft, not neon.
+            .overlay {
+                let od = BurnMotion.overdrive(ratio: burn)
+                if od > 0.05 {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(
+                            warmAccent.opacity(0.06 + od * 0.10),
+                            lineWidth: 1
+                        )
+                        .blur(radius: 0.6)
+                }
+            }
+            .shadow(color: isDragging ? Color.black.opacity(0.45) : .clear, radius: isDragging ? 12 : 0, y: 6)
+    }
+
     private var captionDetailBody: String? {
         if let detail = model.detailCaption, !detail.isEmpty { return detail }
         if let err = model.errorCaption, !err.isEmpty { return err }
@@ -175,15 +225,18 @@ struct AccountWidget: View {
         model.lastCheckedAt != nil || model.retryAt != nil || model.lastSuccessAt != nil
     }
 
-    /// Truncated under-gauge line with its own hover hit target (like status chip).
+    /// Fixed-height caption row — blank when healthy so layout never reflows.
     @ViewBuilder
-    private var warningCaption: some View {
+    private var captionSlot: some View {
         if model.errorCaption != nil || model.noticeCaption != nil {
             TimelineView(.periodic(from: .now, by: 15)) { context in
                 let isError = model.errorCaption != nil
                 let text = liveShortCaption(now: context.date)
                 captionLabel(text, isError: isError)
             }
+        } else {
+            Color.clear
+                .accessibilityHidden(true)
         }
     }
 

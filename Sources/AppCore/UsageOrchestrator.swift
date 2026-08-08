@@ -478,7 +478,7 @@ final class UsageOrchestrator: ObservableObject {
 
         if let error = snapshot.error {
             lastError[accountID] = error
-            lastNotice[accountID] = nil
+            let kind = UsageSnapshotMerge.failureKind(error)
 
             switch error {
             case .rateLimited(let retryAfter):
@@ -501,15 +501,27 @@ final class UsageOrchestrator: ObservableObject {
             case .authRequired:
                 // Stop overnight 401 loops; user reauth / manual refresh clears this.
                 cooldownUntil[accountID] = now.addingTimeInterval(Self.authFailureCooldown)
+            case .unavailable where kind == .soft:
+                // Soft token-quiet: short extra spacing so we do not thrash oauth/token.
+                if cooldownUntil[accountID] == nil {
+                    cooldownUntil[accountID] = now.addingTimeInterval(30 * 60)
+                }
             default:
                 break
             }
 
-            // Soft retention: keep last good rings when we already have them.
-            // Auth terminal also keeps rings if present but always surfaces caption.
-            if lastGood[accountID] == nil {
-                // Cold start with only an error — still store so hover/caption work.
+            // Soft: keep last-good rings + stale notice.
+            // Hard: keep last-good rings if any, but caption is terminal reauth.
+            if UsageSnapshotMerge.shouldRetainPreviousRings(previous: lastGood[accountID]) {
+                if kind == .soft {
+                    lastNotice[accountID] = UsageSnapshotMerge.softStaleNotice(for: error)
+                } else {
+                    lastNotice[accountID] = nil
+                }
+            } else {
+                // Cold start with only an error — store for hover/caption, no fake rings.
                 lastGood[accountID] = snapshot
+                lastNotice[accountID] = nil
             }
             return
         }
@@ -704,10 +716,11 @@ final class UsageOrchestrator: ObservableObject {
     /// Short under-widget line (truncated by the cell).
     nonisolated static func caption(for error: UsageError?, vendorID: VendorID = "") -> String? {
         guard let error else { return nil }
+        let kind = UsageSnapshotMerge.failureKind(error)
         switch error {
         case .authRequired:
             switch vendorID {
-            case "claude": return "reauth: browser login"
+            case "claude": return "reconnect account"
             case "codex": return "reauth: codex"
             case "grok": return "reauth: grok"
             default: return "reauth needed"
@@ -723,11 +736,11 @@ final class UsageOrchestrator: ObservableObject {
             if lower.contains("setup-token") || lower.contains("user:profile") {
                 return "need browser login"
             }
-            if lower.contains("token quiet") || lower.contains("access expired") {
+            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
                 return "token quiet"
             }
             if lower.contains("refresh") {
-                return "refresh failed"
+                return "token quiet"
             }
             return message.isEmpty ? "unavailable" : message
         }
@@ -741,15 +754,16 @@ final class UsageOrchestrator: ObservableObject {
     ) -> String? {
         guard let error else { return nil }
         let home = CredentialStore.directoryURL(for: credentialRef).path
+        let kind = UsageSnapshotMerge.failureKind(error)
         switch error {
         case .authRequired:
             switch vendorID {
             case "claude":
                 return """
-                Claude OAuth rejected (invalid token or missing user:profile).
-                setup-token is for model calls only — usage API needs full browser login.
-                Widget menu → Reauthenticate, or:
-                CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
+                Claude rejected this account’s token (invalid login or missing user:profile).
+                setup-token cannot read usage — use full browser OAuth.
+                Widget menu → Reauthenticate this account only (other accounts stay put).
+                Or: CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
                 """
             case "codex":
                 return """
@@ -767,18 +781,19 @@ final class UsageOrchestrator: ObservableObject {
         case .rateLimited:
             if vendorID == "claude" {
                 return """
-                Claude OAuth refresh is rate-limited (not your 5h/wk usage quota).
-                App is in a long quiet window — last-good rings stay; no re-login required yet.
-                Opening Claude Code for this account can renew tokens without wiping logins.
+                Claude OAuth token host is rate-limited (not your 5h/wk usage quota).
+                Long quiet window — last-good rings stay. No re-login required yet.
+                Each account uses its own credentials file; reconnect only if this never recovers.
                 """
             }
             return """
             Vendor rate-limited (usage API or OAuth token refresh).
-            Dash Island backs off for a long quiet window and retries later —
-            not on every hover. Last-good numbers stay on the rings. No re-login needed.
+            Long quiet window; last-good numbers stay on the rings. No re-login needed yet.
             """
         case .network(let message):
-            return message.isEmpty ? "Network error — will retry on next poll." : message
+            return message.isEmpty
+                ? "Network error — will retry on next poll. Last-good rings stay if present."
+                : message
         case .parse(let message):
             return message.isEmpty ? "Could not parse vendor response." : message
         case .unavailable(let message):
@@ -786,22 +801,21 @@ final class UsageOrchestrator: ObservableObject {
             if lower.contains("setup-token") || lower.contains("user:profile") {
                 return """
                 \(message)
+                Widget menu → Reauthenticate (browser login for this account only).
                 CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
-                (Do not use setup-token for the usage meter.)
                 """
             }
-            if lower.contains("token quiet") || lower.contains("access expired") {
+            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
                 return """
                 \(message)
-                Last-good usage stays on the rings. Prefer opening Claude Code once over
-                repeated Reauthenticate (hard refresh storms can 429 the token host).
-                CLAUDE_CONFIG_DIR='\(home)' claude
+                Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
+                If this persists for hours, widget menu → Reauthenticate this account only.
                 """
             }
             if lower.contains("refresh") {
                 return """
                 \(message)
-                Access token could not be renewed this poll. Will retry — usually not a full re-login.
+                Soft failure — will retry on the next poll. Last-good rings stay if present.
                 """
             }
             return message.isEmpty ? "Temporarily unavailable." : message

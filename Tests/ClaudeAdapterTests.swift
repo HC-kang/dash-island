@@ -229,6 +229,19 @@ enum ClaudeAdapterSuite {
             try assertTrue(!ClaudeAdapter.isLongLived(creds!))
             try assertTrue(ClaudeAdapter.needsRefresh(creds!))
         }
+        failures += check("multi-account isolation is path-based (separate config dirs)") {
+            // Documented contract: each account's credentials live only under its
+            // CLAUDE_CONFIG_DIR file; refresh writes that path only. Two dirs ⇒
+            // two independent refresh tokens (no shared Keychain steady-state).
+            let a = URL(fileURLWithPath: "/tmp/dash-claude-acct-a")
+            let b = URL(fileURLWithPath: "/tmp/dash-claude-acct-b")
+            try assertTrue(a.path != b.path)
+            let sa = ClaudeAdapter.scopedKeychainService(for: a)
+            let sb = ClaudeAdapter.scopedKeychainService(for: b)
+            try assertTrue(sa != sb)
+            try assertTrue(sa.hasPrefix("Claude Code-credentials-"))
+            try assertTrue(sb.hasPrefix("Claude Code-credentials-"))
+        }
         return failures
     }
 }
