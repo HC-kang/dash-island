@@ -31,7 +31,10 @@ final class IslandModel: ObservableObject {
     static let cellSize: CGFloat = 100
     static let cellGap: CGFloat = 12
     static let horizontalPadding: CGFloat = 32
-    static let maxItems: Int = 5
+    /// Hard cap on stored accounts (scroll when more than `maxVisibleSlots`).
+    static let maxItems: Int = 8
+    /// How many gauges fit in the island body at once; extra accounts scroll horizontally.
+    static let maxVisibleSlots: Int = 5
     static let addChevronWidth: CGFloat = AddRail.chevronWidth
     static let addRailWidth: CGFloat = AddRail.railWidth
 
@@ -125,14 +128,15 @@ final class IslandModel: ObservableObject {
         }
     }
 
-    /// Floor at the 3-slot layout; 4–5 grow. Optional trailing add chrome.
+    /// Floor at 3 slots; body grows through `maxVisibleSlots`, then scrolls inside.
     static func expandedWidth(
         notchWidth: CGFloat,
         itemCount: Int,
         canAdd: Bool = false,
         addRailOpen: Bool = false
     ) -> CGFloat {
-        let n = min(maxItems, max(3, itemCount))
+        // Island silhouette width is viewport-sized (not full account count).
+        let n = min(maxVisibleSlots, max(3, itemCount))
         let content =
             CGFloat(n) * cellSize
             + CGFloat(n - 1) * cellGap
@@ -144,14 +148,22 @@ final class IslandModel: ObservableObject {
         return base + trailing
     }
 
+    /// Row width for `count` cells (no outer padding).
+    static func rowWidth(slotCount: Int) -> CGFloat {
+        let n = max(0, slotCount)
+        guard n > 0 else { return 0 }
+        return CGFloat(n) * cellSize + CGFloat(n - 1) * cellGap
+    }
+
     static func canvasSize(
         for notch: NotchInfo,
         dragBleed: CGFloat = 220,
         expandedContentHeight: CGFloat = 136
     ) -> CGSize {
+        // Canvas uses viewport width (max visible), not full scroll content.
         let contentW = expandedWidth(
             notchWidth: notch.width,
-            itemCount: maxItems,
+            itemCount: maxVisibleSlots,
             canAdd: true,
             addRailOpen: true
         )

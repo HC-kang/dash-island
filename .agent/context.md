@@ -266,3 +266,9 @@ Fixes:
 - Keychain scoped item: login capture once + clear on reauth only (never global `Claude Code-credentials`).
 - Multi-account = separate dirs/files; process-wide refresh gate still serializes token endpoint.
 - Quiet UX: "Reauthenticate this account" (not "open Claude Code" for managed folders).
+
+## Horizontal account scroll (2026-08-09)
+
+- maxAccounts / maxItems = 8; maxVisibleSlots = 5 (island body width).
+- GaugeClusterView: ScrollView when slotCount > 5; edge fades; scroll disabled while drag-reorder.
+- Drag hit-testing uses rowOriginX from GeometryReader in dragSpace.

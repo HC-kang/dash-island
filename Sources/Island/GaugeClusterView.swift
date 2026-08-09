@@ -27,8 +27,13 @@ struct GaugeClusterView: View {
     @State private var clusterSize: CGSize = .zero
     /// Slot whose tooltip is open — must outrank later HStack siblings.
     @State private var elevatedWidgetID: AccountID?
+    /// Leading edge of the slot row in `dragSpace` (tracks scroll).
+    @State private var rowOriginX: CGFloat = 0
+    /// Viewport width of the scroll/clip region.
+    @State private var viewportWidth: CGFloat = 0
 
     private static let maxSlots = IslandModel.maxItems
+    private static let maxVisible = IslandModel.maxVisibleSlots
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
     private static let trashMagnetEnter: CGFloat = 72
@@ -38,12 +43,26 @@ struct GaugeClusterView: View {
     private static let cellH = AccountWidget.cellHeight
     private static let trashSize: CGFloat = 44
     private static let trashOffsetY: CGFloat = 52
+    /// Soft edge fade when content overflows the viewport.
+    private static let edgeFadeWidth: CGFloat = 22
     /// Short press keeps context-menu / click free; then drag to reorder.
     private static let dragLongPress: Double = 0.18
 
     private var slotCount: Int {
         let filled = max(baseOrder.count, widgets.count)
         return max(Self.minSlots, min(Self.maxSlots, filled))
+    }
+
+    private var needsHorizontalScroll: Bool {
+        slotCount > Self.maxVisible
+    }
+
+    private var contentRowWidth: CGFloat {
+        IslandModel.rowWidth(slotCount: slotCount)
+    }
+
+    private var viewportRowWidth: CGFloat {
+        IslandModel.rowWidth(slotCount: min(slotCount, Self.maxVisible))
     }
 
     private var modelByID: [AccountID: WidgetViewModel] {
@@ -149,18 +168,106 @@ struct GaugeClusterView: View {
         baseOrder = widgets.map(\.id)
     }
 
-    // MARK: - Slots
+    // MARK: -Slots
 
     private var slotRow: some View {
+        Group {
+            if needsHorizontalScroll {
+                scrollableSlotRow
+            } else {
+                centeredSlotRow
+            }
+        }
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
+        .onPreferenceChange(WidgetHoverElevatePreference.self) { elevatedWidgetID = $0 }
+    }
+
+    /// ≤ maxVisible: centered row, no chrome.
+    private var centeredSlotRow: some View {
         HStack(spacing: Self.gap) {
             ForEach(0..<slotCount, id: \.self) { index in
                 slotCell(index: index)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
-        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
-        .onPreferenceChange(WidgetHoverElevatePreference.self) { elevatedWidgetID = $0 }
+        .background(rowGeometryProbe)
+    }
+
+    /// > maxVisible: horizontal scroll inside a fixed viewport.
+    private var scrollableSlotRow: some View {
+        ZStack {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Self.gap) {
+                    ForEach(0..<slotCount, id: \.self) { index in
+                        slotCell(index: index)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .background(rowGeometryProbe)
+            }
+            // Freeze scroll while dragging so drop targets stay stable.
+            .disabled(draggingID != nil)
+            .frame(width: viewportRowWidth, alignment: .leading)
+
+            scrollEdgeFades
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Tracks the slot row’s leading edge in drag space (scroll + center).
+    private var rowGeometryProbe: some View {
+        GeometryReader { geo in
+            let frame = geo.frame(in: .named(Self.dragSpace))
+            Color.clear
+                .preference(
+                    key: SlotRowFrameKey.self,
+                    value: CGRect(
+                        x: frame.minX,
+                        y: frame.minY,
+                        width: frame.width,
+                        height: frame.height
+                    )
+                )
+        }
+        .onPreferenceChange(SlotRowFrameKey.self) { rect in
+            rowOriginX = rect.minX
+            if rect.width > 1 { viewportWidth = rect.width }
+        }
+    }
+
+    /// Soft black edge fades when more content exists past that edge.
+    @ViewBuilder
+    private var scrollEdgeFades: some View {
+        let pad: CGFloat = 4
+        let rowW = contentRowWidth + pad
+        let origin = rowOriginX
+        let showLeading = origin < -1
+        let showTrailing = origin + rowW > viewportRowWidth + 1
+
+        HStack(spacing: 0) {
+            LinearGradient(
+                colors: [Color.black.opacity(showLeading ? 0.9 : 0), Color.black.opacity(0)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: Self.edgeFadeWidth)
+            .opacity(showLeading ? 1 : 0)
+
+            Spacer(minLength: 0)
+
+            LinearGradient(
+                colors: [Color.black.opacity(0), Color.black.opacity(showTrailing ? 0.9 : 0)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: Self.edgeFadeWidth)
+            .opacity(showTrailing ? 1 : 0)
+        }
+        .frame(width: viewportRowWidth, height: Self.cellH)
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.16), value: showLeading)
+        .animation(.easeOut(duration: 0.16), value: showTrailing)
     }
 
     @ViewBuilder
@@ -348,11 +455,10 @@ struct GaugeClusterView: View {
     }
 
     private func slotCenter(index: Int) -> CGPoint {
-        let n = slotCount
         let stride = Self.cell + Self.gap
-        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
-        let w = clusterSize.width > 1 ? clusterSize.width : rowW
-        let leading = (w - rowW) / 2
+        // `rowOriginX` is the live leading edge of the slot row in drag space
+        // (centered when ≤5, scroll-offset when >5).
+        let leading = rowOriginX
         return CGPoint(
             x: leading + CGFloat(index) * stride + Self.cell / 2,
             y: Self.cellH / 2
@@ -363,10 +469,9 @@ struct GaugeClusterView: View {
         let n = slotCount
         guard n > 0 else { return nil }
         let stride = Self.cell + Self.gap
-        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
-        let w = clusterSize.width > 1 ? clusterSize.width : rowW
-        let leading = (w - rowW) / 2
+        let leading = rowOriginX
         let localX = x - leading
+        let rowW = contentRowWidth
         guard localX >= -Self.cell * 0.5, localX <= rowW + Self.cell * 0.5 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
@@ -456,6 +561,12 @@ private struct ClusterSizeKey: PreferenceKey {
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
+/// Live frame of the slot HStack in drag space (scroll + center).
+private struct SlotRowFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
 extension Notification.Name {
     static let dashIslandDragActive = Notification.Name("dashIslandDragActive")
 }
@@ -476,15 +587,44 @@ enum DemoWidgets {
     static var count: Int {
         if let raw = ProcessInfo.processInfo.environment["DASHISLAND_DEMO_COUNT"],
            let n = Int(raw),
-           [1, 3, 5].contains(n) {
+           (1...IslandModel.maxItems).contains(n) {
             return n
         }
         return 3
     }
 
     static func make(count: Int? = nil) -> [WidgetViewModel] {
-        let n = min(5, max(1, count ?? Self.count))
-        return Array(samples.prefix(n))
+        let n = min(IslandModel.maxItems, max(1, count ?? Self.count))
+        let base = samples
+        if n <= base.count { return Array(base.prefix(n)) }
+        // Extend demo pool for scroll testing (stable UUIDs).
+        var out = base
+        var i = base.count
+        while out.count < n {
+            i += 1
+            let id = UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", i))!
+            out.append(
+                WidgetViewModel(
+                    id: id,
+                    title: "demo \(i)",
+                    vendorID: "fake",
+                    tint: .neutral,
+                    primaryFraction: Double((i * 17) % 80) / 100,
+                    secondaryFraction: nil,
+                    usedPrimaryFraction: Double((i * 17) % 80) / 100,
+                    centerPercent: (i * 17) % 80,
+                    burnRatio: 0,
+                    hoverWindows: [
+                        HoverWindowLine(label: "5h", usage: "demo", resetAt: nil)
+                    ],
+                    errorCaption: nil,
+                    isAwaitingFirstSample: false,
+                    health: .ok,
+                    healthTooltip: "ok"
+                )
+            )
+        }
+        return out
     }
 
     private static let samples: [WidgetViewModel] = [
