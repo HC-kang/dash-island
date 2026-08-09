@@ -7,6 +7,7 @@ struct TestMain {
         var failures = 0
         failures += BurnRateSuite.run()
         failures += BurnMotionSuite.run()
+        failures += IslandClusterLayoutSuite.run()
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += ClaudeAdapterSuite.run()

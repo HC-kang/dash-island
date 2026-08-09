@@ -25,8 +25,10 @@ struct GaugeClusterView: View {
     @State private var gapSlot: Int?
     @State private var magnetizedToTrash = false
     @State private var clusterSize: CGSize = .zero
-    /// Slot whose tooltip is open — must outrank later HStack siblings.
-    @State private var elevatedWidgetID: AccountID?
+    /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
+    @State private var elevatedChrome: WidgetHoverChrome?
+    /// Half-height of the floating tip for correct `position` anchoring.
+    @State private var floatingTipHalfHeight: CGFloat = 28
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
@@ -121,7 +123,12 @@ struct GaugeClusterView: View {
                 }
 
                 if let id = draggingID, let model = modelByID[id] {
-                    AccountWidget(model: model, isDragging: true, isDropTarget: false)
+                    AccountWidget(
+                        model: model,
+                        isDragging: true,
+                        isDropTarget: false,
+                        embedHangTips: false
+                    )
                         .scaleEffect(magnetizedToTrash ? 0.68 : 1.07)
                         .opacity(magnetizedToTrash ? 0.9 : 1)
                         .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
@@ -130,8 +137,14 @@ struct GaugeClusterView: View {
                         .allowsHitTesting(false)
                         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
                 }
+
+                // Hang-below tips live here — **outside** ScrollView clip.
+                floatingHangTips
+                    .zIndex(200)
             }
             .frame(maxWidth: .infinity)
+            // Height is content-sized for the row only; hang tips paint *outside*
+            // this frame (SwiftUI frame does not clip unless `.clipped()`).
             .frame(height: Self.cellH, alignment: .top)
             .coordinateSpace(name: Self.dragSpace)
             .background(
@@ -180,7 +193,54 @@ struct GaugeClusterView: View {
         }
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
-        .onPreferenceChange(WidgetHoverElevatePreference.self) { elevatedWidgetID = $0 }
+        .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
+            elevatedChrome = list.first(where: \.isActive)
+        }
+    }
+
+    /// Usage / caption tips drawn above the scroll clip so they are not truncated.
+    @ViewBuilder
+    private var floatingHangTips: some View {
+        if draggingID == nil,
+           let chrome = elevatedChrome,
+           chrome.showUsage || chrome.showCaption,
+           let model = modelByID[chrome.accountID],
+           let index = baseOrder.firstIndex(of: chrome.accountID)
+        {
+            let center = slotCenter(index: index)
+            let tipTop = CGFloat(
+                IslandClusterLayout.hangTipTopY(
+                    cellHeight: Double(Self.cellH),
+                    tipGap: Double(AccountWidget.tipGap)
+                )
+            )
+            Group {
+                if chrome.showUsage {
+                    AccountHoverTips.usageCard(model: model)
+                } else if chrome.showCaption {
+                    AccountHoverTips.captionCard(model: model)
+                }
+            }
+            .fixedSize()
+            // Anchor tip **top-center** under the cell (position uses view center).
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: FloatingTipSizeKey.self,
+                        value: geo.size
+                    )
+                }
+            )
+            .alignmentGuide(HorizontalAlignment.center) { d in d[HorizontalAlignment.center] }
+            .position(x: center.x, y: tipTop + floatingTipHalfHeight)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+            .onPreferenceChange(FloatingTipSizeKey.self) { size in
+                if size.height > 1 {
+                    floatingTipHalfHeight = size.height / 2
+                }
+            }
+        }
     }
 
     /// ≤ maxVisible: centered row, no chrome.
@@ -277,7 +337,7 @@ struct GaugeClusterView: View {
         let isDragHome = homeSlot == index && draggingID != nil
         // Push offset: slide this cell's widget toward its visual seat (gap layout).
         let pushX = pushOffsetX(baseIndex: index)
-        let isElevated = baseID != nil && baseID == elevatedWidgetID
+        let isElevated = baseID != nil && baseID == isElevatedAccount
 
         ZStack {
             SlotSkeleton(
@@ -299,7 +359,9 @@ struct GaugeClusterView: View {
                 AccountWidget(
                     model: model,
                     isDragging: false,
-                    isDropTarget: false
+                    isDropTarget: false,
+                    // Cluster owns hang-below tips (ScrollView would clip them).
+                    embedHangTips: false
                 )
                 .opacity(isDragged ? 0.001 : 1)
                 .offset(x: isDragged ? 0 : pushX)
@@ -319,6 +381,10 @@ struct GaugeClusterView: View {
         if isElevated { return 80 }
         if isDragHome { return 2 }
         return Double(index)
+    }
+
+    private var isElevatedAccount: AccountID? {
+        elevatedChrome?.isActive == true ? elevatedChrome?.accountID : nil
     }
 
     /// Horizontal shift so the widget lands in its gap-packed visual slot.
@@ -565,6 +631,11 @@ private struct ClusterSizeKey: PreferenceKey {
 private struct SlotRowFrameKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+private struct FloatingTipSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
 extension Notification.Name {
