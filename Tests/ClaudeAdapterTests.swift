@@ -87,7 +87,7 @@ enum ClaudeAdapterSuite {
             try assertEqual(creds?.subscriptionType, "max")
             try assertEqual(creds?.refreshToken, "rt")
         }
-        failures += check("needsRefresh respects short proactive buffer") {
+        failures += check("probe-first when access still valid; refresh when expired") {
             let future = Date().addingTimeInterval(30 * 60)
             let near = Date().addingTimeInterval(2 * 60) // inside 3m buffer
             let slightlyPast = Date().addingTimeInterval(-10 * 60)
@@ -107,10 +107,15 @@ enum ClaudeAdapterSuite {
             let noRefresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
             )
+            // Fetch path: probe while access valid (even near expiry — avoids 429 storms).
+            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(fresh))
+            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(soon))
+            try assertTrue(!ClaudeAdapter.shouldProbeBeforeRefresh(softExpired))
+            try assertTrue(!ClaudeAdapter.shouldProbeBeforeRefresh(hoursDead))
+            // Refresh eligibility still tracks buffer / dead tokens with refresh_token.
             try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
             try assertTrue(ClaudeAdapter.needsRefresh(soon))
             try assertTrue(ClaudeAdapter.needsRefresh(softExpired))
-            // Hours-dead with refresh_token still needs refresh (no short hard-cut).
             try assertTrue(ClaudeAdapter.needsRefresh(hoursDead))
             try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
         }

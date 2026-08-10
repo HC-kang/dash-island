@@ -218,81 +218,87 @@ struct ClaudeAdapter: VendorAdapter {
         }
 
         // --- Short-lived CLI OAuth (we own refresh for this account's file) ---
-        // Prefer: probe with current access → on 401/expiry, gated refresh.
-        // Proactive window is short (expiryBuffer) so we do not 429-storm oauth/token.
-        // refresh_token present ⇒ always eligible to refresh (no 45m hard cut).
+        // Probe-first: never burn oauth/token while access is still usable.
+        // Live probe: personal account with hours left returns 200 even when the
+        // global token host is hard-429 (refresh storms from other accounts).
+        // Refresh only on expired access or usage 401/403.
 
-        var didRefresh = false
-        if Self.shouldRefresh(creds, now: now) {
-            switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
-            case .success(let refreshed):
-                creds = refreshed
-                didRefresh = true
-                NSLog("DashIsland: Claude refresh ok ref=%@", String(ref.prefix(8)))
-            case .rateLimited(let retry):
-                NSLog("DashIsland: Claude refresh quiet ref=%@", String(ref.prefix(8)))
-                // Soft: keep rings via orchestrator; surface quiet, do not hard-reauth.
-                return Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry ?? now.addingTimeInterval(Self.globalRefresh429Quiet)),
-                    fetchedAt: now
-                )
-            case .rejected:
-                NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
-                return Self.errorSnapshot(.authRequired, fetchedAt: now)
-            case .unavailable(let message):
-                // Fall through to probe with existing access if still usable.
-                NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
-            case .skipped:
-                break
+        if Self.shouldProbeBeforeRefresh(creds, now: now) {
+            var snap = await Self.probeUsage(
+                token: creds.accessToken,
+                plan: creds.subscriptionType,
+                fetchedAt: now
+            )
+            if case .authRequired = snap.error, Self.canAttemptRefresh(creds, now: now) {
+                snap = await Self.refreshThenProbe(configDir: dir, ref: ref, fallback: snap)
             }
+            return Self.logUsage(snap, ref: ref)
         }
 
-        var snap = await Self.probeUsage(
-            token: creds.accessToken,
-            plan: creds.subscriptionType,
-            fetchedAt: now
+        // Access expired (or unknown) — refresh is required before a useful probe.
+        guard Self.canAttemptRefresh(creds, now: now) else {
+            return Self.logUsage(
+                Self.errorSnapshot(
+                    .unavailable("token quiet — no refresh token. Reauthenticate this account"),
+                    fetchedAt: now
+                ),
+                ref: ref
+            )
+        }
+        let afterRefresh = await Self.refreshThenProbe(
+            configDir: dir,
+            ref: ref,
+            fallback: Self.errorSnapshot(
+                .rateLimited(retryAfter: now.addingTimeInterval(Self.globalRefresh429Quiet)),
+                fetchedAt: now
+            )
         )
+        return Self.logUsage(afterRefresh, ref: ref)
+    }
 
-        // Reactive: usage 401/403 or expired access → one gated refresh + retry.
-        let needsReactive: Bool = {
-            if case .authRequired = snap.error { return true }
-            if Self.isExpired(creds, now: now), Self.canAttemptRefresh(creds, now: now) {
-                return true
-            }
-            return false
-        }()
-        if needsReactive, !didRefresh, Self.canAttemptRefresh(creds, now: now) {
-            switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
-            case .success(let refreshed):
-                snap = await Self.probeUsage(
-                    token: refreshed.accessToken,
-                    plan: refreshed.subscriptionType,
-                    fetchedAt: Date()
-                )
-                if snap.error == nil {
-                    NSLog("DashIsland: Claude reactive refresh ok ref=%@", String(ref.prefix(8)))
-                }
-            case .rateLimited(let retry):
-                snap = Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry ?? Date().addingTimeInterval(Self.globalRefresh429Quiet)),
-                    fetchedAt: Date()
-                )
-            case .rejected:
-                snap = Self.errorSnapshot(.authRequired, fetchedAt: Date())
-            case .unavailable(let message):
-                snap = Self.errorSnapshot(
+    /// One gated refresh + usage probe. On 429/unavailable keep `fallback` severity
+    /// (soft) so orchestrator can retain last-good rings.
+    private static func refreshThenProbe(
+        configDir: URL,
+        ref: CredentialRef,
+        fallback: UsageSnapshot
+    ) async -> UsageSnapshot {
+        switch await refreshManagedCredentialsDetailed(configDir: configDir) {
+        case .success(let refreshed):
+            NSLog("DashIsland: Claude refresh ok ref=%@", String(ref.prefix(8)))
+            return await probeUsage(
+                token: refreshed.accessToken,
+                plan: refreshed.subscriptionType,
+                fetchedAt: Date()
+            )
+        case .rateLimited(let retry):
+            NSLog("DashIsland: Claude refresh quiet ref=%@", String(ref.prefix(8)))
+            return errorSnapshot(
+                .rateLimited(retryAfter: retry ?? Date().addingTimeInterval(globalRefresh429Quiet)),
+                fetchedAt: Date()
+            )
+        case .rejected:
+            NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
+            return errorSnapshot(.authRequired, fetchedAt: Date())
+        case .unavailable(let message):
+            NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
+            // Prefer explicit soft quiet over a raw 401 fallback when refresh failed softly.
+            if fallback.error != nil {
+                return errorSnapshot(
                     .unavailable("token quiet — \(message)"),
                     fetchedAt: Date()
                 )
-            case .skipped:
-                snap = Self.errorSnapshot(
+            }
+            return fallback
+        case .skipped:
+            if fallback.error != nil {
+                return errorSnapshot(
                     .unavailable("token quiet — no refresh token. Reauthenticate this account"),
                     fetchedAt: Date()
                 )
             }
+            return fallback
         }
-
-        return Self.logUsage(snap, ref: ref)
     }
 
     private static func logUsage(_ snap: UsageSnapshot, ref: CredentialRef) -> UsageSnapshot {
@@ -516,13 +522,21 @@ struct ClaudeAdapter: VendorAdapter {
         )
     }
 
-    /// Near expiry (within buffer) or unknown expiry — candidate for proactive refresh.
-    /// Long-lived setup-tokens never refresh.
+    /// Near expiry (within buffer) or unknown expiry — candidate for refresh.
+    /// Long-lived setup-tokens never refresh. Fetch path is **probe-first**; this
+    /// is used by the refresh gate skip-if-fresh path, not to pre-empt usage.
     static func needsRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         shouldRefresh(creds, now: now)
     }
 
-    /// Proactive refresh when access is missing/unknown expiry, within buffer, or already expired.
+    /// True when we should call `/api/oauth/usage` before touching oauth/token.
+    /// Access still usable (not expired) → probe; expired → refresh first.
+    static func shouldProbeBeforeRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
+        if isLongLived(creds) { return true }
+        return !isExpired(creds, now: now)
+    }
+
+    /// Near expiry / already expired / unknown — refresh is *allowed* if canAttempt.
     static func shouldRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard canAttemptRefresh(creds, now: now) else { return false }

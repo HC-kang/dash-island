@@ -727,7 +727,7 @@ final class UsageOrchestrator: ObservableObject {
             default: return "reauth needed"
             }
         case .rateLimited:
-            return vendorID == "claude" ? "token quiet" : "rate limited"
+            return vendorID == "claude" ? "oauth rate limited" : "rate limited"
         case .network(let message):
             return message.isEmpty ? "network error" : message
         case .parse(let message):
