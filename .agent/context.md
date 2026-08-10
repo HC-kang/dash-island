@@ -272,3 +272,18 @@ Fixes:
 - maxAccounts / maxItems = 8; maxVisibleSlots = 5 (island body width).
 - GaugeClusterView: ScrollView when slotCount > 5; edge fades; scroll disabled while drag-reorder.
 - Drag hit-testing uses rowOriginX from GeometryReader in dragSpace.
+
+## Island widgets pierce right edge (2026-08-09)
+
+- **Symptom:** expanded island — gauges shift right, paint past black body.
+- **Cause:** (1) hang-below tips as ZStack children with large `fixedSize` inflated cluster layout width; (2) `expandedWidth` pad (`horizontalPadding=32`) didn't match real chrome (`14` / `4+6` + AddRail).
+- **Fix:** tips via `.overlay` (no layout width); GeometryReader available-width + center-or-scroll + `.clipped()`; `expandedWidth` = lead pad + slots + trail pad + chevron/rail.
+- Tests: `IslandClusterLayout.needsScroll` / `centeredRowOrigin`.
+
+## Island right-shift pierce v2 (2026-08-10)
+
+- User: 6 accounts → needs scroll; widgets still pierced right edge.
+- Root: SwiftUI `ScrollView` ideal width = full 6-cell row → HStack blew past black body.
+- Fix: slot/scroll rows use `Color.clear` fixed frame + `overlay` ScrollView/HStack; `minWidth: 0` on flexible band; AddRail `fixedSize`.
+- Belt: expanded content masked to `IslandShape` + full-width tip strip under body.
+- Domain: `islandBodyWidth` / `slotBandWidth` / `rowWidth` pure helpers + tests (6 accts body == 5-slot viewport).

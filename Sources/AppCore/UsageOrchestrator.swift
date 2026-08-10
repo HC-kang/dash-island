@@ -510,8 +510,8 @@ final class UsageOrchestrator: ObservableObject {
                 break
             }
 
-            // Soft: keep last-good rings + stale notice.
-            // Hard: keep last-good rings if any, but caption is terminal reauth.
+            // Never write an *error* snapshot into lastGood — that paints a fake 0%
+            // ring ("token quiet" with empty gauge). Only error-free samples are last-good.
             if UsageSnapshotMerge.shouldRetainPreviousRings(previous: lastGood[accountID]) {
                 if kind == .soft {
                     lastNotice[accountID] = UsageSnapshotMerge.softStaleNotice(for: error)
@@ -519,8 +519,7 @@ final class UsageOrchestrator: ObservableObject {
                     lastNotice[accountID] = nil
                 }
             } else {
-                // Cold start with only an error — store for hover/caption, no fake rings.
-                lastGood[accountID] = snapshot
+                // No prior good sample: leave lastGood nil (skeleton), error caption only.
                 lastNotice[accountID] = nil
             }
             return
@@ -639,8 +638,10 @@ final class UsageOrchestrator: ObservableObject {
 
         let burn = burnByAccount[account.id]?.current
             ?? BurnRate(ratio: 0, sampleCount: 0)
-        let err = lastError[account.id] ?? snap?.error
-        let awaiting = snap == nil && err == nil
+        // lastGood is error-free only; errors live in lastError.
+        let err = lastError[account.id]
+        // No good sample → skeleton (not fake 0%), even when a soft error caption shows.
+        let awaiting = snap == nil
         let notice = lastNotice[account.id] ?? snap?.notice
         let burnSource = burnSourceByAccount[account.id] ?? .none
         let service = VendorStatusStore.shared.snapshot(for: account.vendorID)

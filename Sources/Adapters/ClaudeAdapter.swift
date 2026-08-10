@@ -63,25 +63,27 @@ struct ClaudeAdapter: VendorAdapter {
     let minPollSeconds = 1_800
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    /// Public Claude Code OAuth token endpoint (verified against CLI / Orca).
-    private static let oauthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    /// Proactive refresh buffer before expiry.
-    private static let expiryBuffer: TimeInterval = 15 * 60
-    /// Only refresh if access expired by less than this. Refreshing tokens that
-    /// have been dead for hours burns the token endpoint (429) and community
-    /// reports say it can invalidate the whole login family.
-    private static let maxStaleForRefresh: TimeInterval = 45 * 60
+    /// Proactive refresh only when this close to expiry (was 15m — too chatty → 429).
+    private static let expiryBuffer: TimeInterval = 3 * 60
+    /// Prefer reactive refresh (usage 401) over long proactive windows.
+    /// Still allow a short proactive window so expand-poll doesn't race expiry mid-request.
+    private static let maxStaleForRefresh: TimeInterval = 7 * 24 * 3600
     /// Minimum gap between *any* Claude OAuth refresh calls app-wide.
-    private static let globalRefreshMinGap: TimeInterval = 30 * 60
+    private static let globalRefreshMinGap: TimeInterval = 20 * 60
     /// Extra quiet after HTTP 429 on the token endpoint (all accounts share this).
-    private static let globalRefresh429Quiet: TimeInterval = 6 * 60 * 60
+    private static let globalRefresh429Quiet: TimeInterval = 3 * 60 * 60
     private static let credentialsFileName = ".credentials.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
     private static let cliUserAgent = "claude-code/2.1.121"
     private static let betaHeader = "oauth-2025-04-20"
     private static let keychainServiceBase = "Claude Code-credentials"
+    /// Token hosts (Claude Code has moved between these; try both).
+    private static let oauthTokenURLs: [URL] = [
+        URL(string: "https://platform.claude.com/v1/oauth/token")!,
+        URL(string: "https://console.anthropic.com/v1/oauth/token")!,
+    ]
 
     /// Serializes OAuth refresh so two Claude accounts cannot 429 the token host.
     private static let refreshGate = ClaudeRefreshGate()
@@ -216,9 +218,9 @@ struct ClaudeAdapter: VendorAdapter {
         }
 
         // --- Short-lived CLI OAuth (we own refresh for this account's file) ---
-        // 1) usable access → probe only
-        // 2) near / slightly stale → gated refresh → write this file only
-        // 3) hard-expired → quiet (no token-endpoint storm); user reauths this account
+        // Prefer: probe with current access → on 401/expiry, gated refresh.
+        // Proactive window is short (expiryBuffer) so we do not 429-storm oauth/token.
+        // refresh_token present ⇒ always eligible to refresh (no 45m hard cut).
 
         var didRefresh = false
         if Self.shouldRefresh(creds, now: now) {
@@ -229,6 +231,7 @@ struct ClaudeAdapter: VendorAdapter {
                 NSLog("DashIsland: Claude refresh ok ref=%@", String(ref.prefix(8)))
             case .rateLimited(let retry):
                 NSLog("DashIsland: Claude refresh quiet ref=%@", String(ref.prefix(8)))
+                // Soft: keep rings via orchestrator; surface quiet, do not hard-reauth.
                 return Self.errorSnapshot(
                     .rateLimited(retryAfter: retry ?? now.addingTimeInterval(Self.globalRefresh429Quiet)),
                     fetchedAt: now
@@ -237,22 +240,11 @@ struct ClaudeAdapter: VendorAdapter {
                 NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
                 return Self.errorSnapshot(.authRequired, fetchedAt: now)
             case .unavailable(let message):
-                if Self.isHardExpired(creds, now: now) {
-                    return Self.errorSnapshot(
-                        .unavailable("token quiet — \(message)"),
-                        fetchedAt: now
-                    )
-                }
+                // Fall through to probe with existing access if still usable.
+                NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
             case .skipped:
                 break
             }
-        } else if Self.isHardExpired(creds, now: now) {
-            return Self.errorSnapshot(
-                .unavailable(
-                    "access expired — token quiet (no refresh storm). Reauthenticate this account"
-                ),
-                fetchedAt: now
-            )
         }
 
         var snap = await Self.probeUsage(
@@ -261,8 +253,15 @@ struct ClaudeAdapter: VendorAdapter {
             fetchedAt: now
         )
 
-        // Reactive refresh if usage 401/403 and we are still inside the safe window.
-        if case .authRequired = snap.error, !didRefresh, Self.canAttemptRefresh(creds, now: now) {
+        // Reactive: usage 401/403 or expired access → one gated refresh + retry.
+        let needsReactive: Bool = {
+            if case .authRequired = snap.error { return true }
+            if Self.isExpired(creds, now: now), Self.canAttemptRefresh(creds, now: now) {
+                return true
+            }
+            return false
+        }()
+        if needsReactive, !didRefresh, Self.canAttemptRefresh(creds, now: now) {
             switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
             case .success(let refreshed):
                 snap = await Self.probeUsage(
@@ -287,19 +286,10 @@ struct ClaudeAdapter: VendorAdapter {
                 )
             case .skipped:
                 snap = Self.errorSnapshot(
-                    .unavailable(
-                        "access expired — token quiet (no refresh storm). Reauthenticate this account"
-                    ),
+                    .unavailable("token quiet — no refresh token. Reauthenticate this account"),
                     fetchedAt: Date()
                 )
             }
-        } else if case .authRequired = snap.error, Self.isHardExpired(creds, now: now) {
-            snap = Self.errorSnapshot(
-                .unavailable(
-                    "access expired — token quiet (no refresh storm). Reauthenticate this account"
-                ),
-                fetchedAt: now
-            )
         }
 
         return Self.logUsage(snap, ref: ref)
@@ -532,23 +522,23 @@ struct ClaudeAdapter: VendorAdapter {
         shouldRefresh(creds, now: now)
     }
 
-    /// Refresh only if we have a refresh_token and access is not long-dead.
+    /// Proactive refresh when access is missing/unknown expiry, within buffer, or already expired.
     static func shouldRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard canAttemptRefresh(creds, now: now) else { return false }
         guard let exp = creds.expiresAt else {
-            // Unknown expiry: only refresh if we have never established one (rare).
             return true
         }
-        // Proactive: within buffer before expiry, or slightly after.
         return now.addingTimeInterval(expiryBuffer) >= exp
     }
 
-    /// Safe to call oauth/token? Hard-expired tokens are deferred (last-good UI).
+    /// Safe to call oauth/token when we have a refresh_token (gate handles 429).
+    /// No short wall-clock cut — that left accounts permanently quiet after 429 windows.
     static func canAttemptRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else { return false }
         guard let exp = creds.expiresAt else { return true }
+        // Extremely old blobs (weeks) — likely revoked; don't burn the endpoint.
         return now < exp.addingTimeInterval(maxStaleForRefresh)
     }
 
@@ -558,7 +548,7 @@ struct ClaudeAdapter: VendorAdapter {
         return now >= exp
     }
 
-    /// Expired longer than `maxStaleForRefresh` — do not call oauth/token.
+    /// Kept for tests / callers: access older than maxStale (days), not a short quiet cut.
     static func isHardExpired(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard let exp = creds.expiresAt else { return false }
@@ -609,61 +599,81 @@ struct ClaudeAdapter: VendorAdapter {
             return .success(creds)
         }
 
-        var req = URLRequest(url: oauthTokenURL)
-        req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
-        req.timeoutInterval = 12
         let form: [(String, String)] = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
             ("client_id", oauthClientID),
         ]
-        req.httpBody = form
+        let body = form
             .map { "\($0.0)=\(formEncode($0.1))" }
             .joined(separator: "&")
             .data(using: .utf8)
 
-        do {
-            let (respData, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                return .unavailable("token refresh: bad response")
+        var lastStatus = 0
+        for tokenURL in oauthTokenURLs {
+            var req = URLRequest(url: tokenURL)
+            req.httpMethod = "POST"
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
+            req.timeoutInterval = 12
+            req.httpBody = body
+
+            do {
+                let (respData, response) = try await URLSession.shared.data(for: req)
+                guard let http = response as? HTTPURLResponse else {
+                    continue
+                }
+                lastStatus = http.statusCode
+                switch http.statusCode {
+                case 200..<300:
+                    guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
+                          let next = parseCredentialsJSON(updated)
+                    else {
+                        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                        return .unavailable("token refresh parse failed")
+                    }
+                    try? updated.write(to: path, options: .atomic)
+                    await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                    return .success(next)
+                case 429:
+                    let retry = retryAfterDate(from: http)
+                        ?? Date().addingTimeInterval(globalRefresh429Quiet)
+                    await refreshGate.noteRateLimited(until: retry)
+                    NSLog("DashIsland: Claude refresh HTTP 429 (global quiet)")
+                    return .rateLimited(retry)
+                case 400, 401, 403:
+                    // Try next host only on 404-ish; auth errors are terminal for this token.
+                    await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                    let errBody = String(data: respData, encoding: .utf8) ?? ""
+                    NSLog(
+                        "DashIsland: Claude refresh rejected HTTP %d %@ %@",
+                        http.statusCode,
+                        tokenURL.host ?? "",
+                        errBody
+                    )
+                    return .rejected
+                default:
+                    NSLog(
+                        "DashIsland: Claude refresh HTTP %d host=%@",
+                        http.statusCode,
+                        tokenURL.host ?? ""
+                    )
+                    continue
+                }
+            } catch {
+                NSLog(
+                    "DashIsland: Claude refresh failed host=%@ %@",
+                    tokenURL.host ?? "",
+                    error.localizedDescription
+                )
+                continue
             }
-            switch http.statusCode {
-            case 200..<300:
-                break
-            case 429:
-                let retry = retryAfterDate(from: http)
-                    ?? Date().addingTimeInterval(globalRefresh429Quiet)
-                await refreshGate.noteRateLimited(until: retry)
-                NSLog("DashIsland: Claude refresh HTTP 429 (global quiet)")
-                return .rateLimited(retry)
-            case 400, 401, 403:
-                // invalid_grant / revoked refresh — only full login recovers.
-                await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                let body = String(data: respData, encoding: .utf8) ?? ""
-                NSLog("DashIsland: Claude refresh rejected HTTP %d %@", http.statusCode, body)
-                return .rejected
-            default:
-                await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                NSLog("DashIsland: Claude refresh HTTP %d", http.statusCode)
-                return .unavailable("token refresh HTTP \(http.statusCode)")
-            }
-            guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
-                  let next = parseCredentialsJSON(updated)
-            else {
-                await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                return .unavailable("token refresh parse failed")
-            }
-            try? updated.write(to: path, options: .atomic)
-            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-            return .success(next)
-        } catch {
-            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-            NSLog("DashIsland: Claude refresh failed: %@", error.localizedDescription)
-            return .unavailable("token refresh: \(error.localizedDescription)")
         }
+        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+        if lastStatus > 0 {
+            return .unavailable("token refresh HTTP \(lastStatus)")
+        }
+        return .unavailable("token refresh: network error")
     }
 
     /// Merge token-endpoint JSON into stored credentials blob. Exposed for tests.

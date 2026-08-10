@@ -106,6 +106,8 @@ struct GaugeClusterView: View {
     }
 
     var body: some View {
+        // Fixed-height row. Width is always the parent proposal — never the
+        // ideal width of 6–8 gauge cells (ScrollView must not blow the island out).
         HStack(spacing: 0) {
             ZStack(alignment: .top) {
                 slotRow
@@ -138,13 +140,9 @@ struct GaugeClusterView: View {
                         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
                 }
 
-                // Hang-below tips live here — **outside** ScrollView clip.
-                floatingHangTips
-                    .zIndex(200)
             }
-            .frame(maxWidth: .infinity)
-            // Height is content-sized for the row only; hang tips paint *outside*
-            // this frame (SwiftUI frame does not clip unless `.clipped()`).
+            // Flexible band: eats remaining width after AddRail, never grows past it.
+            .frame(minWidth: 0, maxWidth: .infinity)
             .frame(height: Self.cellH, alignment: .top)
             .coordinateSpace(name: Self.dragSpace)
             .background(
@@ -153,6 +151,12 @@ struct GaugeClusterView: View {
                 }
             )
             .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
+            // Tips as overlay so wide caption cards never expand layout width
+            // (that was shoving the whole row off the right edge of the island).
+            .overlay(alignment: .top) {
+                floatingHangTips
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
 
             if showAdd && draggingID == nil {
                 AddRail(
@@ -160,8 +164,10 @@ struct GaugeClusterView: View {
                     onExpandedChange: { onAddRailExpandedChange?($0) }
                 )
                 .padding(.trailing, 6)
+                .fixedSize(horizontal: true, vertical: false)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)
         .frame(height: Self.cellH, alignment: .top)
         .onAppear { syncFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
@@ -181,16 +187,34 @@ struct GaugeClusterView: View {
         baseOrder = widgets.map(\.id)
     }
 
-    // MARK: -Slots
+    // MARK: - Slots
 
     private var slotRow: some View {
-        Group {
-            if needsHorizontalScroll {
-                scrollableSlotRow
-            } else {
-                centeredSlotRow
+        // Layout size comes only from the parent band (GeometryReader proposal).
+        // Scroll content ideal width must never enlarge this.
+        GeometryReader { geo in
+            let available = max(0, geo.size.width)
+            let contentW = contentRowWidth
+            let scroll = IslandClusterLayout.needsScroll(
+                contentWidth: Double(contentW),
+                availableWidth: Double(available)
+            )
+
+            Group {
+                if scroll {
+                    scrollableSlotRow(availableWidth: available)
+                } else {
+                    centeredSlotRow(availableWidth: available)
+                }
             }
+            .frame(width: available, height: Self.cellH, alignment: .center)
+            // Hard clip: widgets must not puncture the black island horizontally.
+            .clipped()
+            .onAppear { viewportWidth = available }
+            .onChange(of: available) { viewportWidth = $0 }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .frame(height: Self.cellH)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
         .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
@@ -198,7 +222,7 @@ struct GaugeClusterView: View {
         }
     }
 
-    /// Usage / caption tips drawn above the scroll clip so they are not truncated.
+    /// Usage / caption tips drawn in an overlay so they never affect row layout width.
     @ViewBuilder
     private var floatingHangTips: some View {
         if draggingID == nil,
@@ -222,16 +246,11 @@ struct GaugeClusterView: View {
                 }
             }
             .fixedSize()
-            // Anchor tip **top-center** under the cell (position uses view center).
             .background(
                 GeometryReader { geo in
-                    Color.clear.preference(
-                        key: FloatingTipSizeKey.self,
-                        value: geo.size
-                    )
+                    Color.clear.preference(key: FloatingTipSizeKey.self, value: geo.size)
                 }
             )
-            .alignmentGuide(HorizontalAlignment.center) { d in d[HorizontalAlignment.center] }
             .position(x: center.x, y: tipTop + floatingTipHalfHeight)
             .allowsHitTesting(false)
             .transition(.opacity)
@@ -243,36 +262,49 @@ struct GaugeClusterView: View {
         }
     }
 
-    /// ≤ maxVisible: centered row, no chrome.
-    private var centeredSlotRow: some View {
-        HStack(spacing: Self.gap) {
-            ForEach(0..<slotCount, id: \.self) { index in
-                slotCell(index: index)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .background(rowGeometryProbe)
-    }
-
-    /// > maxVisible: horizontal scroll inside a fixed viewport.
-    private var scrollableSlotRow: some View {
-        ZStack {
-            ScrollView(.horizontal, showsIndicators: false) {
+    /// Content fits: pin intrinsic row width and center in the available band.
+    private func centeredSlotRow(availableWidth: CGFloat) -> some View {
+        // Clear anchors layout size; row is drawn centered inside and cannot expand parent.
+        Color.clear
+            .frame(width: availableWidth, height: Self.cellH)
+            .overlay {
                 HStack(spacing: Self.gap) {
                     ForEach(0..<slotCount, id: \.self) { index in
                         slotCell(index: index)
                     }
                 }
-                .padding(.horizontal, 2)
                 .background(rowGeometryProbe)
+                .fixedSize(horizontal: true, vertical: false)
             }
-            // Freeze scroll while dragging so drop targets stay stable.
-            .disabled(draggingID != nil)
-            .frame(width: viewportRowWidth, alignment: .leading)
+            .clipped()
+    }
 
-            scrollEdgeFades
-        }
-        .frame(maxWidth: .infinity)
+    /// Content wider than the island: scroll inside a fixed-size band.
+    ///
+    /// Critical: layout size is `Color.clear` only. Putting `ScrollView` in the
+    /// primary layout tree lets its content ideal width (6–8 cells) blow the
+    /// island open and shove gauges past the black body to the right.
+    private func scrollableSlotRow(availableWidth: CGFloat) -> some View {
+        Color.clear
+            .frame(width: availableWidth, height: Self.cellH)
+            .overlay(alignment: .topLeading) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Self.gap) {
+                        ForEach(0..<slotCount, id: \.self) { index in
+                            slotCell(index: index)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .background(rowGeometryProbe)
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                .disabled(draggingID != nil)
+                .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
+            }
+            .overlay {
+                scrollEdgeFades(availableWidth: availableWidth)
+            }
+            .clipped()
     }
 
     /// Tracks the slot row’s leading edge in drag space (scroll + center).
@@ -291,19 +323,21 @@ struct GaugeClusterView: View {
                 )
         }
         .onPreferenceChange(SlotRowFrameKey.self) { rect in
-            rowOriginX = rect.minX
-            if rect.width > 1 { viewportWidth = rect.width }
+            // Ignore zero frames during transitions.
+            if abs(rect.minX) > 0.01 || rect.width > 1 {
+                rowOriginX = rect.minX
+            }
         }
     }
 
     /// Soft black edge fades when more content exists past that edge.
     @ViewBuilder
-    private var scrollEdgeFades: some View {
+    private func scrollEdgeFades(availableWidth: CGFloat) -> some View {
         let pad: CGFloat = 4
         let rowW = contentRowWidth + pad
         let origin = rowOriginX
         let showLeading = origin < -1
-        let showTrailing = origin + rowW > viewportRowWidth + 1
+        let showTrailing = origin + rowW > availableWidth + 1
 
         HStack(spacing: 0) {
             LinearGradient(
@@ -324,7 +358,7 @@ struct GaugeClusterView: View {
             .frame(width: Self.edgeFadeWidth)
             .opacity(showTrailing ? 1 : 0)
         }
-        .frame(width: viewportRowWidth, height: Self.cellH)
+        .frame(width: availableWidth, height: Self.cellH)
         .allowsHitTesting(false)
         .animation(.easeOut(duration: 0.16), value: showLeading)
         .animation(.easeOut(duration: 0.16), value: showTrailing)

@@ -38,4 +38,51 @@ enum IslandClusterLayout {
     static func viewportSlotCount(slotCount: Int, maxVisible: Int = defaultMaxVisible) -> Int {
         min(max(slotCount, 0), maxVisible)
     }
+
+    /// Whether the slot row needs horizontal scroll given real pixel widths.
+    static func needsScroll(contentWidth: Double, availableWidth: Double) -> Bool {
+        contentWidth > availableWidth + 0.5
+    }
+
+    /// Centered row leading edge in a wider parent (or 0 when content is wider).
+    static func centeredRowOrigin(contentWidth: Double, availableWidth: Double) -> Double {
+        if contentWidth >= availableWidth { return 0 }
+        return (availableWidth - contentWidth) / 2
+    }
+
+    /// Row width for `count` cells (no outer padding).
+    static func rowWidth(slotCount: Int, cell: Double = 100, gap: Double = 12) -> Double {
+        let n = max(0, slotCount)
+        guard n > 0 else { return 0 }
+        return Double(n) * cell + Double(n - 1) * gap
+    }
+
+    /// Black-body width: pads + viewport slots + optional add chrome.
+    /// Viewport is capped at `maxVisible` so extra accounts scroll inside.
+    static func islandBodyWidth(
+        itemCount: Int,
+        maxVisible: Int = defaultMaxVisible,
+        minSlots: Int = 3,
+        cell: Double = 100,
+        gap: Double = 12,
+        padLeading: Double = 14,
+        padTrailing: Double = 14,
+        addChrome: Double = 0,
+        notchWidth: Double = 0
+    ) -> Double {
+        let n = min(maxVisible, max(minSlots, itemCount))
+        let slots = rowWidth(slotCount: n, cell: cell, gap: gap)
+        let content = padLeading + slots + padTrailing + addChrome
+        return max(notchWidth, content)
+    }
+
+    /// Width left for the gauge band after outer pads + add chrome.
+    static func slotBandWidth(
+        bodyWidth: Double,
+        padLeading: Double,
+        padTrailing: Double,
+        addChrome: Double
+    ) -> Double {
+        max(0, bodyWidth - padLeading - padTrailing - addChrome)
+    }
 }

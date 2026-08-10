@@ -87,11 +87,11 @@ enum ClaudeAdapterSuite {
             try assertEqual(creds?.subscriptionType, "max")
             try assertEqual(creds?.refreshToken, "rt")
         }
-        failures += check("needsRefresh respects buffer and hard-expiry") {
+        failures += check("needsRefresh respects short proactive buffer") {
             let future = Date().addingTimeInterval(30 * 60)
-            let near = Date().addingTimeInterval(2 * 60)
+            let near = Date().addingTimeInterval(2 * 60) // inside 3m buffer
             let slightlyPast = Date().addingTimeInterval(-10 * 60)
-            let longPast = Date().addingTimeInterval(-3 * 3600)
+            let hoursPast = Date().addingTimeInterval(-3 * 3600)
             let fresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: future, rawJSON: nil
             )
@@ -101,8 +101,8 @@ enum ClaudeAdapterSuite {
             let softExpired = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
             )
-            let hardExpired = ClaudeAdapter.ClaudeCreds(
-                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: longPast, rawJSON: nil
+            let hoursDead = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: hoursPast, rawJSON: nil
             )
             let noRefresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
@@ -110,7 +110,8 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
             try assertTrue(ClaudeAdapter.needsRefresh(soon))
             try assertTrue(ClaudeAdapter.needsRefresh(softExpired))
-            try assertTrue(ClaudeAdapter.needsRefresh(hardExpired) == false)
+            // Hours-dead with refresh_token still needs refresh (no short hard-cut).
+            try assertTrue(ClaudeAdapter.needsRefresh(hoursDead))
             try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
         }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
@@ -178,15 +179,16 @@ enum ClaudeAdapterSuite {
             try assertEqual(VendorRegistry.adapter(for: "claude")?.displayName, "Claude")
             try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 1_800)
         }
-        failures += check("hard-expired token refuses refresh attempt") {
+        failures += check("hours-dead access still may refresh when refresh_token present") {
+            // Was a hard 45m cut — left accounts permanently quiet after 429 windows.
             let expMs = Int((Date().timeIntervalSince1970 - 3 * 3600) * 1000) // 3h dead
             let json = """
             {"claudeAiOauth":{"accessToken":"sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","refreshToken":"sk-ant-ort01-refresh-token-value-here-xxxx","expiresAt":\(expMs)}}
             """
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
-            try assertTrue(ClaudeAdapter.isHardExpired(creds))
-            try assertTrue(!ClaudeAdapter.canAttemptRefresh(creds))
-            try assertTrue(!ClaudeAdapter.shouldRefresh(creds))
+            try assertTrue(!ClaudeAdapter.isHardExpired(creds), "3h is within week stale window")
+            try assertTrue(ClaudeAdapter.canAttemptRefresh(creds))
+            try assertTrue(ClaudeAdapter.shouldRefresh(creds))
         }
         failures += check("slightly stale token may refresh") {
             let expMs = Int((Date().timeIntervalSince1970 - 10 * 60) * 1000) // 10m past
@@ -196,6 +198,32 @@ enum ClaudeAdapterSuite {
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
             try assertTrue(ClaudeAdapter.canAttemptRefresh(creds))
             try assertTrue(ClaudeAdapter.shouldRefresh(creds))
+        }
+        failures += check("week-old access is hard-expired") {
+            let expMs = Int((Date().timeIntervalSince1970 - 10 * 24 * 3600) * 1000)
+            let json = """
+            {"claudeAiOauth":{"accessToken":"sk-ant-oat01-cccccccccccccccccccccccccccccccccccccccc","refreshToken":"sk-ant-ort01-refresh-token-value-here-zzzz","expiresAt":\(expMs)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
+            try assertTrue(ClaudeAdapter.isHardExpired(creds))
+            try assertTrue(!ClaudeAdapter.canAttemptRefresh(creds))
+        }
+        failures += check("soft error must not become last-good retainable") {
+            let errSnap = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0, kind: .fiveHour),
+                secondary: nil,
+                plan: nil,
+                fetchedAt: Date(),
+                error: .rateLimited(retryAfter: nil)
+            )
+            try assertTrue(!UsageSnapshotMerge.shouldRetainPreviousRings(previous: errSnap))
+            let good = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0.42, kind: .fiveHour),
+                secondary: nil,
+                plan: "pro",
+                fetchedAt: Date()
+            )
+            try assertTrue(UsageSnapshotMerge.shouldRetainPreviousRings(previous: good))
         }
         failures += check("setup-token is long-lived and skips refresh") {
             let tok = "sk-ant-oat01-" + String(repeating: "x", count: 80)
