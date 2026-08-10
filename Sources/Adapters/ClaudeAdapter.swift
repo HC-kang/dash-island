@@ -190,7 +190,7 @@ struct ClaudeAdapter: VendorAdapter {
         let dir = CredentialStore.directoryURL(for: ref)
 
         // Steady-state: managed file only (one file per account — multi-account safe).
-        guard var creds = Self.readCredentials(configDir: dir) else {
+        guard let creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
 
