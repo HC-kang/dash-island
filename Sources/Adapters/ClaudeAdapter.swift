@@ -305,10 +305,12 @@ struct ClaudeAdapter: VendorAdapter {
         if snap.error == nil {
             let p = Int((snap.primary.usedFraction * 100).rounded())
             let w = Int(((snap.secondary?.usedFraction ?? 0) * 100).rounded())
+            let t = snap.tertiary.map { Int(($0.usedFraction * 100).rounded()) }
+            let tLabel = snap.tertiary?.displayLabel ?? "-"
             let extraN = snap.extras.count
             NSLog(
-                "DashIsland: Claude usage ok ref=%@ 5h=%d%% wk=%d%% extras=%d",
-                String(ref.prefix(8)), p, w, extraN
+                "DashIsland: Claude usage ok ref=%@ 5h=%d%% wk=%d%% tert=%@ %d%% extras=%d",
+                String(ref.prefix(8)), p, w, tLabel, t ?? -1, extraN
             )
         } else if let err = snap.error {
             NSLog("DashIsland: Claude usage error ref=%@ %@", String(ref.prefix(8)), String(describing: err))
@@ -881,8 +883,8 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Parse `/api/oauth/usage` JSON → snapshot. Exposed for unit tests.
     ///
-    /// Maps `five_hour` + `seven_day` rings, plus active model-scoped rows from
-    /// `limits[]` (e.g. Fable `weekly_scoped`) as hover-only `extras`.
+    /// Maps `five_hour` + `seven_day` rings; promotes Fable (or first scoped
+    /// model limit) to the tertiary ring; remaining scopes stay hover-only.
     static func parseUsageResponse(data: Data, plan: String?, fetchedAt: Date = Date()) -> UsageSnapshot {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return errorSnapshot(.parse("parse error"), fetchedAt: fetchedAt)
@@ -892,10 +894,13 @@ struct ClaudeAdapter: VendorAdapter {
             guard obj["seven_day"] != nil else { return nil }
             return parseWindow(obj["seven_day"], kind: .weekly)
         }()
-        let extras = parseScopedLimitExtras(obj["limits"])
+        let scoped = parseScopedLimitExtras(obj["limits"])
+        let tertiary = UsageRingLayout.preferredTertiary(from: scoped)
+        let extras = UsageRingLayout.remainingExtras(extras: scoped, tertiary: tertiary)
         return UsageSnapshot(
             primary: primary,
             secondary: secondary,
+            tertiary: tertiary,
             extras: extras,
             plan: plan,
             fetchedAt: fetchedAt,
@@ -904,8 +909,10 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// Model-scoped weekly limits from `limits[]` (Orca / current Anthropic shape).
-    /// Only `weekly_scoped` with a model display name and finite percent; skip
-    /// inactive rows. Does not replace primary/secondary rings.
+    ///
+    /// `is_active` only marks the *currently binding* limit — inactive Fable rows
+    /// still carry a real percent/resets_at (live Max accounts often send
+    /// `is_active: false` with `display_name: Fable`). Do **not** drop them.
     static func parseScopedLimitExtras(_ raw: Any?) -> [WindowUsage] {
         guard let rows = raw as? [Any] else { return [] }
         var out: [WindowUsage] = []
@@ -914,7 +921,6 @@ struct ClaudeAdapter: VendorAdapter {
             guard let d = row as? [String: Any] else { continue }
             let kind = (d["kind"] as? String)?.lowercased() ?? ""
             guard kind == "weekly_scoped" else { continue }
-            if let active = d["is_active"] as? Bool, active == false { continue }
             let name = scopedModelDisplayName(d)
             guard let name, !name.isEmpty else { continue }
             let key = name.lowercased()

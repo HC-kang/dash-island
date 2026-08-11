@@ -35,6 +35,7 @@ struct AccountWidget: View {
                     GaugeRingView(
                         primaryFraction: model.primaryFraction,
                         secondaryFraction: model.secondaryFraction,
+                        tertiaryFraction: model.tertiaryFraction,
                         centerPercent: model.centerPercent,
                         burnRatio: model.burnRatio,
                         tint: model.tint,

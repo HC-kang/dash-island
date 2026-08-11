@@ -630,9 +630,13 @@ final class UsageOrchestrator: ObservableObject {
         let snap = lastGood[account.id]
         let usedPrimary = snap?.primary.usedFraction ?? 0
         let usedSecondary = snap?.secondary?.usedFraction
+        let usedTertiary = snap?.tertiary?.usedFraction
 
         let primaryFraction = Self.displayFraction(used: usedPrimary, mode: mode)
         let secondaryFraction = usedSecondary.map {
+            Self.displayFraction(used: $0, mode: mode)
+        }
+        let tertiaryFraction = usedTertiary.map {
             Self.displayFraction(used: $0, mode: mode)
         }
 
@@ -671,6 +675,7 @@ final class UsageOrchestrator: ObservableObject {
             tint: Self.tint(for: account.vendorID),
             primaryFraction: awaiting ? 0 : primaryFraction,
             secondaryFraction: awaiting ? nil : secondaryFraction,
+            tertiaryFraction: awaiting ? nil : tertiaryFraction,
             usedPrimaryFraction: usedPrimary,
             centerPercent: awaiting ? 0 : Int((primaryFraction * 100).rounded()),
             burnRatio: awaiting ? 0 : burn.ratio,
@@ -877,7 +882,7 @@ final class UsageOrchestrator: ObservableObject {
         return lines
     }
 
-    /// Hover rows: primary + secondary rings, then scoped extras (Fable, …).
+    /// Hover rows: primary + secondary + tertiary rings, then remaining extras.
     nonisolated static func hoverWindows(
         snapshot: UsageSnapshot?,
         mode: PreferencesStore.DisplayMode
@@ -887,6 +892,9 @@ final class UsageOrchestrator: ObservableObject {
         lines.append(windowLine(window: snapshot.primary, mode: mode))
         if let secondary = snapshot.secondary {
             lines.append(windowLine(window: secondary, mode: mode))
+        }
+        if let tertiary = snapshot.tertiary {
+            lines.append(windowLine(window: tertiary, mode: mode))
         }
         for extra in snapshot.extras {
             lines.append(windowLine(window: extra, mode: mode))

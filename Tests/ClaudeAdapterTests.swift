@@ -47,7 +47,7 @@ enum ClaudeAdapterSuite {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
             try assertEqual(snap.primary.usedFraction, 1.0, accuracy: 0.0001)
         }
-        failures += check("limits[] weekly_scoped Fable → extras, not rings") {
+        failures += check("limits[] weekly_scoped Fable → tertiary ring") {
             let json = """
             {
               "five_hour": { "utilization": 10 },
@@ -62,9 +62,9 @@ enum ClaudeAdapterSuite {
                 },
                 {
                   "kind": "weekly_scoped",
-                  "percent": 99,
-                  "is_active": false,
-                  "scope": { "model": { "display_name": "Dead" } }
+                  "percent": 12,
+                  "is_active": true,
+                  "scope": { "model": { "display_name": "Other" } }
                 }
               ]
             }
@@ -72,11 +72,36 @@ enum ClaudeAdapterSuite {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
             try assertEqual(snap.primary.usedFraction, 0.10, accuracy: 0.0001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.20, accuracy: 0.0001)
+            try assertEqual(snap.tertiary?.displayLabel, "Fable")
+            try assertEqual(snap.tertiary?.usedFraction ?? -1, 0.38, accuracy: 0.0001)
+            // Non-Fable scoped stays as hover extra.
             try assertEqual(Double(snap.extras.count), 1, accuracy: 0)
-            try assertEqual(snap.extras[0].displayLabel, "Fable")
-            try assertEqual(snap.extras[0].usedFraction, 0.38, accuracy: 0.0001)
-            // Burn stays on 5h — extras excluded.
+            try assertEqual(snap.extras[0].displayLabel, "Other")
+            // Burn stays on 5h — tertiary excluded.
             try assertEqual(snap.preferredBurnWindow.kind, UsageWindowKind.fiveHour)
+        }
+        failures += check("inactive Fable still promoted (live Max shape)") {
+            // Live accounts often send is_active:false with a real Fable percent.
+            let json = """
+            {
+              "five_hour": { "utilization": 3 },
+              "seven_day": { "utilization": 28 },
+              "limits": [
+                { "kind": "session", "percent": 3, "is_active": false },
+                { "kind": "weekly_all", "percent": 28, "is_active": true },
+                {
+                  "kind": "weekly_scoped",
+                  "percent": 1,
+                  "is_active": false,
+                  "resets_at": "2026-08-16T20:00:00Z",
+                  "scope": { "model": { "display_name": "Fable" } }
+                }
+              ]
+            }
+            """
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.tertiary?.displayLabel, "Fable")
+            try assertEqual(snap.tertiary?.usedFraction ?? -1, 0.01, accuracy: 0.0001)
         }
         failures += check("parse credentials JSON") {
             let json = """
