@@ -287,3 +287,21 @@ Fixes:
 - Fix: slot/scroll rows use `Color.clear` fixed frame + `overlay` ScrollView/HStack; `minWidth: 0` on flexible band; AddRail `fixedSize`.
 - Belt: expanded content masked to `IslandShape` + full-width tip strip under body.
 - Domain: `islandBodyWidth` / `slotBandWidth` / `rowWidth` pure helpers + tests (6 accts body == 5-slot viewport).
+
+## Claude probe-first (2026-08-10)
+
+- Live: token hosts both 429; personal access still OK → usage 200; Dev access dead → 401.
+- Fix: `shouldProbeBeforeRefresh` — probe usage first; refresh only on expiry/401.
+- Soft captions: "oauth rate limited" (not fake reauth / 0% rings).
+
+## Tertiary ring: Fable + Codex model limits (2026-08-10)
+
+- Claude `limits[]` weekly_scoped Fable → `tertiary` amber ring (was hover-only extras).
+- Codex `additional_rate_limits` (e.g. GPT-5.3-Codex-Spark → "Spark") → tertiary; `reset_after_seconds` fallback.
+- GaugeRingView: outer brand / mid steel / inner amber when tertiary present.
+- Burn stays primary/secondary only.
+
+## Drag/trash coordinate fix (2026-08-11)
+
+- Bug: layout overflow fix pinned drag canvas to `cellH` → trash `.position(y: cellH+52)` outside named space; magnet + icon misaligned; float jump.
+- Fix: expand canvas by `trashZoneH` while dragging; trash centered in zone; lift from finger `startLocation` / track `drag.location`; clearer dashed drop seat.
