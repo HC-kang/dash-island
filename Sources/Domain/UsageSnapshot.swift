@@ -1,7 +1,7 @@
 import Foundation
 
 /// Semantic usage window — drives hover labels (not hardcoded "5h"/"wk").
-enum UsageWindowKind: String, Equatable, Sendable {
+enum UsageWindowKind: String, Codable, Equatable, Sendable {
     case fiveHour
     case weekly
     case monthly
@@ -39,7 +39,7 @@ enum UsageWindowKind: String, Equatable, Sendable {
     }
 }
 
-struct WindowUsage: Equatable, Sendable {
+struct WindowUsage: Codable, Equatable, Sendable {
     /// Always normalized to 0...1 (used fraction of the window).
     var usedFraction: Double
     var resetAt: Date?
@@ -79,7 +79,7 @@ struct WindowUsage: Equatable, Sendable {
     }
 }
 
-struct UsageSnapshot: Equatable, Sendable {
+struct UsageSnapshot: Codable, Equatable, Sendable {
     var primary: WindowUsage
     var secondary: WindowUsage?
     /// Optional third ring (Claude Fable, Codex model-scoped limits, …).
@@ -173,7 +173,7 @@ enum BurnSignalSource: String, Equatable, Sendable {
     }
 }
 
-enum UsageError: Equatable, Sendable {
+enum UsageError: Codable, Equatable, Sendable {
     /// Credential missing or rejected; user should reauthenticate.
     case authRequired
     /// Rate limited; optional earliest retry time.

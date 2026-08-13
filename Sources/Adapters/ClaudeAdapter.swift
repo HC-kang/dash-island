@@ -30,7 +30,9 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
             """
         case .credentialsMissing(let configDir):
             return """
-            Claude login finished but no credentials were found. Run:
+            Claude login finished but no credentials file appeared. The CLI stores \
+            tokens in macOS Keychain; allow Keychain access once so Dash can copy \
+            them into this account folder, or run:
 
               CLAUDE_CONFIG_DIR='\(configDir)' claude auth login --claudeai
             """
@@ -45,10 +47,9 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 /// Anthropic Claude Code usage via `/api/oauth/usage`.
 ///
 /// **Credentials (multi-account safe):** each account owns
-/// `accounts/<uuid>/.credentials.json` only. Steady-state never reads Keychain.
-/// Scoped Keychain is used **once** at login capture (CLI may write KC first),
-/// then copied into the file; reauth clears file + that scoped item only.
-/// Never touch the unsuffixed global `Claude Code-credentials` item.
+/// `accounts/<uuid>/.credentials.json`. Poll and refresh never touch Keychain.
+/// Claude CLI on macOS writes login tokens to a *scoped* Keychain item only;
+/// we copy that item into the file once after Add/Reauth, then leave Keychain alone.
 ///
 /// Two auth modes:
 /// 1. **Long-lived setup-token** (`claude setup-token` → paste) — no refresh;
@@ -132,8 +133,7 @@ struct ClaudeAdapter: VendorAdapter {
         let dir = try CredentialStore.createDirectory(for: ref)
         do {
             // Wipe managed session first — otherwise runLogin short-circuits on
-            // the still-present .credentials.json / scoped keychain item and
-            // never opens a real login.
+            // the still-present .credentials.json and never opens a real login.
             Self.clearManagedCredentials(configDir: dir)
             try await runLogin(configDir: dir, expectFreshAfter: Date())
             _ = try Self.requireCredentials(configDir: dir)
@@ -217,55 +217,43 @@ struct ClaudeAdapter: VendorAdapter {
             return Self.logUsage(snap, ref: ref)
         }
 
-        // --- Short-lived CLI OAuth (we own refresh for this account's file) ---
-        // Probe-first: never burn oauth/token while access is still usable.
-        // Live probe: personal account with hours left returns 200 even when the
-        // global token host is hard-429 (refresh storms from other accounts).
-        // Refresh only on expired access or usage 401/403.
+        // --- Short-lived CLI OAuth (managed file only) ---
+        // Orca/Hermes lesson: local expiresAt is advisory. Always probe usage first
+        // and only touch single-use refresh after an authoritative 401/403.
+        // File-only adopt-before-refresh: if a CLI already rotated this managed
+        // dir's .credentials.json, adopt it and skip oauth/token.
 
-        if Self.shouldProbeBeforeRefresh(creds, now: now) {
-            var snap = await Self.probeUsage(
-                token: creds.accessToken,
-                plan: creds.subscriptionType,
-                fetchedAt: now
-            )
-            if case .authRequired = snap.error, Self.canAttemptRefresh(creds, now: now) {
-                snap = await Self.refreshThenProbe(configDir: dir, ref: ref, fallback: snap)
-            }
+        var snap = await Self.probeUsage(
+            token: creds.accessToken,
+            plan: creds.subscriptionType,
+            fetchedAt: now
+        )
+        guard Self.shouldAttemptRefresh(after: snap.error, credentials: creds, now: now) else {
             return Self.logUsage(snap, ref: ref)
         }
 
-        // Access expired (or unknown) — refresh is required before a useful probe.
-        guard Self.canAttemptRefresh(creds, now: now) else {
-            return Self.logUsage(
-                Self.errorSnapshot(
-                    .unavailable("token quiet — no refresh token. Reauthenticate this account"),
-                    fetchedAt: now
-                ),
-                ref: ref
-            )
-        }
-        let afterRefresh = await Self.refreshThenProbe(
+        snap = await Self.refreshThenProbe(
             configDir: dir,
             ref: ref,
-            fallback: Self.errorSnapshot(
-                .rateLimited(retryAfter: now.addingTimeInterval(Self.globalRefresh429Quiet)),
-                fetchedAt: now
-            )
+            failedAccessToken: creds.accessToken,
+            fallback: snap
         )
-        return Self.logUsage(afterRefresh, ref: ref)
+        return Self.logUsage(snap, ref: ref)
     }
 
-    /// One gated refresh + usage probe. On 429/unavailable keep `fallback` severity
-    /// (soft) so orchestrator can retain last-good rings.
+    /// Gated recover + re-probe. Soft outcomes keep orchestrator last-good rings.
     private static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
+        failedAccessToken: String?,
         fallback: UsageSnapshot
     ) async -> UsageSnapshot {
-        switch await refreshManagedCredentialsDetailed(configDir: configDir) {
-        case .success(let refreshed):
-            NSLog("DashIsland: Claude refresh ok ref=%@", String(ref.prefix(8)))
+        switch await refreshManagedCredentialsDetailed(
+            configDir: configDir,
+            failedAccessToken: failedAccessToken
+        ) {
+        case .success(let refreshed), .adopted(let refreshed):
+            NSLog("DashIsland: Claude recovery ok ref=%@", String(ref.prefix(8)))
             return await probeUsage(
                 token: refreshed.accessToken,
                 plan: refreshed.subscriptionType,
@@ -282,7 +270,6 @@ struct ClaudeAdapter: VendorAdapter {
             return errorSnapshot(.authRequired, fetchedAt: Date())
         case .unavailable(let message):
             NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
-            // Prefer explicit soft quiet over a raw 401 fallback when refresh failed softly.
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — \(message)"),
@@ -321,14 +308,10 @@ struct ClaudeAdapter: VendorAdapter {
     // MARK: - Login (managed CLAUDE_CONFIG_DIR)
 
     /// Wipe app-owned session so the next `claude auth login` cannot succeed
-    /// on leftover state. Deletes our credentials file, and the CLI's
-    /// **scoped** keychain item for this `CLAUDE_CONFIG_DIR` only (never the
-    /// default `Claude Code-credentials` used by the user's normal CLI).
+    /// on leftover state. File only — never a Keychain item.
     static func clearManagedCredentials(configDir: URL) {
-        let fm = FileManager.default
         let credFile = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
-        try? fm.removeItem(at: credFile)
-        deleteScopedKeychainItem(configDir: configDir)
+        try? FileManager.default.removeItem(at: credFile)
         NSLog("DashIsland: cleared Claude managed creds at %@", configDir.path)
     }
 
@@ -379,7 +362,6 @@ struct ClaudeAdapter: VendorAdapter {
                 if task.isRunning { task.terminate() }
                 throw CancellationError()
             }
-            // Login only: capture once into our file (CLI may write keychain first).
             if let creds = Self.captureLoginCredentials(configDir: configDir), isAcceptable(creds) {
                 Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                 try? await Task.sleep(nanoseconds: 400_000_000)
@@ -413,7 +395,6 @@ struct ClaudeAdapter: VendorAdapter {
         if let creds = readCredentials(configDir: configDir) {
             return creds
         }
-        // First capture after login if only keychain was written so far.
         if let creds = captureLoginCredentials(configDir: configDir) {
             persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
             return creds
@@ -442,7 +423,7 @@ struct ClaudeAdapter: VendorAdapter {
         var rawJSON: Data?
     }
 
-    /// Steady-state: only our managed `.credentials.json`. No Keychain.
+    /// Steady-state: managed file only.
     static func readCredentials(configDir: URL) -> ClaudeCreds? {
         readCredentialsFile(configDir: configDir)
     }
@@ -453,8 +434,8 @@ struct ClaudeAdapter: VendorAdapter {
         return parseCredentialsJSON(data)
     }
 
-    /// Login capture only: file first; if the CLI wrote the scoped keychain
-    /// first, copy once into our file and stop touching Keychain.
+    /// Login capture only. File first; if the CLI wrote Keychain and not the
+    /// file (macOS 2.1+), copy once into `.credentials.json`.
     static func captureLoginCredentials(configDir: URL) -> ClaudeCreds? {
         if let file = readCredentialsFile(configDir: configDir) {
             return file
@@ -531,11 +512,10 @@ struct ClaudeAdapter: VendorAdapter {
         shouldRefresh(creds, now: now)
     }
 
-    /// True when we should call `/api/oauth/usage` before touching oauth/token.
-    /// Access still usable (not expired) → probe; expired → refresh first.
+    /// Prefer always probing (usage server is source of truth). Kept for callers/tests.
     static func shouldProbeBeforeRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return true }
-        return !isExpired(creds, now: now)
+        return !creds.accessToken.isEmpty
     }
 
     /// Near expiry / already expired / unknown — refresh is *allowed* if canAttempt.
@@ -558,6 +538,22 @@ struct ClaudeAdapter: VendorAdapter {
         return now < exp.addingTimeInterval(maxStaleForRefresh)
     }
 
+    /// Refresh only after usage 401/403 — never because local expiresAt says so.
+    static func shouldAttemptRefresh(
+        after error: UsageError?,
+        credentials: ClaudeCreds,
+        now: Date = Date()
+    ) -> Bool {
+        guard case .authRequired = error else { return false }
+        return canAttemptRefresh(credentials, now: now)
+    }
+
+    /// Managed-file adopt: access token rotated since the failed probe.
+    static func shouldAdopt(_ creds: ClaudeCreds, failedAccessToken: String?) -> Bool {
+        guard let failedAccessToken, !failedAccessToken.isEmpty else { return false }
+        return creds.accessToken != failedAccessToken
+    }
+
     static func isExpired(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard let exp = creds.expiresAt else { return true }
@@ -574,6 +570,8 @@ struct ClaudeAdapter: VendorAdapter {
     /// Outcome of a managed-folder OAuth refresh (distinguishes 429 from real reauth).
     enum RefreshOutcome: Equatable {
         case success(ClaudeCreds)
+        /// Managed file already has a newer access token (CLI rotated it).
+        case adopted(ClaudeCreds)
         case skipped
         case rateLimited(Date?)
         case rejected
@@ -582,36 +580,49 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Refresh this account's managed file only. Rotates refresh_token when the
     /// server returns a new one (single-use — must persist atomically).
-    /// Never reads Keychain; multi-account isolation is path-based.
+    /// Multi-account isolation is path-based.
     static func refreshManagedCredentials(configDir: URL) async -> ClaudeCreds? {
-        if case .success(let creds) = await refreshManagedCredentialsDetailed(configDir: configDir) {
+        switch await refreshManagedCredentialsDetailed(configDir: configDir) {
+        case .success(let creds), .adopted(let creds):
             return creds
+        default:
+            return nil
         }
-        return nil
     }
 
-    static func refreshManagedCredentialsDetailed(configDir: URL) async -> RefreshOutcome {
+    static func refreshManagedCredentialsDetailed(
+        configDir: URL,
+        failedAccessToken: String? = nil
+    ) async -> RefreshOutcome {
         let path = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
-        // Re-read file under gate so concurrent multi-account polls see latest write.
         guard let data = try? Data(contentsOf: path),
-              let creds = parseCredentialsJSON(data),
-              let refresh = creds.refreshToken, !refresh.isEmpty
+              let creds = parseCredentialsJSON(data)
         else { return .skipped }
 
-        // Global gate: serialize token-endpoint traffic across all Claude accounts.
-        if let waitUntil = await refreshGate.blockIfCooling() {
+        // File-only adopt-before-refresh: if this managed file already rotated, skip POST.
+        if shouldAdopt(creds, failedAccessToken: failedAccessToken) {
+            return .adopted(creds)
+        }
+        guard let refresh = creds.refreshToken, !refresh.isEmpty else { return .skipped }
+        if failedAccessToken == nil, !isExpired(creds), !shouldRefresh(creds) {
+            return .success(creds)
+        }
+
+        // Atomic reserve: check + book the gap so two accounts cannot double-POST.
+        if let waitUntil = await refreshGate.reserveAttempt(gap: globalRefreshMinGap) {
             return .rateLimited(waitUntil)
         }
-        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
 
-        // Fresh read after waiting — another account's poll may have finished.
+        // Fresh read after waiting — another poll may have healed the file.
         guard let data = try? Data(contentsOf: path),
-              let creds = parseCredentialsJSON(data),
-              let refresh = creds.refreshToken, !refresh.isEmpty
+              let creds = parseCredentialsJSON(data)
         else { return .skipped }
 
-        // If file was refreshed by another of our polls while we waited, skip POST.
-        if !isExpired(creds) && !shouldRefresh(creds) {
+        if shouldAdopt(creds, failedAccessToken: failedAccessToken) {
+            return .adopted(creds)
+        }
+        guard let refresh = creds.refreshToken, !refresh.isEmpty else { return .skipped }
+        if failedAccessToken == nil, !isExpired(creds), !shouldRefresh(creds) {
             return .success(creds)
         }
 
@@ -658,7 +669,6 @@ struct ClaudeAdapter: VendorAdapter {
                     NSLog("DashIsland: Claude refresh HTTP 429 (global quiet)")
                     return .rateLimited(retry)
                 case 400, 401, 403:
-                    // Try next host only on 404-ish; auth errors are terminal for this token.
                     await refreshGate.noteAttempt(gap: globalRefreshMinGap)
                     let errBody = String(data: respData, encoding: .utf8) ?? ""
                     NSLog(
@@ -798,7 +808,7 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Claude Code 2.1+ scopes Keychain as
     /// `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`.
-    /// Used only for login capture + reauth wipe — not for polling.
+    /// Login harvest only — never used for usage polling.
     static func scopedKeychainService(for configDir: URL) -> String {
         let path = configDir.path
         let digest = SHA256.hash(data: Data(path.utf8))
@@ -807,18 +817,8 @@ struct ClaudeAdapter: VendorAdapter {
         return "\(keychainServiceBase)-\(suffix)"
     }
 
-    private static func deleteScopedKeychainItem(configDir: URL) {
-        let service = scopedKeychainService(for: configDir)
-        let account = NSUserName()
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-
-    /// One-shot read during login only. Never used for usage polling.
+    /// One-shot read after `claude auth login`. The CLI does not write
+    /// `.credentials.json` on current macOS builds.
     private static func readScopedKeychainCredentials(configDir: URL) -> ClaudeCreds? {
         let service = scopedKeychainService(for: configDir)
         let account = NSUserName()
@@ -1085,11 +1085,30 @@ struct ClaudeAdapter: VendorAdapter {
 
 // MARK: - Process-wide Claude OAuth refresh gate
 
-/// Prevents multi-account polls from stampeding `platform.claude.com/v1/oauth/token`.
+/// Prevents multi-account polls from stampeding oauth/token.
+/// Quiet window survives app restart via UserDefaults.
 private actor ClaudeRefreshGate {
-    private var nextAllowedAt: Date = .distantPast
+    private static let defaultsKey = "DashIsland.ClaudeRefreshNextAllowedAt"
+    private let defaults: UserDefaults
+    private var nextAllowedAt: Date
 
-    /// `nil` = may refresh now; otherwise wait until this date.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let stored = defaults.double(forKey: Self.defaultsKey)
+        self.nextAllowedAt = stored > 0
+            ? Date(timeIntervalSince1970: stored)
+            : .distantPast
+    }
+
+    /// Atomically reserve one attempt. `nil` = reserved now; else wait until date.
+    func reserveAttempt(gap: TimeInterval, now: Date = Date()) -> Date? {
+        if now < nextAllowedAt { return nextAllowedAt }
+        nextAllowedAt = max(nextAllowedAt, now.addingTimeInterval(gap))
+        persist()
+        return nil
+    }
+
+    /// Legacy name kept for any external callers.
     func blockIfCooling(now: Date = Date()) -> Date? {
         if now < nextAllowedAt { return nextAllowedAt }
         return nil
@@ -1097,9 +1116,15 @@ private actor ClaudeRefreshGate {
 
     func noteAttempt(gap: TimeInterval, now: Date = Date()) {
         nextAllowedAt = max(nextAllowedAt, now.addingTimeInterval(gap))
+        persist()
     }
 
     func noteRateLimited(until: Date) {
         nextAllowedAt = max(nextAllowedAt, until)
+        persist()
+    }
+
+    private func persist() {
+        defaults.set(nextAllowedAt.timeIntervalSince1970, forKey: Self.defaultsKey)
     }
 }

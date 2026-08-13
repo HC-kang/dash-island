@@ -112,16 +112,13 @@ enum ClaudeAdapterSuite {
             try assertEqual(creds?.subscriptionType, "max")
             try assertEqual(creds?.refreshToken, "rt")
         }
-        failures += check("probe-first when access still valid; refresh when expired") {
-            let future = Date().addingTimeInterval(30 * 60)
-            let near = Date().addingTimeInterval(2 * 60) // inside 3m buffer
-            let slightlyPast = Date().addingTimeInterval(-10 * 60)
-            let hoursPast = Date().addingTimeInterval(-3 * 3600)
+        failures += check("always probe; refresh only after usage 401") {
+            let now = Date()
+            let future = now.addingTimeInterval(30 * 60)
+            let slightlyPast = now.addingTimeInterval(-10 * 60)
+            let hoursPast = now.addingTimeInterval(-3 * 3600)
             let fresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: future, rawJSON: nil
-            )
-            let soon = ClaudeAdapter.ClaudeCreds(
-                accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: near, rawJSON: nil
             )
             let softExpired = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: "r", subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
@@ -132,17 +129,35 @@ enum ClaudeAdapterSuite {
             let noRefresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
             )
-            // Fetch path: probe while access valid (even near expiry — avoids 429 storms).
             try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(fresh))
-            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(soon))
-            try assertTrue(!ClaudeAdapter.shouldProbeBeforeRefresh(softExpired))
-            try assertTrue(!ClaudeAdapter.shouldProbeBeforeRefresh(hoursDead))
-            // Refresh eligibility still tracks buffer / dead tokens with refresh_token.
+            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(softExpired))
+            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(hoursDead))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: nil, credentials: fresh, now: now))
+            try assertTrue(
+                !ClaudeAdapter.shouldAttemptRefresh(
+                    after: .rateLimited(retryAfter: nil),
+                    credentials: softExpired,
+                    now: now
+                )
+            )
+            try assertTrue(ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: softExpired, now: now))
+            try assertTrue(ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: hoursDead, now: now))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: noRefresh, now: now))
             try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
-            try assertTrue(ClaudeAdapter.needsRefresh(soon))
             try assertTrue(ClaudeAdapter.needsRefresh(softExpired))
-            try assertTrue(ClaudeAdapter.needsRefresh(hoursDead))
             try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
+        }
+        failures += check("managed-file adoption requires a rotated access token") {
+            let current = ClaudeAdapter.ClaudeCreds(
+                accessToken: "new-access",
+                refreshToken: "new-refresh",
+                subscriptionType: "max",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.shouldAdopt(current, failedAccessToken: "old-access"))
+            try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: "new-access"))
+            try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: nil))
         }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
             let existing = Data("""
@@ -191,13 +206,17 @@ enum ClaudeAdapterSuite {
             let json = #"{"claudeAiOauth":{"accessToken":""}}"#
             try assertTrue(ClaudeAdapter.parseCredentialsJSON(Data(json.utf8)) == nil)
         }
+        failures += check("credentials are file-only (no keychain helper)") {
+            let dir = URL(fileURLWithPath: "/tmp/dash-island-test-config-missing", isDirectory: true)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.readCredentialsFile(configDir: dir) == nil)
+        }
         failures += check("scoped keychain service is stable 8-hex suffix") {
             let dir = URL(fileURLWithPath: "/tmp/dash-island-test-config", isDirectory: true)
             let service = ClaudeAdapter.scopedKeychainService(for: dir)
             try assertTrue(service.hasPrefix("Claude Code-credentials-"))
             let suffix = String(service.dropFirst("Claude Code-credentials-".count))
             try assertEqual(suffix.count, 8)
-            // Stable across calls
             try assertEqual(ClaudeAdapter.scopedKeychainService(for: dir), service)
         }
         failures += check("resets_at fractional ISO8601") {
@@ -288,17 +307,14 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.needsRefresh(creds!))
         }
         failures += check("multi-account isolation is path-based (separate config dirs)") {
-            // Documented contract: each account's credentials live only under its
-            // CLAUDE_CONFIG_DIR file; refresh writes that path only. Two dirs ⇒
-            // two independent refresh tokens (no shared Keychain steady-state).
-            let a = URL(fileURLWithPath: "/tmp/dash-claude-acct-a")
-            let b = URL(fileURLWithPath: "/tmp/dash-claude-acct-b")
+            let a = URL(fileURLWithPath: "/tmp/dash-claude-acct-a", isDirectory: true)
+            let b = URL(fileURLWithPath: "/tmp/dash-claude-acct-b", isDirectory: true)
             try assertTrue(a.path != b.path)
-            let sa = ClaudeAdapter.scopedKeychainService(for: a)
-            let sb = ClaudeAdapter.scopedKeychainService(for: b)
-            try assertTrue(sa != sb)
-            try assertTrue(sa.hasPrefix("Claude Code-credentials-"))
-            try assertTrue(sb.hasPrefix("Claude Code-credentials-"))
+            let fileA = a.appendingPathComponent(".credentials.json")
+            let fileB = b.appendingPathComponent(".credentials.json")
+            try assertTrue(fileA.path != fileB.path)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: a) == nil)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: b) == nil)
         }
         return failures
     }

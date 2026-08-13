@@ -244,6 +244,19 @@ final class UsageOrchestrator: ObservableObject {
         max(expandDebounceFloor, minPoll)
     }
 
+    /// Cooldown seconds after a rate limit. Local 2h/4h/6h backoff is capped;
+    /// an explicit vendor `Retry-After` is authoritative even when longer.
+    nonisolated static func rateLimitWait(
+        streak: Int,
+        retryAfter: Date?,
+        now: Date
+    ) -> TimeInterval {
+        let backoff = rateLimitCooldown * Double(min(streak, 3))
+        let local = min(rateLimitCooldownMax, max(rateLimitCooldown, backoff))
+        let vendor = retryAfter.map { $0.timeIntervalSince(now) } ?? 0
+        return max(60, max(local, vendor))
+    }
+
     // MARK: - Polling
 
     private func rescheduleTimer() {
@@ -271,6 +284,7 @@ final class UsageOrchestrator: ObservableObject {
 
     private func onAccountsChanged() {
         pruneState()
+        restoreLastGoodSnapshots()
         rebuildWidgets()
         Task { await pollDueAccounts(mode: .background, forceActive: true) }
     }
@@ -354,6 +368,58 @@ final class UsageOrchestrator: ObservableObject {
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
         rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
+    }
+
+    /// Reload error-free rings from disk so restart + soft quiet keeps gauges.
+    private func restoreLastGoodSnapshots() {
+        for account in accountStore.accounts where lastGood[account.id] == nil {
+            let url = CredentialStore.lastGoodUsageURL(for: account.credentialRef)
+            guard let snapshot = Self.loadLastGood(from: url) else { continue }
+            lastGood[account.id] = snapshot
+            lastSuccessAt[account.id] = snapshot.fetchedAt
+            lastNotice[account.id] = "saved last-good · checking live usage"
+            lastUpdated = max(lastUpdated ?? .distantPast, snapshot.fetchedAt)
+        }
+    }
+
+    private func persistLastGood(accountID: AccountID, snapshot: UsageSnapshot) {
+        guard let account = accountStore.accounts.first(where: { $0.id == accountID }) else { return }
+        _ = Self.saveLastGood(
+            snapshot,
+            to: CredentialStore.lastGoodUsageURL(for: account.credentialRef)
+        )
+    }
+
+    nonisolated static func encodeLastGood(_ snapshot: UsageSnapshot) -> Data? {
+        guard snapshot.error == nil else { return nil }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        return try? encoder.encode(snapshot)
+    }
+
+    nonisolated static func decodeLastGood(_ data: Data) -> UsageSnapshot? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        guard let snapshot = try? decoder.decode(UsageSnapshot.self, from: data),
+              snapshot.error == nil
+        else { return nil }
+        return snapshot
+    }
+
+    @discardableResult
+    nonisolated static func saveLastGood(_ snapshot: UsageSnapshot, to url: URL) -> Bool {
+        guard let data = encodeLastGood(snapshot) else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    nonisolated static func loadLastGood(from url: URL) -> UsageSnapshot? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return decodeLastGood(data)
     }
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
@@ -484,14 +550,8 @@ final class UsageOrchestrator: ObservableObject {
             case .rateLimited(let retryAfter):
                 let streak = (rateLimitStreak[accountID] ?? 0) + 1
                 rateLimitStreak[accountID] = streak
-                // 2h, 4h, 6h… from streak; vendor Retry-After wins if longer (then cap).
-                let backoff = Self.rateLimitCooldown * Double(min(streak, 3))
-                let fromVendor = retryAfter.map { $0.timeIntervalSince(now) } ?? 0
-                let wait = min(
-                    Self.rateLimitCooldownMax,
-                    max(Self.rateLimitCooldown, max(backoff, fromVendor))
-                )
-                cooldownUntil[accountID] = now.addingTimeInterval(max(wait, 60))
+                let wait = Self.rateLimitWait(streak: streak, retryAfter: retryAfter, now: now)
+                cooldownUntil[accountID] = now.addingTimeInterval(wait)
                 NSLog(
                     "DashIsland: rate-limit quiet account=%@ streak=%d wait=%.0fm",
                     String(accountID.uuidString.prefix(8)),
@@ -532,6 +592,7 @@ final class UsageOrchestrator: ObservableObject {
         lastSuccessAt[accountID] = now
         lastNotice[accountID] = snapshot.notice
         lastGood[accountID] = snapshot
+        persistLastGood(accountID: accountID, snapshot: snapshot)
         pushBurn(accountID: accountID, snapshot: snapshot)
     }
 

@@ -305,3 +305,17 @@ Fixes:
 
 - Bug: layout overflow fix pinned drag canvas to `cellH` → trash `.position(y: cellH+52)` outside named space; magnet + icon misaligned; float jump.
 - Fix: expand canvas by `trashZoneH` while dragging; trash centered in zone; lift from finger `startLocation` / track `drag.location`; clearer dashed drop seat.
+
+## Claude session-expiry port (2026-08-13)
+
+- Codex worktree implemented probe-always + file-only adopt + persist last-good + UserDefaults refresh gate.
+- Ported Swift core onto `feat/v1-implementation` (uncommitted). Tests/docs still only in worker worktree.
+- Rebuilt `build/DashIsland.app` 0.0.1 and relaunched (pid after 10:46).
+- Review notes: adopt only helps if *this* managed file rotates; `canAttemptRefresh` still cuts after 7d stale; vendor Retry-After now uncapped (can quiet >6h).
+
+## File-only Claude auth (2026-08-13)
+
+- User: Keychain is too cumbersome; do not use it here.
+- Claude CLI 2.1.229 on macOS writes login to scoped Keychain only — **no** `.credentials.json`. Pure file capture made Reauth fail (`credentialsMissing`).
+- Harvest-once restored: after Add/Reauth, copy scoped `Claude Code-credentials-<sha8>` into the managed file. Poll/refresh stay file-only.
+- Recovered `9C11FBE9-…` by copying that Keychain item into `.credentials.json` (pro, has refresh).
