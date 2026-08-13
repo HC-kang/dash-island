@@ -12,6 +12,8 @@ import SwiftUI
 struct GaugeRingView: View {
     var primaryFraction: Double
     var secondaryFraction: Double?
+    /// Optional third concentric ring (Fable / Codex model limit).
+    var tertiaryFraction: Double? = nil
     var centerPercent: Int
     var burnRatio: Double
     var tint: VendorTint
@@ -22,7 +24,9 @@ struct GaugeRingView: View {
     /// Drawn values (spring toward targets).
     @State private var drawnPrimary: Double = 0
     @State private var drawnSecondary: Double = 0
+    @State private var drawnTertiary: Double = 0
     @State private var drawnHasSecondary: Bool = false
+    @State private var drawnHasTertiary: Bool = false
     @State private var drawnBurn: Double = 0
     @State private var drawnPercent: Int = 0
     @State private var didAppear = false
@@ -30,6 +34,8 @@ struct GaugeRingView: View {
 
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
+    /// Innermost scoped ring (Fable / Spark) — warm amber, distinct from brand + steel.
+    private var amber: Color { Color(red: 0.92, green: 0.68, blue: 0.28) }
     private static let burnRed = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
     private static let burnSoft = Color(red: 0.97, green: 0.44, blue: 0.42)
 
@@ -97,6 +103,7 @@ struct GaugeRingView: View {
         }
         .onChange(of: primaryFraction) { _ in applyRingTargets(animated: didAppear) }
         .onChange(of: secondaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
+        .onChange(of: tertiaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
         .onChange(of: burnRatio) { _ in
             guard didAppear else { return }
             withAnimation(Self.needleLive) {
@@ -113,7 +120,9 @@ struct GaugeRingView: View {
         drawnBurn = 0
         drawnPrimary = 0
         drawnSecondary = 0
+        drawnTertiary = 0
         drawnHasSecondary = secondaryFraction != nil
+        drawnHasTertiary = tertiaryFraction != nil
         drawnPercent = 0
         didAppear = false
 
@@ -125,7 +134,9 @@ struct GaugeRingView: View {
             withAnimation(Self.ringSettle) {
                 drawnPrimary = primaryFraction
                 drawnSecondary = secondaryFraction ?? 0
+                drawnTertiary = tertiaryFraction ?? 0
                 drawnHasSecondary = secondaryFraction != nil
+                drawnHasTertiary = tertiaryFraction != nil
                 drawnPercent = centerPercent
             }
             withAnimation(Self.needleReveal) {
@@ -139,7 +150,9 @@ struct GaugeRingView: View {
         let update = {
             drawnPrimary = primaryFraction
             drawnSecondary = secondaryFraction ?? 0
+            drawnTertiary = tertiaryFraction ?? 0
             drawnHasSecondary = secondaryFraction != nil
+            drawnHasTertiary = tertiaryFraction != nil
             drawnPercent = centerPercent
         }
         if animated {
@@ -311,21 +324,28 @@ struct GaugeRingView: View {
     }
 
     private func drawUsageRings(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
-        let stroke: CGFloat = 5.5 * scale
-        // Flush: outer centerline = inner centerline + stroke.
-        let outerR: CGFloat = 31 * scale
-        let innerR: CGFloat = 25 * scale
+        // Triple-ring geometry: outer brand · mid steel · inner amber (scoped).
+        // Slightly tighter stroke when tertiary is present so the core stays readable.
+        let triple = drawnHasTertiary
+        let stroke: CGFloat = (triple ? 4.6 : 5.5) * scale
+        let outerR: CGFloat = (triple ? 32 : 31) * scale
+        let midR: CGFloat = (triple ? 26.5 : 25) * scale
+        let coreR: CGFloat = 21 * scale
         let glowBoost = BurnMotion.brandRingGlowBoost(ratio: drawnBurn)
 
-        // Track underlays.
+        // Track underlays (tertiary uses amber ghost so 0% Fable/Spark still reads).
         strokeRing(context: context, center: center, radius: outerR, fraction: 1,
                    color: Color.white.opacity(0.07), lineWidth: stroke)
         if drawnHasSecondary {
-            strokeRing(context: context, center: center, radius: innerR, fraction: 1,
+            strokeRing(context: context, center: center, radius: midR, fraction: 1,
                        color: Color.white.opacity(0.045), lineWidth: stroke)
         }
+        if drawnHasTertiary {
+            strokeRing(context: context, center: center, radius: coreR, fraction: 1,
+                       color: amber.opacity(0.22), lineWidth: stroke)
+        }
 
-        // Outer brand (primary).
+        // Outer brand (primary — 5h / main window).
         let p = clamped(drawnPrimary)
         if p > 0.0005 {
             var ctx = context
@@ -339,13 +359,21 @@ struct GaugeRingView: View {
                        color: brand, lineWidth: stroke)
         }
 
-        // Inner cool steel (secondary).
+        // Mid cool steel (secondary — weekly).
         if drawnHasSecondary {
             let s = clamped(drawnSecondary)
             if s > 0.0005 {
-                strokeRing(context: context, center: center, radius: innerR, fraction: s,
+                strokeRing(context: context, center: center, radius: midR, fraction: s,
                            color: steel, lineWidth: stroke)
             }
+        }
+
+        // Inner amber (tertiary — Fable / Codex Spark / scoped model).
+        // Always paint at least a hairline so 0–1% usage still registers.
+        if drawnHasTertiary {
+            let t = max(clamped(drawnTertiary), 0.015)
+            strokeRing(context: context, center: center, radius: coreR, fraction: t,
+                       color: amber.opacity(drawnTertiary < 0.02 ? 0.55 : 1), lineWidth: stroke)
         }
     }
 

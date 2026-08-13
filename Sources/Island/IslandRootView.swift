@@ -206,6 +206,7 @@ struct IslandRootView: View {
 
     private var expandedContent: some View {
         let contentW = model.expandedContentWidth
+        let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
         return VStack(spacing: 0) {
             NotchBandChrome(
                 notchWidth: model.notch.width,
@@ -233,7 +234,22 @@ struct IslandRootView: View {
             .padding(.bottom, 12)
             .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.addRailOpen)
         }
-        .frame(width: contentW, height: model.blackHeight, alignment: .top)
+        // Tall enough for hang-below tips; black silhouette is only the top band.
+        .frame(
+            width: contentW,
+            height: model.blackHeight + IslandModel.tooltipHitPad,
+            alignment: .top
+        )
+        // Clip gauges to the island shape horizontally; keep a full-width strip
+        // under the body so tips are not killed (ScrollView used to shove them off-screen).
+        .mask(alignment: .top) {
+            VStack(spacing: 0) {
+                IslandShape(bottomRadius: radius)
+                    .frame(width: contentW, height: model.blackHeight)
+                Rectangle()
+                    .frame(width: contentW, height: IslandModel.tooltipHitPad)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 

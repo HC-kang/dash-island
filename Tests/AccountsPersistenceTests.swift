@@ -63,7 +63,7 @@ enum AccountsPersistenceSuite {
             try assertEqual(loaded.count, 0)
         }
 
-        failures += check("AccountStore rejects add beyond max 5") {
+        failures += check("AccountStore rejects add beyond maxAccounts") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }
             let persistence = AccountsPersistence(

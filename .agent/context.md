@@ -266,3 +266,56 @@ Fixes:
 - Keychain scoped item: login capture once + clear on reauth only (never global `Claude Code-credentials`).
 - Multi-account = separate dirs/files; process-wide refresh gate still serializes token endpoint.
 - Quiet UX: "Reauthenticate this account" (not "open Claude Code" for managed folders).
+
+## Horizontal account scroll (2026-08-09)
+
+- maxAccounts / maxItems = 8; maxVisibleSlots = 5 (island body width).
+- GaugeClusterView: ScrollView when slotCount > 5; edge fades; scroll disabled while drag-reorder.
+- Drag hit-testing uses rowOriginX from GeometryReader in dragSpace.
+
+## Island widgets pierce right edge (2026-08-09)
+
+- **Symptom:** expanded island — gauges shift right, paint past black body.
+- **Cause:** (1) hang-below tips as ZStack children with large `fixedSize` inflated cluster layout width; (2) `expandedWidth` pad (`horizontalPadding=32`) didn't match real chrome (`14` / `4+6` + AddRail).
+- **Fix:** tips via `.overlay` (no layout width); GeometryReader available-width + center-or-scroll + `.clipped()`; `expandedWidth` = lead pad + slots + trail pad + chevron/rail.
+- Tests: `IslandClusterLayout.needsScroll` / `centeredRowOrigin`.
+
+## Island right-shift pierce v2 (2026-08-10)
+
+- User: 6 accounts → needs scroll; widgets still pierced right edge.
+- Root: SwiftUI `ScrollView` ideal width = full 6-cell row → HStack blew past black body.
+- Fix: slot/scroll rows use `Color.clear` fixed frame + `overlay` ScrollView/HStack; `minWidth: 0` on flexible band; AddRail `fixedSize`.
+- Belt: expanded content masked to `IslandShape` + full-width tip strip under body.
+- Domain: `islandBodyWidth` / `slotBandWidth` / `rowWidth` pure helpers + tests (6 accts body == 5-slot viewport).
+
+## Claude probe-first (2026-08-10)
+
+- Live: token hosts both 429; personal access still OK → usage 200; Dev access dead → 401.
+- Fix: `shouldProbeBeforeRefresh` — probe usage first; refresh only on expiry/401.
+- Soft captions: "oauth rate limited" (not fake reauth / 0% rings).
+
+## Tertiary ring: Fable + Codex model limits (2026-08-10)
+
+- Claude `limits[]` weekly_scoped Fable → `tertiary` amber ring (was hover-only extras).
+- Codex `additional_rate_limits` (e.g. GPT-5.3-Codex-Spark → "Spark") → tertiary; `reset_after_seconds` fallback.
+- GaugeRingView: outer brand / mid steel / inner amber when tertiary present.
+- Burn stays primary/secondary only.
+
+## Drag/trash coordinate fix (2026-08-11)
+
+- Bug: layout overflow fix pinned drag canvas to `cellH` → trash `.position(y: cellH+52)` outside named space; magnet + icon misaligned; float jump.
+- Fix: expand canvas by `trashZoneH` while dragging; trash centered in zone; lift from finger `startLocation` / track `drag.location`; clearer dashed drop seat.
+
+## Claude session-expiry port (2026-08-13)
+
+- Codex worktree implemented probe-always + file-only adopt + persist last-good + UserDefaults refresh gate.
+- Ported Swift core onto `feat/v1-implementation` (uncommitted). Tests/docs still only in worker worktree.
+- Rebuilt `build/DashIsland.app` 0.0.1 and relaunched (pid after 10:46).
+- Review notes: adopt only helps if *this* managed file rotates; `canAttemptRefresh` still cuts after 7d stale; vendor Retry-After now uncapped (can quiet >6h).
+
+## File-only Claude auth (2026-08-13)
+
+- User: Keychain is too cumbersome; do not use it here.
+- Claude CLI 2.1.229 on macOS writes login to scoped Keychain only — **no** `.credentials.json`. Pure file capture made Reauth fail (`credentialsMissing`).
+- Harvest-once restored: after Add/Reauth, copy scoped `Claude Code-credentials-<sha8>` into the managed file. Poll/refresh stay file-only.
+- Recovered `9C11FBE9-…` by copying that Keychain item into `.credentials.json` (pro, has refresh).

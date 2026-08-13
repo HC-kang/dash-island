@@ -30,8 +30,15 @@ final class IslandModel: ObservableObject {
 
     static let cellSize: CGFloat = 100
     static let cellGap: CGFloat = 12
-    static let horizontalPadding: CGFloat = 32
-    static let maxItems: Int = 5
+    /// Must match `IslandRootView.expandedContent` horizontal padding.
+    static let contentPadLeading: CGFloat = 14
+    static let contentPadTrailing: CGFloat = 14
+    /// Trailing when add chevron is visible (root pad + AddRail outer pad).
+    static let contentPadTrailingWithAdd: CGFloat = 4 + 6
+    /// Hard cap on stored accounts (scroll when more than `maxVisibleSlots`).
+    static let maxItems: Int = 8
+    /// How many gauges fit in the island body at once; extra accounts scroll horizontally.
+    static let maxVisibleSlots: Int = 5
     static let addChevronWidth: CGFloat = AddRail.chevronWidth
     static let addRailWidth: CGFloat = AddRail.railWidth
 
@@ -125,23 +132,38 @@ final class IslandModel: ObservableObject {
         }
     }
 
-    /// Floor at the 3-slot layout; 4–5 grow. Optional trailing add chrome.
+    /// Floor at 3 slots; body grows through `maxVisibleSlots`, then scrolls inside.
+    /// Width matches real chrome: content pads + slot row + optional add rail.
     static func expandedWidth(
         notchWidth: CGFloat,
         itemCount: Int,
         canAdd: Bool = false,
         addRailOpen: Bool = false
     ) -> CGFloat {
-        let n = min(maxItems, max(3, itemCount))
-        let content =
-            CGFloat(n) * cellSize
-            + CGFloat(n - 1) * cellGap
-            + horizontalPadding
-        let base = max(notchWidth, content)
-        guard canAdd else { return base }
-        // Chevron always when under cap; rail width only when revealed.
-        let trailing = addChevronWidth + (addRailOpen ? addRailWidth : 0)
-        return base + trailing
+        let padTrailing = canAdd ? contentPadTrailingWithAdd : contentPadTrailing
+        let addW = canAdd ? (addChevronWidth + (addRailOpen ? addRailWidth : 0)) : 0
+        return CGFloat(
+            IslandClusterLayout.islandBodyWidth(
+                itemCount: itemCount,
+                maxVisible: maxVisibleSlots,
+                minSlots: 3,
+                cell: Double(cellSize),
+                gap: Double(cellGap),
+                padLeading: Double(contentPadLeading),
+                padTrailing: Double(padTrailing),
+                addChrome: Double(addW),
+                notchWidth: Double(notchWidth)
+            )
+        )
+    }
+
+    /// Row width for `count` cells (no outer padding).
+    static func rowWidth(slotCount: Int) -> CGFloat {
+        CGFloat(IslandClusterLayout.rowWidth(
+            slotCount: slotCount,
+            cell: Double(cellSize),
+            gap: Double(cellGap)
+        ))
     }
 
     static func canvasSize(
@@ -149,9 +171,10 @@ final class IslandModel: ObservableObject {
         dragBleed: CGFloat = 220,
         expandedContentHeight: CGFloat = 136
     ) -> CGSize {
+        // Canvas uses viewport width (max visible), not full scroll content.
         let contentW = expandedWidth(
             notchWidth: notch.width,
-            itemCount: maxItems,
+            itemCount: maxVisibleSlots,
             canAdd: true,
             addRailOpen: true
         )

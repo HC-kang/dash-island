@@ -115,6 +115,8 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     /// Primary ring fraction after display-mode mapping (0...1).
     var primaryFraction: Double
     var secondaryFraction: Double?
+    /// Optional third ring (Fable / Codex model limit / …).
+    var tertiaryFraction: Double? = nil
     /// Raw used fraction 0...1 (never flipped by Remaining mode) — for hot chrome.
     var usedPrimaryFraction: Double
     var centerPercent: Int

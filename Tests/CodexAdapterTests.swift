@@ -49,6 +49,66 @@ enum CodexAdapterSuite {
             try assertEqual(snap.primary.kind, UsageWindowKind.weekly)
             try assertTrue(snap.secondary == nil, "null secondary_window must not become 0% wk")
         }
+        failures += check("additional_rate_limits Spark → tertiary ring + short label") {
+            let json = """
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 4,
+                  "limit_window_seconds": 604800,
+                  "reset_at": 1786838411
+                },
+                "secondary_window": null
+              },
+              "additional_rate_limits": [
+                {
+                  "limit_name": "GPT-5.3-Codex-Spark",
+                  "metered_feature": "codex_bengalfox",
+                  "rate_limit": {
+                    "primary_window": {
+                      "used_percent": 22,
+                      "limit_window_seconds": 604800,
+                      "reset_after_seconds": 3600
+                    }
+                  }
+                }
+              ]
+            }
+            """
+            let fetched = Date(timeIntervalSince1970: 1_700_000_000)
+            let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8), fetchedAt: fetched)
+            try assertEqual(snap.primary.usedFraction, 0.04, accuracy: 0.0001)
+            try assertTrue(snap.secondary == nil)
+            try assertEqual(snap.tertiary?.displayLabel, "Spark")
+            try assertEqual(snap.tertiary?.usedFraction ?? -1, 0.22, accuracy: 0.0001)
+            try assertEqual(
+                snap.tertiary?.resetAt?.timeIntervalSince1970 ?? -1,
+                1_700_000_000 + 3600,
+                accuracy: 0.001
+            )
+            try assertEqual(Double(snap.extras.count), 0, accuracy: 0)
+        }
+        failures += check("reset_after_seconds fallback when reset_at missing") {
+            let fetched = Date(timeIntervalSince1970: 1_000)
+            let json = """
+            {
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 10,
+                  "limit_window_seconds": 604800,
+                  "reset_after_seconds": 120
+                }
+              }
+            }
+            """
+            let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8), fetchedAt: fetched)
+            try assertEqual(
+                snap.primary.resetAt?.timeIntervalSince1970 ?? -1,
+                1_120,
+                accuracy: 0.001
+            )
+        }
         failures += check("used_percent in (0,1] is percent not already-normalized") {
             // 0.5 means 0.5% used → 0.005 fraction (not 50%).
             let json = """

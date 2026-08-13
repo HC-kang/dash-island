@@ -6,6 +6,8 @@ struct AccountWidget: View {
     let model: WidgetViewModel
     var isDragging: Bool = false
     var isDropTarget: Bool = false
+    /// When false, hang-below tips are owned by `GaugeClusterView` (outside ScrollView clip).
+    var embedHangTips: Bool = true
 
     /// Hover on the cell body (usage tooltip below).
     @State private var isHovered = false
@@ -24,7 +26,7 @@ struct AccountWidget: View {
     /// Invisible hit pad so a 6pt dot is actually reachable.
     private static let statusHit: CGFloat = 18
     /// Gap between cell bottom and the top edge of hang-down tips.
-    private static let tipGap: CGFloat = 8
+    static let tipGap: CGFloat = AccountHoverTips.tipGap
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -33,6 +35,7 @@ struct AccountWidget: View {
                     GaugeRingView(
                         primaryFraction: model.primaryFraction,
                         secondaryFraction: model.secondaryFraction,
+                        tertiaryFraction: model.tertiaryFraction,
                         centerPercent: model.centerPercent,
                         burnRatio: model.burnRatio,
                         tint: model.tint,
@@ -89,31 +92,30 @@ struct AccountWidget: View {
         }
         .frame(width: Self.cellSize, height: Self.cellHeight)
         .scaleEffect(isDragging ? 1.06 : 1)
-        // Tips hang **below** the cell (top of tip at cell bottom).
-        // Bottom-aligned overlays grow upward and pierce the notch — never do that.
+        // Hang-below tips (usage / caption) — optional embed for non-scroll hosts.
+        // Inside ScrollView they are clipped; cluster draws them outside instead.
         .overlay(alignment: .top) {
-            if isHovered, !statusHovered, !captionHovered, !model.hoverWindows.isEmpty {
-                usageTooltip
-                    .fixedSize()
+            if embedHangTips,
+               isHovered, !statusHovered, !captionHovered, !model.hoverWindows.isEmpty
+            {
+                AccountHoverTips.usageCard(model: model)
                     .offset(y: Self.cellHeight + Self.tipGap)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .allowsHitTesting(false)
             }
         }
-        // Warning/notice detail — only while the caption line is hovered.
-        // Must not inherit the cell's ~100pt width proposal (that forced the
-        // skinny column wrap). Size like the status tip: content-driven, wide.
         .overlay(alignment: .top) {
-            if captionHovered, !statusHovered, captionDetailBody != nil || hasCaptionTiming {
-                captionTooltip(isError: model.errorCaption != nil)
-                    .fixedSize(horizontal: true, vertical: true)
+            if embedHangTips,
+               captionHovered, !statusHovered, captionDetailBody != nil || hasCaptionTiming
+            {
+                AccountHoverTips.captionCard(model: model)
                     .offset(y: Self.cellHeight + Self.tipGap)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                     .allowsHitTesting(false)
                     .zIndex(25)
             }
         }
-        // Status tip *below* the chip — upward tips get clipped by the hardware notch.
+        // Status tip stays in-cell (near chip) — short enough not to need hoist.
         .overlay(alignment: .topTrailing) {
             if statusHovered {
                 statusTooltip
@@ -123,11 +125,22 @@ struct AccountWidget: View {
                     .zIndex(30)
             }
         }
-        // Elevate this *slot* in GaugeClusterView’s HStack (sibling zIndex only
-        // works between slots — an inner zIndex cannot paint over later widgets).
+        // Cluster reads this to elevate zIndex + draw hang tips outside ScrollView.
+        // Only publish when active so reduce can clear when all widgets go idle
+        // (see WidgetHoverElevatePreference).
         .preference(
             key: WidgetHoverElevatePreference.self,
-            value: (isHovered || statusHovered || captionHovered) ? model.id : nil
+            value: {
+                let chrome = WidgetHoverChrome(
+                    accountID: model.id,
+                    showUsage: isHovered && !statusHovered && !captionHovered
+                        && !model.hoverWindows.isEmpty,
+                    showCaption: captionHovered && !statusHovered
+                        && (captionDetailBody != nil || hasCaptionTiming),
+                    showStatus: statusHovered
+                )
+                return chrome.isActive ? [chrome] : []
+            }()
         )
         .contextMenu {
             managedContextMenu
@@ -346,105 +359,6 @@ struct AccountWidget: View {
         }
     }
 
-    /// Preferred reading width for multi-line warning tips (status chip uses
-    /// single-line `fixedSize()`; long auth/rate-limit copy needs a card width).
-    private static let captionTipWidth: CGFloat = 268
-
-    private func captionTooltip(isError: Bool) -> some View {
-        // Explicit width so overlay does not clamp to the 100pt cell proposal.
-        // TimelineView keeps “checked / retry in” fresh while the tip is open.
-        TimelineView(.periodic(from: .now, by: 15)) { context in
-            let body = captionDetailBody ?? ""
-            let timing = UsageOrchestrator.formatErrorTimingLines(
-                lastCheckedAt: model.lastCheckedAt,
-                lastSuccessAt: model.lastSuccessAt,
-                retryAt: model.retryAt,
-                now: context.date
-            )
-            VStack(alignment: .leading, spacing: 6) {
-                if !body.isEmpty {
-                    Text(body)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(
-                            isError
-                                ? Color(red: 0.98, green: 0.62, blue: 0.55)
-                                : Color(red: 0.95, green: 0.82, blue: 0.45)
-                        )
-                        .multilineTextAlignment(.leading)
-                        .lineSpacing(2)
-                }
-                if !timing.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(timing.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                .foregroundStyle(Color(white: 0.72))
-                        }
-                    }
-                }
-            }
-            .frame(width: Self.captionTipWidth, alignment: .leading)
-            .fixedSize(horizontal: true, vertical: true)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
-            )
-            .overlay(alignment: .top) {
-                Triangle()
-                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-                    .frame(width: 10, height: 5)
-                    .offset(y: -5)
-            }
-        }
-    }
-
-    /// Usage windows only — burn is the red needle, not a debug caption.
-    private var usageTooltip: some View {
-        TimelineView(.periodic(from: .now, by: 15)) { context in
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(model.hoverWindows.enumerated()), id: \.offset) { _, row in
-                    Text(Self.formatHoverRow(row, now: context.date))
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.90))
-                }
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
-            )
-            .overlay(alignment: .top) {
-                Triangle()
-                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-                    .frame(width: 10, height: 5)
-                    .offset(y: -5)
-            }
-        }
-    }
-
-    /// `wk  12%  ·  1d 5h` when reset is known.
-    private static func formatHoverRow(_ row: HoverWindowLine, now: Date) -> String {
-        if let resetAt = row.resetAt,
-           let reset = UsageOrchestrator.formatResetRemaining(until: resetAt, now: now)
-        {
-            return "\(row.label)  \(row.usage)  ·  \(reset)"
-        }
-        return "\(row.label)  \(row.usage)"
-    }
-
     private var accessibilitySummary: String {
         var parts = ["\(model.title), \(model.centerPercent) percent"]
         if let caption = model.errorCaption, !caption.isEmpty {
@@ -455,25 +369,12 @@ struct AccountWidget: View {
     }
 }
 
-/// Simple upward-pointing caret for tooltip.
-private struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        p.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        p.closeSubpath()
-        return p
-    }
-}
-
-/// Hovering a widget tip must raise its **slot** above later HStack siblings.
+/// Hover chrome for cluster: elevate slot + hoist hang-below tips out of ScrollView.
+/// Accumulates active chrome from all cells; empty when nothing is hovered.
 enum WidgetHoverElevatePreference: PreferenceKey {
-    static var defaultValue: AccountID? { nil }
+    static var defaultValue: [WidgetHoverChrome] { [] }
 
-    static func reduce(value: inout AccountID?, nextValue: () -> AccountID?) {
-        if let next = nextValue() {
-            value = next
-        }
+    static func reduce(value: inout [WidgetHoverChrome], nextValue: () -> [WidgetHoverChrome]) {
+        value.append(contentsOf: nextValue())
     }
 }

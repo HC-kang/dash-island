@@ -2,7 +2,7 @@ import Combine
 import Foundation
 
 enum AccountStoreError: Error, Equatable {
-    /// Cap is 5 accounts (one widget each).
+    /// Cap is `maxAccounts` (island shows `maxVisibleSlots` at once, rest scroll).
     case maxAccountsReached
 }
 
@@ -14,7 +14,8 @@ enum AccountStoreError: Error, Equatable {
 @MainActor
 final class AccountStore: ObservableObject {
     static let shared = AccountStore()
-    static let maxAccounts = 5
+    /// Keep in lockstep with `IslandModel.maxItems` (8; viewport scrolls past 5).
+    static let maxAccounts = 8
 
     @Published private(set) var accounts: [Account] = []
 

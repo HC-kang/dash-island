@@ -195,7 +195,7 @@ protocol VendorAdapter: Sendable {
 - Add: `adapter.beginAdd()` writes isolated folder → `AccountStore` appends metadata.
 - Remove: delete folder + metadata row.
 - **Claude (and similar):** do **not** call OAuth refresh from this app; read credentials only (codex-island lesson: dual refresh invalidates CLI login).
-- Keychain only when an adapter truly needs a secret blob; default is CLI-compatible files on disk.
+- Credentials are CLI-compatible files on disk. The app never reads or writes macOS Keychain.
 
 ### 3.5 Preferences
 

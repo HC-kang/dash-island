@@ -97,7 +97,7 @@ cp -R build/DashIsland.app /Applications/
 | Browser OAuth: `claude auth login --claudeai` (with managed `CLAUDE_CONFIG_DIR`) | **Yes** — needs `user:profile` for `/api/oauth/usage` |
 | `claude setup-token` (long-lived, model-only) | **No** — Anthropic returns 403 missing scope |
 
-If access expires, the app prefers a long **token quiet** period (last-good rings stay) over hammering OAuth refresh (which often returns **429**). Use **Reauthenticate** (browser login) for that account — not setup-token. Each Claude account stores credentials only in its own managed folder (multi-account safe; no steady-state Keychain).
+If access expires, the app prefers a long **token quiet** period (last-good rings stay) over hammering OAuth refresh (which often returns **429**). Use **Reauthenticate** (browser login) for that account — not setup-token. Each Claude account stores credentials in its own managed folder. Claude CLI on macOS writes login tokens to Keychain only; Dash copies that item into the folder once after Add/Reauth, then polls the file.
 
 Codex and Grok use their own managed OAuth/session refresh where supported.
 

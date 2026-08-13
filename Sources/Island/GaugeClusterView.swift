@@ -25,10 +25,19 @@ struct GaugeClusterView: View {
     @State private var gapSlot: Int?
     @State private var magnetizedToTrash = false
     @State private var clusterSize: CGSize = .zero
-    /// Slot whose tooltip is open — must outrank later HStack siblings.
-    @State private var elevatedWidgetID: AccountID?
+    /// Live width of the drag overlay (slot band). Used for trash centering.
+    @State private var bandWidth: CGFloat = 0
+    /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
+    @State private var elevatedChrome: WidgetHoverChrome?
+    /// Half-height of the floating tip for correct `position` anchoring.
+    @State private var floatingTipHalfHeight: CGFloat = 28
+    /// Leading edge of the slot row in `dragSpace` (tracks scroll).
+    @State private var rowOriginX: CGFloat = 0
+    /// Viewport width of the scroll/clip region.
+    @State private var viewportWidth: CGFloat = 0
 
     private static let maxSlots = IslandModel.maxItems
+    private static let maxVisible = IslandModel.maxVisibleSlots
     private static let minSlots = 3
     private static let gap: CGFloat = IslandModel.cellGap
     private static let trashMagnetEnter: CGFloat = 72
@@ -37,13 +46,29 @@ struct GaugeClusterView: View {
     private static let cell = AccountWidget.cellSize
     private static let cellH = AccountWidget.cellHeight
     private static let trashSize: CGFloat = 44
-    private static let trashOffsetY: CGFloat = 52
-    /// Short press keeps context-menu / click free; then drag to reorder.
-    private static let dragLongPress: Double = 0.18
+    /// Vertical band under the slot row reserved for the trash magnet while dragging.
+    /// Must be included in the named coordinate space or `.position` lands off-canvas.
+    private static let trashZoneH: CGFloat = 88
+    /// Soft edge fade when content overflows the viewport.
+    private static let edgeFadeWidth: CGFloat = 22
+    /// Ignore tiny pointer jitter so click / context menu still work; past this, reorder.
+    private static let dragMinDistance: CGFloat = 6
 
     private var slotCount: Int {
         let filled = max(baseOrder.count, widgets.count)
         return max(Self.minSlots, min(Self.maxSlots, filled))
+    }
+
+    private var needsHorizontalScroll: Bool {
+        slotCount > Self.maxVisible
+    }
+
+    private var contentRowWidth: CGFloat {
+        IslandModel.rowWidth(slotCount: slotCount)
+    }
+
+    private var viewportRowWidth: CGFloat {
+        IslandModel.rowWidth(slotCount: min(slotCount, Self.maxVisible))
     }
 
     private var modelByID: [AccountID: WidgetViewModel] {
@@ -71,9 +96,12 @@ struct GaugeClusterView: View {
         return map
     }
 
+    /// Horizontal center of the slot band (not the whole island — AddRail is outside).
+    /// Prefer live `bandWidth` from the drag overlay GeometryReader; never the
+    /// stale 300pt fallback that parked the trash under the 2nd widget.
     private var trashCenterLocal: CGPoint {
-        let w = clusterSize.width > 1 ? clusterSize.width : 300
-        return CGPoint(x: w / 2, y: Self.cellH + Self.trashOffsetY)
+        let w = bandWidth > 1 ? bandWidth : (clusterSize.width > 1 ? clusterSize.width : 400)
+        return CGPoint(x: w * 0.5, y: Self.cellH + Self.trashZoneH * 0.42)
     }
 
     private var floatCenter: CGPoint {
@@ -85,6 +113,12 @@ struct GaugeClusterView: View {
     }
 
     var body: some View {
+        // Width is always the parent proposal — never the ideal width of 6–8
+        // gauge cells (ScrollView must not blow the island out).
+        // Height stays `cellH` always — never expand on drag (that hung the UI).
+        //
+        // CRITICAL: while dragging, do not remove AddRail, close the rail, or
+        // animate island width. Those layout storms froze the whole app.
         HStack(spacing: 0) {
             ZStack(alignment: .top) {
                 slotRow
@@ -94,25 +128,9 @@ struct GaugeClusterView: View {
                         AccountChromeActions.beginAdd(adapter: adapter)
                     }
                 }
-
-                if draggingID != nil {
-                    trashTarget
-                        .position(trashCenterLocal)
-                        .zIndex(50)
-                }
-
-                if let id = draggingID, let model = modelByID[id] {
-                    AccountWidget(model: model, isDragging: true, isDropTarget: false)
-                        .scaleEffect(magnetizedToTrash ? 0.68 : 1.07)
-                        .opacity(magnetizedToTrash ? 0.9 : 1)
-                        .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
-                        .position(floatCenter)
-                        .zIndex(100)
-                        .allowsHitTesting(false)
-                        .animation(.spring(response: 0.26, dampingFraction: 0.72), value: magnetizedToTrash)
-                }
             }
-            .frame(maxWidth: .infinity)
+            // Flexible band: eats remaining width after AddRail, never grows past it.
+            .frame(minWidth: 0, maxWidth: .infinity)
             .frame(height: Self.cellH, alignment: .top)
             .coordinateSpace(name: Self.dragSpace)
             .background(
@@ -120,29 +138,123 @@ struct GaugeClusterView: View {
                     Color.clear.preference(key: ClusterSizeKey.self, value: geo.size)
                 }
             )
-            .onPreferenceChange(ClusterSizeKey.self) { clusterSize = $0 }
+            .onPreferenceChange(ClusterSizeKey.self) { next in
+                // Freeze geometry writes mid-drag (preference storms hang main).
+                guard draggingID == nil else { return }
+                if abs(next.width - clusterSize.width) > 0.5 || clusterSize.width < 1 {
+                    clusterSize = CGSize(width: next.width, height: Self.cellH)
+                }
+            }
+            // Trash + lightweight float (not full AccountWidget / TimelineView).
+            // GeometryReader gives the true band width so trash is centered —
+            // frozen clusterSize (or 300 fallback) was parking it under widget #2.
+            .overlay(alignment: .top) {
+                GeometryReader { geo in
+                    let midX = geo.size.width * 0.5
+                    let trashY = Self.cellH + Self.trashZoneH * 0.42
+                    let trashPt = CGPoint(x: midX, y: trashY)
+                    ZStack(alignment: .top) {
+                        if draggingID != nil {
+                            trashTarget
+                                .position(trashPt)
+                                .zIndex(50)
+                        }
+                        if let id = draggingID, let model = modelByID[id] {
+                            dragFloatCard(model: model)
+                                .scaleEffect(magnetizedToTrash ? 0.68 : 1.06)
+                                .opacity(magnetizedToTrash ? 0.9 : 1)
+                                .shadow(color: .black.opacity(0.45), radius: 14, y: 7)
+                                .position(
+                                    magnetizedToTrash
+                                        ? trashPt
+                                        : CGPoint(
+                                            x: liftOrigin.x + dragTranslation.width,
+                                            y: liftOrigin.y + dragTranslation.height
+                                        )
+                                )
+                                .zIndex(100)
+                        }
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                    .onAppear {
+                        if abs(geo.size.width - bandWidth) > 0.5 {
+                            bandWidth = geo.size.width
+                        }
+                    }
+                    .onChange(of: geo.size.width) { w in
+                        if abs(w - bandWidth) > 0.5 { bandWidth = w }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: Self.cellH + Self.trashZoneH, alignment: .top)
+                .allowsHitTesting(false)
+            }
+            // Tips: never hit-test (full-size frame was eating drag gestures).
+            .overlay(alignment: .top) {
+                floatingHangTips
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
+            }
 
-            if showAdd && draggingID == nil {
+            // Keep AddRail *mounted* while dragging so HStack width is stable.
+            // Only hide visually — removing it resized the slot band and hung layout.
+            if showAdd {
                 AddRail(
                     onSelectVendor: { AccountChromeActions.beginAdd(adapter: $0) },
                     onExpandedChange: { onAddRailExpandedChange?($0) }
                 )
                 .padding(.trailing, 6)
+                .fixedSize(horizontal: true, vertical: false)
+                .opacity(draggingID == nil ? 1 : 0)
+                .allowsHitTesting(draggingID == nil)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)
         .frame(height: Self.cellH, alignment: .top)
+        .transaction { txn in
+            // Never inherit island width springs into the cluster mid-drag.
+            if draggingID != nil { txn.animation = nil }
+        }
         .onAppear { syncFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
             guard draggingID == nil else { return }
             baseOrder = ids
         }
         .onChange(of: draggingID) { id in
+            // Mouse passthrough only — do NOT close add rail / resize island here.
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
-            if id != nil { onAddRailExpandedChange?(false) }
+            if id != nil {
+                elevatedChrome = nil
+            }
         }
         .onChange(of: showAdd) { can in
             if !can { onAddRailExpandedChange?(false) }
         }
+    }
+
+    /// Cheap float: no TimelineView / hover prefs / context menus.
+    private func dragFloatCard(model: WidgetViewModel) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(white: 0.07))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+            // Static rings only — burn motion TimelineView was part of the freeze cost.
+            GaugeRingView(
+                primaryFraction: model.primaryFraction,
+                secondaryFraction: model.secondaryFraction,
+                tertiaryFraction: model.tertiaryFraction,
+                centerPercent: model.centerPercent,
+                burnRatio: 0,
+                tint: model.tint,
+                size: 80,
+                phaseOffset: 0
+            )
+            .offset(y: -6)
+        }
+        .frame(width: Self.cell, height: Self.cellH)
     }
 
     private func syncFromWidgets() {
@@ -152,15 +264,184 @@ struct GaugeClusterView: View {
     // MARK: - Slots
 
     private var slotRow: some View {
-        HStack(spacing: Self.gap) {
-            ForEach(0..<slotCount, id: \.self) { index in
-                slotCell(index: index)
+        // Layout size comes only from the parent band (GeometryReader proposal).
+        // Scroll content ideal width must never enlarge this.
+        GeometryReader { geo in
+            let available = max(0, geo.size.width)
+            let contentW = contentRowWidth
+            let scroll = IslandClusterLayout.needsScroll(
+                contentWidth: Double(contentW),
+                availableWidth: Double(available)
+            )
+
+            Group {
+                if scroll {
+                    scrollableSlotRow(availableWidth: available)
+                } else {
+                    centeredSlotRow(availableWidth: available)
+                }
+            }
+            .frame(width: available, height: Self.cellH, alignment: .center)
+            // Hard clip: widgets must not puncture the black island horizontally.
+            .clipped()
+            .onAppear { viewportWidth = available }
+            .onChange(of: available) { w in
+                guard draggingID == nil else { return }
+                if abs(w - viewportWidth) > 0.5 { viewportWidth = w }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: gapSlot)
-        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.84), value: magnetizedToTrash)
-        .onPreferenceChange(WidgetHoverElevatePreference.self) { elevatedWidgetID = $0 }
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .frame(height: Self.cellH)
+        // Implicit animations on the whole GeometryReader during drag = layout hang.
+        // Neighbors still slide via `offset` without wrapping the reader.
+        .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
+            guard draggingID == nil else { return }
+            elevatedChrome = list.first(where: \.isActive)
+        }
+    }
+
+    /// Usage / caption tips drawn in an overlay so they never affect row layout width.
+    @ViewBuilder
+    private var floatingHangTips: some View {
+        if draggingID == nil,
+           let chrome = elevatedChrome,
+           chrome.showUsage || chrome.showCaption,
+           let model = modelByID[chrome.accountID],
+           let index = baseOrder.firstIndex(of: chrome.accountID)
+        {
+            let center = slotCenter(index: index)
+            let tipTop = CGFloat(
+                IslandClusterLayout.hangTipTopY(
+                    cellHeight: Double(Self.cellH),
+                    tipGap: Double(AccountWidget.tipGap)
+                )
+            )
+            Group {
+                if chrome.showUsage {
+                    AccountHoverTips.usageCard(model: model)
+                } else if chrome.showCaption {
+                    AccountHoverTips.captionCard(model: model)
+                }
+            }
+            .fixedSize()
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: FloatingTipSizeKey.self, value: geo.size)
+                }
+            )
+            .position(x: center.x, y: tipTop + floatingTipHalfHeight)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+            .onPreferenceChange(FloatingTipSizeKey.self) { size in
+                if size.height > 1 {
+                    floatingTipHalfHeight = size.height / 2
+                }
+            }
+        }
+    }
+
+    /// Content fits: pin intrinsic row width and center in the available band.
+    private func centeredSlotRow(availableWidth: CGFloat) -> some View {
+        // Clear anchors layout size; row is drawn centered inside and cannot expand parent.
+        Color.clear
+            .frame(width: availableWidth, height: Self.cellH)
+            .overlay {
+                HStack(spacing: Self.gap) {
+                    ForEach(0..<slotCount, id: \.self) { index in
+                        slotCell(index: index)
+                    }
+                }
+                .background(rowGeometryProbe)
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .clipped()
+    }
+
+    /// Content wider than the island: scroll inside a fixed-size band.
+    ///
+    /// Critical: layout size is `Color.clear` only. Putting `ScrollView` in the
+    /// primary layout tree lets its content ideal width (6–8 cells) blow the
+    /// island open and shove gauges past the black body to the right.
+    private func scrollableSlotRow(availableWidth: CGFloat) -> some View {
+        Color.clear
+            .frame(width: availableWidth, height: Self.cellH)
+            .overlay(alignment: .topLeading) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Self.gap) {
+                        ForEach(0..<slotCount, id: \.self) { index in
+                            slotCell(index: index)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .background(rowGeometryProbe)
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                // Do not .disabled mid-drag — toggling ScrollView rebuilds layout and hung the UI.
+                .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
+            }
+            .overlay {
+                scrollEdgeFades(availableWidth: availableWidth)
+            }
+            .clipped()
+    }
+
+    /// Tracks the slot row’s leading edge in drag space (scroll + center).
+    private var rowGeometryProbe: some View {
+        GeometryReader { geo in
+            let frame = geo.frame(in: .named(Self.dragSpace))
+            Color.clear
+                .preference(
+                    key: SlotRowFrameKey.self,
+                    value: CGRect(
+                        x: frame.minX,
+                        y: frame.minY,
+                        width: frame.width,
+                        height: frame.height
+                    )
+                )
+        }
+        .onPreferenceChange(SlotRowFrameKey.self) { rect in
+            // Freeze mid-drag — scroll/center probes during gesture hung the UI.
+            guard draggingID == nil else { return }
+            guard rect.width > 1 else { return }
+            if abs(rect.minX - rowOriginX) > 0.5 {
+                rowOriginX = rect.minX
+            }
+        }
+    }
+
+    /// Soft black edge fades when more content exists past that edge.
+    @ViewBuilder
+    private func scrollEdgeFades(availableWidth: CGFloat) -> some View {
+        let pad: CGFloat = 4
+        let rowW = contentRowWidth + pad
+        let origin = rowOriginX
+        let showLeading = origin < -1
+        let showTrailing = origin + rowW > availableWidth + 1
+
+        HStack(spacing: 0) {
+            LinearGradient(
+                colors: [Color.black.opacity(showLeading ? 0.9 : 0), Color.black.opacity(0)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: Self.edgeFadeWidth)
+            .opacity(showLeading ? 1 : 0)
+
+            Spacer(minLength: 0)
+
+            LinearGradient(
+                colors: [Color.black.opacity(0), Color.black.opacity(showTrailing ? 0.9 : 0)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: Self.edgeFadeWidth)
+            .opacity(showTrailing ? 1 : 0)
+        }
+        .frame(width: availableWidth, height: Self.cellH)
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.16), value: showLeading)
+        .animation(.easeOut(duration: 0.16), value: showTrailing)
     }
 
     @ViewBuilder
@@ -170,17 +451,25 @@ struct GaugeClusterView: View {
         let isDragHome = homeSlot == index && draggingID != nil
         // Push offset: slide this cell's widget toward its visual seat (gap layout).
         let pushX = pushOffsetX(baseIndex: index)
-        let isElevated = baseID != nil && baseID == elevatedWidgetID
+        let isElevated = baseID != nil && baseID == isElevatedAccount
 
-        ZStack {
+        let cell = ZStack {
             SlotSkeleton(
                 highlighted: isGap,
                 empty: baseID == nil || isDragHome || (isGap && baseID == nil)
             )
 
             if isGap {
+                // Drop preview: dashed seat + soft fill so the landing slot is obvious.
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.45), lineWidth: 1.6)
+                    .fill(Color.white.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(
+                                Color.white.opacity(0.72),
+                                style: StrokeStyle(lineWidth: 1.8, dash: [5, 4])
+                            )
+                    )
                     .padding(1)
                     .allowsHitTesting(false)
             }
@@ -192,19 +481,31 @@ struct GaugeClusterView: View {
                 AccountWidget(
                     model: model,
                     isDragging: false,
-                    isDropTarget: false
+                    isDropTarget: isGap && !isDragged,
+                    // Cluster owns hang-below tips (ScrollView would clip them).
+                    embedHangTips: false
                 )
                 .opacity(isDragged ? 0.001 : 1)
                 .offset(x: isDragged ? 0 : pushX)
-                // simultaneous + long-press: right-click / menus still work.
-                .simultaneousGesture(allowsEditing ? reorderGesture(for: oid, slotIndex: index) : nil)
+                .animation(
+                    draggingID == nil
+                        ? nil
+                        : .interactiveSpring(response: 0.28, dampingFraction: 0.84),
+                    value: pushX
+                )
             }
         }
         .frame(width: Self.cell, height: Self.cellH)
-        // Sibling order in the HStack paints later slots on top — raise the
-        // whole cell when its tip is open so tooltips cover neighbors.
-        .zIndex(slotZIndex(isElevated: isElevated, isDragHome: isDragHome, index: index))
-        // No clip — pushed neighbors may paint into adjacent cell bounds.
+        .contentShape(Rectangle())
+
+        // Cell-level drag (not on AccountWidget): tip overlay was swallowing
+        // gestures. Plain DragGesture + min distance keeps menus/clicks usable.
+        if allowsEditing, let oid = baseID {
+            cell.gesture(reorderGesture(for: oid, slotIndex: index))
+                .zIndex(slotZIndex(isElevated: isElevated, isDragHome: isDragHome, index: index))
+        } else {
+            cell.zIndex(slotZIndex(isElevated: isElevated, isDragHome: isDragHome, index: index))
+        }
     }
 
     /// Hovered tip > drag-home ghost > natural left-to-right stack.
@@ -212,6 +513,10 @@ struct GaugeClusterView: View {
         if isElevated { return 80 }
         if isDragHome { return 2 }
         return Double(index)
+    }
+
+    private var isElevatedAccount: AccountID? {
+        elevatedChrome?.isActive == true ? elevatedChrome?.accountID : nil
     }
 
     /// Horizontal shift so the widget lands in its gap-packed visual slot.
@@ -229,73 +534,74 @@ struct GaugeClusterView: View {
     private var trashTarget: some View {
         ZStack {
             Circle()
-                .fill(Color.red.opacity(magnetizedToTrash ? 0.6 : 0.32))
+                .fill(Color.red.opacity(magnetizedToTrash ? 0.62 : 0.28))
                 .frame(
-                    width: magnetizedToTrash ? 52 : Self.trashSize,
-                    height: magnetizedToTrash ? 52 : Self.trashSize
+                    width: magnetizedToTrash ? 54 : Self.trashSize,
+                    height: magnetizedToTrash ? 54 : Self.trashSize
+                )
+            // Soft ring so the magnet reads even over dark bleed.
+            Circle()
+                .strokeBorder(Color.white.opacity(magnetizedToTrash ? 0.35 : 0.14), lineWidth: 1.2)
+                .frame(
+                    width: magnetizedToTrash ? 54 : Self.trashSize,
+                    height: magnetizedToTrash ? 54 : Self.trashSize
                 )
             Image(systemName: magnetizedToTrash ? "trash.fill" : "trash")
                 .font(.system(size: magnetizedToTrash ? 20 : 16, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
         }
-        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.5 : 0.22), radius: magnetizedToTrash ? 14 : 7)
+        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.55 : 0.28), radius: magnetizedToTrash ? 14 : 8)
         .allowsHitTesting(false)
         .accessibilityLabel("Remove account")
     }
 
-    // MARK: - Drag (long-press then pan — does not steal right-click / menus)
+    // MARK: - Drag (plain DragGesture — right-click context menu stays separate)
 
     private func reorderGesture(for id: AccountID, slotIndex: Int) -> some Gesture {
-        LongPressGesture(minimumDuration: Self.dragLongPress)
-            .sequenced(before: DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.dragSpace)))
-            .onChanged { value in
-                switch value {
-                case .first(true):
-                    // Armed — wait for drag.
-                    break
-                case .second(true, let drag?):
-                    if draggingID == nil {
-                        beginDrag(id: id, slotIndex: slotIndex)
-                    }
-                    guard draggingID == id else { return }
-                    applyDrag(drag)
-                default:
-                    break
+        DragGesture(minimumDistance: Self.dragMinDistance, coordinateSpace: .named(Self.dragSpace))
+            .onChanged { drag in
+                if draggingID == nil {
+                    beginDrag(id: id, slotIndex: slotIndex, start: drag.startLocation)
                 }
+                guard draggingID == id else { return }
+                applyDrag(drag)
             }
-            .onEnded { value in
-                switch value {
-                case .second(true, let drag?):
-                    guard draggingID == id else { return }
-                    endDrag(id: id, drag: drag)
-                default:
-                    // Long-press cancelled / no drag — leave order alone.
-                    if draggingID == id {
-                        cancelDrag()
-                    }
-                }
+            .onEnded { drag in
+                guard draggingID == id else { return }
+                endDrag(id: id, drag: drag)
             }
     }
 
-    private func beginDrag(id: AccountID, slotIndex: Int) {
+    private func beginDrag(id: AccountID, slotIndex: Int, start: CGPoint) {
         if baseOrder.isEmpty { syncFromWidgets() }
-        draggingID = id
-        homeSlot = baseOrder.firstIndex(of: id) ?? slotIndex
-        gapSlot = homeSlot
-        liftOrigin = slotCenter(index: homeSlot ?? slotIndex)
-        dragTranslation = .zero
-        magnetizedToTrash = false
-        // Key window so drop + trash feel responsive.
-        NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+        // Prefer live overlay band width for trash magnet; fall back to cluster.
+        if bandWidth < 1, clusterSize.width > 1 {
+            bandWidth = clusterSize.width
+        }
+        // No island resize / no NSApp.activate here — both caused main-thread freezes.
+        var txn = Transaction()
+        txn.disablesAnimations = true
+        withTransaction(txn) {
+            draggingID = id
+            homeSlot = baseOrder.firstIndex(of: id) ?? slotIndex
+            gapSlot = homeSlot
+            liftOrigin = start
+            dragTranslation = .zero
+            magnetizedToTrash = false
+            elevatedChrome = nil
+        }
     }
 
     private func applyDrag(_ drag: DragGesture.Value) {
+        // Translation-only: stable if layout height never changes mid-gesture.
         dragTranslation = drag.translation
         let finger = CGPoint(
             x: liftOrigin.x + drag.translation.width,
             y: liftOrigin.y + drag.translation.height
         )
         updateTrashMagnet(finger: finger)
+        // No withAnimation here — slotRow already springs on `gapSlot`.
+        // Animating every mouse-move + preference updates hung the main thread.
         if magnetizedToTrash {
             if gapSlot != homeSlot { gapSlot = homeSlot }
         } else if let slot = slotIndexAt(localX: finger.x), gapSlot != slot {
@@ -348,11 +654,10 @@ struct GaugeClusterView: View {
     }
 
     private func slotCenter(index: Int) -> CGPoint {
-        let n = slotCount
         let stride = Self.cell + Self.gap
-        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
-        let w = clusterSize.width > 1 ? clusterSize.width : rowW
-        let leading = (w - rowW) / 2
+        // `rowOriginX` is the live leading edge of the slot row in drag space
+        // (centered when ≤5, scroll-offset when >5).
+        let leading = rowOriginX
         return CGPoint(
             x: leading + CGFloat(index) * stride + Self.cell / 2,
             y: Self.cellH / 2
@@ -363,10 +668,9 @@ struct GaugeClusterView: View {
         let n = slotCount
         guard n > 0 else { return nil }
         let stride = Self.cell + Self.gap
-        let rowW = CGFloat(n) * Self.cell + CGFloat(max(0, n - 1)) * Self.gap
-        let w = clusterSize.width > 1 ? clusterSize.width : rowW
-        let leading = (w - rowW) / 2
+        let leading = rowOriginX
         let localX = x - leading
+        let rowW = contentRowWidth
         guard localX >= -Self.cell * 0.5, localX <= rowW + Self.cell * 0.5 else { return nil }
         var index = Int(floor(localX / stride))
         index = min(max(0, index), n - 1)
@@ -456,6 +760,17 @@ private struct ClusterSizeKey: PreferenceKey {
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
+/// Live frame of the slot HStack in drag space (scroll + center).
+private struct SlotRowFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+private struct FloatingTipSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+}
+
 extension Notification.Name {
     static let dashIslandDragActive = Notification.Name("dashIslandDragActive")
 }
@@ -476,15 +791,44 @@ enum DemoWidgets {
     static var count: Int {
         if let raw = ProcessInfo.processInfo.environment["DASHISLAND_DEMO_COUNT"],
            let n = Int(raw),
-           [1, 3, 5].contains(n) {
+           (1...IslandModel.maxItems).contains(n) {
             return n
         }
         return 3
     }
 
     static func make(count: Int? = nil) -> [WidgetViewModel] {
-        let n = min(5, max(1, count ?? Self.count))
-        return Array(samples.prefix(n))
+        let n = min(IslandModel.maxItems, max(1, count ?? Self.count))
+        let base = samples
+        if n <= base.count { return Array(base.prefix(n)) }
+        // Extend demo pool for scroll testing (stable UUIDs).
+        var out = base
+        var i = base.count
+        while out.count < n {
+            i += 1
+            let id = UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", i))!
+            out.append(
+                WidgetViewModel(
+                    id: id,
+                    title: "demo \(i)",
+                    vendorID: "fake",
+                    tint: .neutral,
+                    primaryFraction: Double((i * 17) % 80) / 100,
+                    secondaryFraction: nil,
+                    usedPrimaryFraction: Double((i * 17) % 80) / 100,
+                    centerPercent: (i * 17) % 80,
+                    burnRatio: 0,
+                    hoverWindows: [
+                        HoverWindowLine(label: "5h", usage: "demo", resetAt: nil)
+                    ],
+                    errorCaption: nil,
+                    isAwaitingFirstSample: false,
+                    health: .ok,
+                    healthTooltip: "ok"
+                )
+            )
+        }
+        return out
     }
 
     private static let samples: [WidgetViewModel] = [
@@ -495,12 +839,14 @@ enum DemoWidgets {
             tint: .claude,
             primaryFraction: 0.18,
             secondaryFraction: 0.12,
+            tertiaryFraction: 0.38,
             usedPrimaryFraction: 0.18,
             centerPercent: 18,
             burnRatio: 0.0,
             hoverWindows: [
                 HoverWindowLine(label: "5h", usage: "1.8k / 10k", resetAt: Date().addingTimeInterval(4 * 3600)),
-                HoverWindowLine(label: "wk", usage: "12k / 100k", resetAt: Date().addingTimeInterval(3 * 86_400))
+                HoverWindowLine(label: "wk", usage: "12k / 100k", resetAt: Date().addingTimeInterval(3 * 86_400)),
+                HoverWindowLine(label: "Fable", usage: "38%", resetAt: Date().addingTimeInterval(2 * 86_400))
             ],
             errorCaption: nil,
             isAwaitingFirstSample: false,
@@ -513,12 +859,14 @@ enum DemoWidgets {
             vendorID: "codex",
             tint: .codex,
             primaryFraction: 0.41,
-            secondaryFraction: 0.55,
+            secondaryFraction: nil,
+            tertiaryFraction: 0.22,
             usedPrimaryFraction: 0.41,
             centerPercent: 41,
             burnRatio: 1.0,
             hoverWindows: [
-                HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(5 * 86_400 + 12 * 3600))
+                HoverWindowLine(label: "wk", usage: "41%", resetAt: Date().addingTimeInterval(5 * 86_400 + 12 * 3600)),
+                HoverWindowLine(label: "Spark", usage: "22%", resetAt: Date().addingTimeInterval(6 * 86_400))
             ],
             errorCaption: nil,
             isAwaitingFirstSample: false,

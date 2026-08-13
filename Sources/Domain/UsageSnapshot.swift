@@ -1,7 +1,7 @@
 import Foundation
 
 /// Semantic usage window — drives hover labels (not hardcoded "5h"/"wk").
-enum UsageWindowKind: String, Equatable, Sendable {
+enum UsageWindowKind: String, Codable, Equatable, Sendable {
     case fiveHour
     case weekly
     case monthly
@@ -39,7 +39,7 @@ enum UsageWindowKind: String, Equatable, Sendable {
     }
 }
 
-struct WindowUsage: Equatable, Sendable {
+struct WindowUsage: Codable, Equatable, Sendable {
     /// Always normalized to 0...1 (used fraction of the window).
     var usedFraction: Double
     var resetAt: Date?
@@ -79,10 +79,13 @@ struct WindowUsage: Equatable, Sendable {
     }
 }
 
-struct UsageSnapshot: Equatable, Sendable {
+struct UsageSnapshot: Codable, Equatable, Sendable {
     var primary: WindowUsage
     var secondary: WindowUsage?
-    /// Extra hover-only windows (e.g. Claude model-scoped weekly). Not rings, not burn.
+    /// Optional third ring (Claude Fable, Codex model-scoped limits, …).
+    /// Not used for burn / needle.
+    var tertiary: WindowUsage? = nil
+    /// Extra hover-only windows (more model scopes after tertiary). Not rings, not burn.
     var extras: [WindowUsage] = []
     var plan: String?
     var fetchedAt: Date
@@ -95,7 +98,7 @@ struct UsageSnapshot: Equatable, Sendable {
     /// Kind priority only: **5h → weekly → monthly**. No absolute-counter
     /// shortcuts — Grok credits are weekly, so burn stays on weekly even when
     /// a monthly `used`/`limit` secondary exists (rings still show both).
-    /// `extras` never participate.
+    /// `tertiary` / `extras` never participate.
     var preferredBurnWindow: WindowUsage {
         let windows: [WindowUsage] = {
             var list = [primary]
@@ -111,6 +114,45 @@ struct UsageSnapshot: Equatable, Sendable {
         if let weekly = first(.weekly) { return weekly }
         if let monthly = first(.monthly) { return monthly }
         return primary
+    }
+}
+
+/// Pure helpers for promoting model-scoped windows onto the third ring.
+enum UsageRingLayout {
+    /// Prefer a window labeled "Fable" (Claude), else the first scoped extra.
+    static func preferredTertiary(from extras: [WindowUsage]) -> WindowUsage? {
+        if let fable = extras.first(where: { isFableLabel($0.displayLabel) }) {
+            return fable
+        }
+        return extras.first
+    }
+
+    /// Extras left for hover after promoting one to the tertiary ring.
+    static func remainingExtras(
+        extras: [WindowUsage],
+        tertiary: WindowUsage?
+    ) -> [WindowUsage] {
+        guard let tertiary else { return extras }
+        var removed = false
+        return extras.filter { extra in
+            if !removed, sameScopedWindow(extra, tertiary) {
+                removed = true
+                return false
+            }
+            return true
+        }
+    }
+
+    static func isFableLabel(_ label: String) -> Bool {
+        label.range(of: "fable", options: .caseInsensitive) != nil
+    }
+
+    private static func sameScopedWindow(_ a: WindowUsage, _ b: WindowUsage) -> Bool {
+        if let la = a.labelOverride, let lb = b.labelOverride, la == lb {
+            return true
+        }
+        return a.displayLabel == b.displayLabel
+            && abs(a.usedFraction - b.usedFraction) < 0.000_1
     }
 }
 
@@ -131,7 +173,7 @@ enum BurnSignalSource: String, Equatable, Sendable {
     }
 }
 
-enum UsageError: Equatable, Sendable {
+enum UsageError: Codable, Equatable, Sendable {
     /// Credential missing or rejected; user should reauthenticate.
     case authRequired
     /// Rate limited; optional earliest retry time.

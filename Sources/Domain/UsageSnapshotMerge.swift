@@ -40,12 +40,16 @@ enum UsageSnapshotMerge {
     static func softStaleNotice(for error: UsageError) -> String {
         switch error {
         case .rateLimited:
-            return "stale · rate limited (last-good rings)"
+            return "stale · oauth rate limited (last-good rings)"
         case .network:
             return "stale · network blip (last-good rings)"
         case .parse:
             return "stale · bad response (last-good rings)"
-        case .unavailable:
+        case .unavailable(let message):
+            let lower = message.lowercased()
+            if lower.contains("token quiet") || lower.contains("rate") {
+                return "stale · token host quiet (last-good rings)"
+            }
             return "stale · temporary (last-good rings)"
         case .authRequired:
             return "reconnect this account"

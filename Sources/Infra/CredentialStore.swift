@@ -38,6 +38,12 @@ enum CredentialStore {
         rootURL.appendingPathComponent(ref, isDirectory: true)
     }
 
+    /// App-owned last-good usage cache (error-free rings) for one managed account.
+    /// File-only — never Keychain. Survives app restart under soft quiet / 429.
+    static func lastGoodUsageURL(for ref: CredentialRef) -> URL {
+        directoryURL(for: ref).appendingPathComponent(".dash-island-usage.json")
+    }
+
     /// Create `accounts/<ref>/` (and parents). Returns the directory URL.
     @discardableResult
     static func createDirectory(for ref: CredentialRef) throws -> URL {

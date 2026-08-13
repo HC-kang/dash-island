@@ -401,6 +401,8 @@ struct CodexAdapter: VendorAdapter {
     /// Live Codex Pro/Plus often ships a **weekly** `primary_window`
     /// (`limit_window_seconds` = 604800) and a null `secondary_window` —
     /// not a 5h + week pair. Kind is derived from `limit_window_seconds`.
+    /// Model-scoped rows under `additional_rate_limits` (e.g. Spark) become
+    /// the tertiary ring + hover extras.
     static func parseUsageResponse(data: Data, fetchedAt: Date = Date()) -> UsageSnapshot {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return errorSnapshot(.parse("parse error"), fetchedAt: fetchedAt)
@@ -408,25 +410,61 @@ struct CodexAdapter: VendorAdapter {
         guard let rateLimit = obj["rate_limit"] as? [String: Any] else {
             return errorSnapshot(.parse("missing rate_limit"), fetchedAt: fetchedAt)
         }
-        let primary = parseWindow(rateLimit["primary_window"])
+        let primary = parseWindow(rateLimit["primary_window"], fetchedAt: fetchedAt)
             ?? WindowUsage(usedFraction: 0, kind: .unknown)
         // Null / missing secondary must stay nil — do not invent a 0% week.
-        let secondary = parseWindow(rateLimit["secondary_window"])
+        let secondary = parseWindow(rateLimit["secondary_window"], fetchedAt: fetchedAt)
+        let scoped = parseAdditionalRateLimits(obj["additional_rate_limits"], fetchedAt: fetchedAt)
+        let tertiary = UsageRingLayout.preferredTertiary(from: scoped)
+        let extras = UsageRingLayout.remainingExtras(extras: scoped, tertiary: tertiary)
         let plan = obj["plan_type"] as? String
         return UsageSnapshot(
             primary: primary,
             secondary: secondary,
+            tertiary: tertiary,
+            extras: extras,
             plan: plan,
             fetchedAt: fetchedAt,
             error: nil
         )
     }
 
+    /// Model-specific quotas (Spark / bengalfox, …) from `additional_rate_limits[]`.
+    static func parseAdditionalRateLimits(_ raw: Any?, fetchedAt: Date = Date()) -> [WindowUsage] {
+        guard let rows = raw as? [Any] else { return [] }
+        var out: [WindowUsage] = []
+        var seen = Set<String>()
+        for row in rows {
+            guard let d = row as? [String: Any] else { continue }
+            let name = (d["limit_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let name, !name.isEmpty else { continue }
+            let key = name.lowercased()
+            guard !seen.contains(key) else { continue }
+            let rl = d["rate_limit"] as? [String: Any]
+            let windowObj = rl?["primary_window"] ?? d["primary_window"]
+            guard var window = parseWindow(windowObj, fetchedAt: fetchedAt) else { continue }
+            window.labelOverride = shortCodexLimitLabel(name)
+            seen.insert(key)
+            out.append(window)
+        }
+        return out
+    }
+
+    /// Compact ring/hover label: "GPT-5.3-Codex-Spark" → "Spark".
+    static func shortCodexLimitLabel(_ name: String) -> String {
+        if let last = name.split(separator: "-").last, last.count >= 3 {
+            return String(last)
+        }
+        if name.count <= 12 { return name }
+        return String(name.suffix(12))
+    }
+
     /// Codex returns `used_percent` in [0, 100] (sometimes fractional).
     /// Prefer absolute token/credit counters when the payload includes them.
-    /// `reset_at` is unix seconds. `limit_window_seconds` → kind (5h / wk / mo).
+    /// `reset_at` is unix seconds; `reset_after_seconds` is a relative fallback.
+    /// `limit_window_seconds` → kind (5h / wk / mo).
     /// Returns `nil` when the window object is absent (JSON null / missing).
-    static func parseWindow(_ obj: Any?) -> WindowUsage? {
+    static func parseWindow(_ obj: Any?, fetchedAt: Date = Date()) -> WindowUsage? {
         guard let d = obj as? [String: Any] else { return nil }
         let usedTok = jsonInt64(d["used_tokens"])
             ?? jsonInt64(d["tokens_used"])
@@ -446,6 +484,7 @@ struct CodexAdapter: VendorAdapter {
         }()
         let normalized = min(1, max(0, fromAbs ?? fromPercent))
         let resetAt = parseResetAt(d["reset_at"])
+            ?? parseResetAfterSeconds(d["reset_after_seconds"], from: fetchedAt)
         let limitSeconds = (d["limit_window_seconds"] as? Double)
             ?? (d["limit_window_seconds"] as? Int).map(Double.init)
             ?? (d["limit_window_seconds"] as? Int64).map(Double.init)
@@ -456,6 +495,17 @@ struct CodexAdapter: VendorAdapter {
             limitTokens: limitTok,
             kind: .fromLimitSeconds(limitSeconds)
         )
+    }
+
+    /// Relative reset countdown from the fetch instant (Codex often sends both).
+    static func parseResetAfterSeconds(_ value: Any?, from fetchedAt: Date) -> Date? {
+        let seconds: Double?
+        if let d = value as? Double { seconds = d }
+        else if let i = value as? Int { seconds = Double(i) }
+        else if let i = value as? Int64 { seconds = Double(i) }
+        else { seconds = nil }
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return nil }
+        return fetchedAt.addingTimeInterval(seconds)
     }
 
     private static func jsonInt64(_ value: Any?) -> Int64? {
