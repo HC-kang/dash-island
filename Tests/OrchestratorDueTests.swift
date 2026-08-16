@@ -268,6 +268,35 @@ enum OrchestratorDueSuite {
             try assertTrue(snap.summary.contains("All Systems Operational"))
         }
 
+        failures += check("rateLimitWait local backoff caps at 6h; vendor Retry-After may exceed") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            // streak 1 → 2h local
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(streak: 1, retryAfter: nil, now: now),
+                2 * 3600,
+                accuracy: 0.001
+            )
+            // streak 3 → 6h local cap
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(streak: 3, retryAfter: nil, now: now),
+                6 * 3600,
+                accuracy: 0.001
+            )
+            // streak 10 still 6h (local cap)
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(streak: 10, retryAfter: nil, now: now),
+                6 * 3600,
+                accuracy: 0.001
+            )
+            // Vendor Retry-After of 8h is authoritative and may exceed the 6h local cap.
+            let eightHours = now.addingTimeInterval(8 * 3600)
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(streak: 1, retryAfter: eightHours, now: now),
+                8 * 3600,
+                accuracy: 0.001
+            )
+        }
+
         failures += check("xAI RSS treats resolved items as operational") {
             let xml = """
             <rss><channel>

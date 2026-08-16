@@ -27,7 +27,7 @@ final class UsageOrchestrator: ObservableObject {
     /// Prefer a long quiet window over thrashing Anthropic/OpenAI token endpoints —
     /// short cooldowns just re-429 and keep the chip red all day.
     nonisolated static let rateLimitCooldown: TimeInterval = 2 * 60 * 60
-    /// Hard cap even if Retry-After is huge (or missing and streak is high).
+    /// Cap for *local* streak backoff (2h/4h/6h). Vendor Retry-After may exceed this.
     nonisolated static let rateLimitCooldownMax: TimeInterval = 6 * 60 * 60
     /// After auth failure, back off so we do not 401-spam overnight.
     nonisolated static let authFailureCooldown: TimeInterval = 30 * 60

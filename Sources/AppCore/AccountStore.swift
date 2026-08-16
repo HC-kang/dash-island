@@ -123,6 +123,11 @@ final class AccountStore: ObservableObject {
     func remove(id: AccountID) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         let removed = accounts.remove(at: index)
+        if removed.vendorID == "claude" {
+            ClaudeAdapter.clearManagedCredentials(
+                configDir: CredentialStore.directoryURL(for: removed.credentialRef)
+            )
+        }
         try? CredentialStore.removeDirectory(for: removed.credentialRef)
         reindex()
         // Explicit empty is allowed (user removed the last account).
