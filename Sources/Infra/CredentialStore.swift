@@ -40,8 +40,20 @@ enum CredentialStore {
 
     /// App-owned last-good usage cache (error-free rings) for one managed account.
     /// File-only — never Keychain. Survives app restart under soft quiet / 429.
+    static let lastGoodFileName = ".dash-island-usage.json"
+
+    static func lastGoodUsageURL(inDirectory dir: URL) -> URL {
+        dir.appendingPathComponent(lastGoodFileName, isDirectory: false)
+    }
+
     static func lastGoodUsageURL(for ref: CredentialRef) -> URL {
-        directoryURL(for: ref).appendingPathComponent(".dash-island-usage.json")
+        lastGoodUsageURL(inDirectory: directoryURL(for: ref))
+    }
+
+    /// Drop last-good rings for a managed folder (identity change / wipe).
+    static func removeLastGoodUsage(inDirectory dir: URL) {
+        let url = lastGoodUsageURL(inDirectory: dir)
+        try? FileManager.default.removeItem(at: url)
     }
 
     /// Create `accounts/<ref>/` (and parents). Returns the directory URL.

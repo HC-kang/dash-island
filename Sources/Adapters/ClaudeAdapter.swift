@@ -97,6 +97,8 @@ struct ClaudeAdapter: VendorAdapter {
         do {
             let dir = try CredentialStore.createDirectory(for: ref)
             try await runLogin(configDir: dir)
+            // H2: browser add used to markAuthenticated on harvest alone.
+            try await Self.verifyUsageAccess(configDir: dir)
             let creds = try Self.requireCredentials(configDir: dir)
             let short = String(ref.prefix(8))
             let label = Self.suggestedLabel(plan: creds.subscriptionType, short: short)
@@ -135,10 +137,16 @@ struct ClaudeAdapter: VendorAdapter {
             // Snapshot first. Claude CLI on macOS keeps the live session in
             // scoped Keychain; deleting only .credentials.json lets `auth login`
             // reopen a browser and immediately succeed with the old token.
-            let priorAccess = Self.existingAccessToken(configDir: dir)
+            let prior = Self.existingCredentials(configDir: dir)
             Self.clearManagedCredentials(configDir: dir)
             await Self.runLogout(configDir: dir)
-            try await runLogin(configDir: dir, priorAccessToken: priorAccess)
+            try await runLogin(
+                configDir: dir,
+                priorAccessToken: prior?.accessToken,
+                priorRefreshToken: prior?.refreshToken
+            )
+            // H2: leftover-but-valid harvest used to skip /api/oauth/usage.
+            try await Self.verifyUsageAccess(configDir: dir)
             _ = try Self.requireCredentials(configDir: dir)
             return ref
         } catch let error as ClaudeAdapterError {
@@ -157,7 +165,25 @@ struct ClaudeAdapter: VendorAdapter {
         return ref
     }
 
-    /// Hit `/api/oauth/usage` once so scope-deficient tokens fail at paste time.
+    /// Pure policy for the usage smoke test (browser add/reauth + setup-token).
+    /// 200 → pass; 401/403 (`authRequired`) → reject; 429/network/parse → soft keep.
+    enum UsageSmokeDecision: Equatable {
+        case pass
+        case reject
+        case softKeep
+    }
+
+    static func usageSmokeDecision(_ snapshot: UsageSnapshot) -> UsageSmokeDecision {
+        guard let err = snapshot.error else { return .pass }
+        switch err {
+        case .authRequired:
+            return .reject
+        case .rateLimited, .network, .parse, .unavailable:
+            return .softKeep
+        }
+    }
+
+    /// Hit `/api/oauth/usage` once so leftover / scope-deficient tokens fail at login time.
     static func verifyUsageAccess(configDir: URL) async throws {
         guard let creds = readCredentials(configDir: configDir) else {
             throw ClaudeAdapterError.reauthFailed("No credentials written.")
@@ -167,24 +193,24 @@ struct ClaudeAdapter: VendorAdapter {
             plan: creds.subscriptionType,
             fetchedAt: Date()
         )
-        if let err = snap.error {
-            switch err {
-            case .authRequired:
-                throw ClaudeAdapterError.reauthFailed(
-                    """
-                    Token rejected by Anthropic (invalid or missing scopes).
-                    `claude setup-token` usually cannot read usage — it lacks user:profile.
-                    Use Reauthenticate → browser login instead:
-                      CLAUDE_CONFIG_DIR='\(configDir.path)' claude auth login --claudeai
-                    """
-                )
-            case .rateLimited:
-                // Token may still be valid; allow save during OAuth storm.
+        switch usageSmokeDecision(snap) {
+        case .pass:
+            return
+        case .softKeep:
+            if case .rateLimited = snap.error {
                 NSLog("DashIsland: Claude token smoke-test rate-limited (keeping)")
-            case .network, .parse, .unavailable:
-                // Soft: network blip should not block paste of a good token.
-                NSLog("DashIsland: Claude token smoke-test soft error %@", String(describing: err))
+            } else {
+                NSLog("DashIsland: Claude token smoke-test soft error %@", String(describing: snap.error))
             }
+        case .reject:
+            throw ClaudeAdapterError.reauthFailed(
+                """
+                Token rejected by Anthropic (invalid or missing scopes).
+                `claude setup-token` usually cannot read usage — it lacks user:profile.
+                Use Reauthenticate → browser login instead:
+                  CLAUDE_CONFIG_DIR='\(configDir.path)' claude auth login --claudeai
+                """
+            )
         }
     }
 
@@ -311,11 +337,13 @@ struct ClaudeAdapter: VendorAdapter {
     // MARK: - Login (managed CLAUDE_CONFIG_DIR)
 
     /// Wipe app-owned session so the next `claude auth login` cannot succeed
-    /// on leftover state. Deletes the managed file and this folder's scoped
-    /// Keychain item only (never the user's default `Claude Code-credentials`).
+    /// on leftover state. Deletes the managed file, last-good rings, and this
+    /// folder's scoped Keychain item only (never the user's default
+    /// `Claude Code-credentials`).
     static func clearManagedCredentials(configDir: URL) {
         let credFile = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
         try? FileManager.default.removeItem(at: credFile)
+        CredentialStore.removeLastGoodUsage(inDirectory: configDir)
         deleteScopedKeychainItem(configDir: configDir)
         NSLog("DashIsland: cleared Claude managed creds at %@", configDir.path)
     }
@@ -347,37 +375,57 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// File first, then scoped Keychain — used to detect a leftover session.
-    static func existingAccessToken(configDir: URL) -> String? {
+    /// Never reads the unsuffixed global `Claude Code-credentials` item.
+    static func existingCredentials(configDir: URL) -> ClaudeCreds? {
         if let file = readCredentialsFile(configDir: configDir), !file.accessToken.isEmpty {
-            return file.accessToken
+            return file
         }
         if let keychain = readScopedKeychainCredentials(configDir: configDir),
            !keychain.accessToken.isEmpty
         {
-            return keychain.accessToken
+            return keychain
         }
         return nil
     }
 
-    /// Reauth must mint a *different* access token. Leftover Keychain sessions
-    /// still have a future expiresAt, so expiry-only checks accept the old login.
+    static func existingAccessToken(configDir: URL) -> String? {
+        existingCredentials(configDir: configDir)?.accessToken
+    }
+
+    /// Reauth must mint a *new session*. Leftover CLI sessions often rotate
+    /// `accessToken` while keeping the same `refreshToken` (H1).
+    /// `priorAccessToken == nil` (beginAdd) still accepts any non-empty harvest.
     static func isAcceptableLogin(
         _ creds: ClaudeCreds,
-        priorAccessToken: String?
+        priorAccessToken: String?,
+        priorRefreshToken: String? = nil
     ) -> Bool {
         guard !creds.accessToken.isEmpty else { return false }
-        if let priorAccessToken, creds.accessToken == priorAccessToken {
+        if let priorAccessToken, !priorAccessToken.isEmpty,
+           creds.accessToken == priorAccessToken
+        {
+            return false
+        }
+        if let priorRefreshToken, !priorRefreshToken.isEmpty,
+           let harvested = creds.refreshToken, harvested == priorRefreshToken
+        {
             return false
         }
         return true
     }
 
-    private func runLogin(configDir: URL, priorAccessToken: String? = nil) async throws {
+    private func runLogin(
+        configDir: URL,
+        priorAccessToken: String? = nil,
+        priorRefreshToken: String? = nil
+    ) async throws {
         guard let binary = Self.locateClaudeBinary() else {
             throw ClaudeAdapterError.claudeBinaryNotFound
         }
 
-        let priorToken = priorAccessToken ?? Self.existingAccessToken(configDir: configDir)
+        let prior = Self.existingCredentials(configDir: configDir)
+        let priorToken = priorAccessToken ?? prior?.accessToken
+        let priorRefresh = priorRefreshToken ?? prior?.refreshToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -405,7 +453,11 @@ struct ClaudeAdapter: VendorAdapter {
         let deadline = started.addingTimeInterval(Self.loginTimeout)
 
         func isAcceptable(_ creds: ClaudeCreds) -> Bool {
-            Self.isAcceptableLogin(creds, priorAccessToken: priorToken)
+            Self.isAcceptableLogin(
+                creds,
+                priorAccessToken: priorToken,
+                priorRefreshToken: priorRefresh
+            )
         }
 
         while Date() < deadline {

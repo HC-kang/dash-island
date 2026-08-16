@@ -159,7 +159,8 @@ enum ClaudeAdapterSuite {
             try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: "new-access"))
             try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: nil))
         }
-        failures += check("reauth rejects leftover keychain access token") {
+        failures += check("reauth rejects leftover access even with future expiresAt") {
+            // 8148deb: leftover same access after snapshot, even when expiresAt is +1h.
             let leftover = ClaudeAdapter.ClaudeCreds(
                 accessToken: "old-access",
                 refreshToken: "rt",
@@ -167,15 +168,13 @@ enum ClaudeAdapterSuite {
                 expiresAt: Date().addingTimeInterval(3600),
                 rawJSON: nil
             )
-            let rotated = ClaudeAdapter.ClaudeCreds(
-                accessToken: "new-access",
-                refreshToken: "rt2",
-                subscriptionType: "pro",
-                expiresAt: Date().addingTimeInterval(3600),
-                rawJSON: nil
-            )
             try assertTrue(!ClaudeAdapter.isAcceptableLogin(leftover, priorAccessToken: "old-access"))
-            try assertTrue(ClaudeAdapter.isAcceptableLogin(rotated, priorAccessToken: "old-access"))
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(
+                leftover,
+                priorAccessToken: "old-access",
+                priorRefreshToken: "rt"
+            ))
+            // beginAdd (prior nil) still accepts any non-empty harvest.
             try assertTrue(ClaudeAdapter.isAcceptableLogin(leftover, priorAccessToken: nil))
             try assertTrue(!ClaudeAdapter.isAcceptableLogin(
                 ClaudeAdapter.ClaudeCreds(
@@ -186,6 +185,34 @@ enum ClaudeAdapterSuite {
                     rawJSON: nil
                 ),
                 priorAccessToken: nil
+            ))
+        }
+        failures += check("reauth rejects leftover session that only rotated access (H1)") {
+            // Same refresh_token + new access = leftover grant, not a new login.
+            let rotatedLeftover = ClaudeAdapter.ClaudeCreds(
+                accessToken: "new-access",
+                refreshToken: "rt-same",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(
+                rotatedLeftover,
+                priorAccessToken: "old-access",
+                priorRefreshToken: "rt-same"
+            ))
+            // New access *and* new refresh is a real session (browser reauth).
+            let fresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: "new-access",
+                refreshToken: "rt-new",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.isAcceptableLogin(
+                fresh,
+                priorAccessToken: "old-access",
+                priorRefreshToken: "rt-same"
             ))
         }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
@@ -345,6 +372,283 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.readCredentials(configDir: a) == nil)
             try assertTrue(ClaudeAdapter.readCredentials(configDir: b) == nil)
         }
+        failures += check("scoped keychain service never targets the unsuffixed default item") {
+            let a = try makeTempDir()
+            let b = try makeTempDir()
+            defer {
+                try? FileManager.default.removeItem(at: a)
+                try? FileManager.default.removeItem(at: b)
+            }
+            let svcA = ClaudeAdapter.scopedKeychainService(for: a)
+            let svcB = ClaudeAdapter.scopedKeychainService(for: b)
+            try assertTrue(svcA != svcB, "distinct dirs must hash to distinct services")
+            try assertTrue(svcA.hasPrefix("Claude Code-credentials-"))
+            try assertTrue(svcB.hasPrefix("Claude Code-credentials-"))
+            try assertEqual(String(svcA.dropFirst("Claude Code-credentials-".count)).count, 8)
+            try assertTrue(svcA != "Claude Code-credentials")
+            try assertTrue(svcB != "Claude Code-credentials")
+            try assertTrue(!svcA.hasSuffix("-"))
+        }
+        failures += check("existingAccessToken / capture prefer the managed file") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try assertTrue(ClaudeAdapter.existingAccessToken(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.captureLoginCredentials(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: dir) == nil)
+
+            let written = ClaudeAdapter.ClaudeCreds(
+                accessToken: "file-access-A",
+                refreshToken: "file-refresh-A",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            ClaudeAdapter.persistCredentialsFile(creds: written, configDir: dir, overwrite: true)
+            try assertEqual(ClaudeAdapter.existingAccessToken(configDir: dir), "file-access-A")
+            try assertEqual(ClaudeAdapter.captureLoginCredentials(configDir: dir)?.accessToken, "file-access-A")
+            try assertEqual(ClaudeAdapter.readCredentials(configDir: dir)?.refreshToken, "file-refresh-A")
+        }
+        failures += check("clearManagedCredentials deletes the file and last-good (H6)") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let creds = ClaudeAdapter.ClaudeCreds(
+                accessToken: "wipe-me",
+                refreshToken: "rt",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            ClaudeAdapter.persistCredentialsFile(creds: creds, configDir: dir, overwrite: true)
+            let good = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0.42, kind: .fiveHour),
+                secondary: nil,
+                plan: "pro",
+                fetchedAt: Date()
+            )
+            let lastGoodURL = CredentialStore.lastGoodUsageURL(inDirectory: dir)
+            try assertTrue(UsageOrchestrator.saveLastGood(good, to: lastGoodURL))
+            try assertTrue(FileManager.default.fileExists(atPath: lastGoodURL.path))
+
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+
+            try assertTrue(ClaudeAdapter.readCredentialsFile(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.existingAccessToken(configDir: dir) == nil)
+            try assertTrue(!FileManager.default.fileExists(atPath: lastGoodURL.path))
+            // Wipe must not invent a global Keychain service name.
+            try assertTrue(ClaudeAdapter.scopedKeychainService(for: dir) != "Claude Code-credentials")
+        }
+        failures += check("reauth composition: snapshot → wipe → leftover vs new session") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let prior = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-A",
+                refreshToken: "refresh-A",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            ClaudeAdapter.persistCredentialsFile(creds: prior, configDir: dir, overwrite: true)
+            let snap = ClaudeAdapter.existingCredentials(configDir: dir)
+            try assertEqual(snap?.accessToken, "access-A")
+            try assertEqual(snap?.refreshToken, "refresh-A")
+
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: dir) == nil)
+
+            let leftoverSameAccess = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-A",
+                refreshToken: "refresh-A",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(7200),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(
+                leftoverSameAccess,
+                priorAccessToken: snap?.accessToken,
+                priorRefreshToken: snap?.refreshToken
+            ))
+
+            let leftoverRotatedAccess = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-B",
+                refreshToken: "refresh-A",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(7200),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(
+                leftoverRotatedAccess,
+                priorAccessToken: snap?.accessToken,
+                priorRefreshToken: snap?.refreshToken
+            ))
+
+            let fresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-B",
+                refreshToken: "refresh-B",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(7200),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.isAcceptableLogin(
+                fresh,
+                priorAccessToken: snap?.accessToken,
+                priorRefreshToken: snap?.refreshToken
+            ))
+            ClaudeAdapter.persistCredentialsFile(creds: fresh, configDir: dir, overwrite: true)
+            try assertEqual(ClaudeAdapter.readCredentials(configDir: dir)?.accessToken, "access-B")
+        }
+        failures += check("shouldAttemptRefresh: 401 only; never 429/nil; long-lived and 7d stale") {
+            let now = Date()
+            let live = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a",
+                refreshToken: "r",
+                subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            let longLived = ClaudeAdapter.ClaudeCreds(
+                accessToken: "sk-ant-oat01-" + String(repeating: "x", count: 80),
+                refreshToken: nil,
+                subscriptionType: nil,
+                expiresAt: nil,
+                longLived: true,
+                rawJSON: nil
+            )
+            let weekStale = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a",
+                refreshToken: "r",
+                subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(-8 * 24 * 3600),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: nil, credentials: live, now: now))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(
+                after: .rateLimited(retryAfter: nil),
+                credentials: live,
+                now: now
+            ))
+            try assertTrue(ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: live, now: now))
+            // Probe maps 403 → authRequired; that is the 403-as-refresh path.
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: longLived, now: now))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: weekStale, now: now))
+            try assertTrue(!ClaudeAdapter.canAttemptRefresh(weekStale, now: now))
+        }
+        failures += check("shouldAdopt only when failed access is set and differs") {
+            let creds = ClaudeAdapter.ClaudeCreds(
+                accessToken: "live",
+                refreshToken: "r",
+                subscriptionType: nil,
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.shouldAdopt(creds, failedAccessToken: "dead"))
+            try assertTrue(!ClaudeAdapter.shouldAdopt(creds, failedAccessToken: "live"))
+            try assertTrue(!ClaudeAdapter.shouldAdopt(creds, failedAccessToken: nil))
+            try assertTrue(!ClaudeAdapter.shouldAdopt(creds, failedAccessToken: ""))
+            // H8: adopted + 401 does not POST — refreshThenProbe only re-probes on .adopted.
+            // Locked here as the helper contract (no live token host).
+        }
+        failures += check("usage smoke decision: 401 reject; 429/network soft keep; 200 pass (H2)") {
+            let ok = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0.1, kind: .fiveHour),
+                secondary: nil,
+                plan: "pro",
+                fetchedAt: Date()
+            )
+            try assertEqual(ClaudeAdapter.usageSmokeDecision(ok), ClaudeAdapter.UsageSmokeDecision.pass)
+            try assertEqual(
+                ClaudeAdapter.usageSmokeDecision(
+                    UsageSnapshot(
+                        primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                        secondary: nil,
+                        plan: nil,
+                        fetchedAt: Date(),
+                        error: .authRequired
+                    )
+                ),
+                ClaudeAdapter.UsageSmokeDecision.reject
+            )
+            try assertEqual(
+                ClaudeAdapter.usageSmokeDecision(
+                    UsageSnapshot(
+                        primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                        secondary: nil,
+                        plan: nil,
+                        fetchedAt: Date(),
+                        error: .rateLimited(retryAfter: nil)
+                    )
+                ),
+                ClaudeAdapter.UsageSmokeDecision.softKeep
+            )
+            try assertEqual(
+                ClaudeAdapter.usageSmokeDecision(
+                    UsageSnapshot(
+                        primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                        secondary: nil,
+                        plan: nil,
+                        fetchedAt: Date(),
+                        error: .network("timeout")
+                    )
+                ),
+                ClaudeAdapter.UsageSmokeDecision.softKeep
+            )
+        }
+        failures += check("setup-token paste policy in a temp dir") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try assertTrue(ClaudeAdapter.normalizePastedToken("sk-ant-oat01-tooshort") == nil)
+            try assertTrue(ClaudeAdapter.normalizePastedToken("garbage") == nil)
+            let tok = "sk-ant-oat01-" + String(repeating: "z", count: 80)
+            try ClaudeAdapter.installSetupToken(tok, configDir: dir)
+            let installed = ClaudeAdapter.readCredentials(configDir: dir)
+            try assertTrue(installed != nil)
+            try assertTrue(ClaudeAdapter.isLongLived(installed!))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(
+                after: .authRequired,
+                credentials: installed!
+            ))
+            let oatWithRefresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: tok,
+                refreshToken: "sk-ant-ort01-refresh-token-value-here",
+                subscriptionType: nil,
+                expiresAt: Date().addingTimeInterval(-60),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.looksLikeSetupToken(tok))
+            try assertTrue(!ClaudeAdapter.isLongLived(oatWithRefresh))
+        }
+        failures += check("last-good encode/decode refuses error snapshots") {
+            let errSnap = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0, kind: .fiveHour),
+                secondary: nil,
+                plan: nil,
+                fetchedAt: Date(),
+                error: .authRequired
+            )
+            try assertTrue(UsageOrchestrator.encodeLastGood(errSnap) == nil)
+            let good = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0.5, kind: .fiveHour),
+                secondary: nil,
+                plan: "max",
+                fetchedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+            guard let data = UsageOrchestrator.encodeLastGood(good) else {
+                try assertTrue(false, "expected encode")
+                return
+            }
+            try assertEqual(UsageOrchestrator.decodeLastGood(data)?.plan, "max")
+            // Decode must drop a payload that carries an error.
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .millisecondsSince1970
+            let dirty = try encoder.encode(errSnap)
+            try assertTrue(UsageOrchestrator.decodeLastGood(dirty) == nil)
+        }
         return failures
+    }
+
+    private static func makeTempDir() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dash-island-claude-auth-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 }
