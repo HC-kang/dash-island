@@ -92,7 +92,7 @@ enum AccountChromeActions {
             defer {
                 IslandDialogController.shared.hideProgress()
                 if Task.isCancelled, let ref = createdRef {
-                    try? CredentialStore.removeDirectory(for: ref)
+                    discardManagedFolder(ref: ref, vendorID: adapter.id)
                 }
             }
 
@@ -100,7 +100,7 @@ enum AccountChromeActions {
                 let result = try await adapter.beginAdd()
                 createdRef = result.credentialRef
                 if Task.isCancelled {
-                    try? CredentialStore.removeDirectory(for: result.credentialRef)
+                    discardManagedFolder(ref: result.credentialRef, vendorID: adapter.id)
                     return
                 }
 
@@ -115,7 +115,7 @@ enum AccountChromeActions {
                 )
 
                 guard let named else {
-                    try? CredentialStore.removeDirectory(for: result.credentialRef)
+                    discardManagedFolder(ref: result.credentialRef, vendorID: adapter.id)
                     return
                 }
 
@@ -214,6 +214,15 @@ enum AccountChromeActions {
     }
 
     // MARK: - Alerts / activation
+
+    /// Drop the managed folder. Claude also wipes the scoped Keychain item
+    /// (never the unsuffixed default) so cancel/remove cannot leave a leftover session.
+    private static func discardManagedFolder(ref: CredentialRef, vendorID: VendorID) {
+        if vendorID == "claude" {
+            ClaudeAdapter.clearManagedCredentials(configDir: CredentialStore.directoryURL(for: ref))
+        }
+        try? CredentialStore.removeDirectory(for: ref)
+    }
 
     private static func presentAlert(title: String, message: String) {
         DispatchQueue.main.async {

@@ -334,3 +334,10 @@ Fixes:
 - H6: `clearManagedCredentials` also deletes `.dash-island-usage.json` so wipe/reauth cannot keep the previous identity's rings.
 - Tests: temp-dir file only. Never wrote unsuffixed `Claude Code-credentials`.
 - Remaining: leftover that rotates **both** access and refresh still passes H1 (needs logout/H3); beginAdd clone of global CLI session still accepted; H8 adopted+401 still skips oauth/token; `runLogout` still best-effort.
+
+## Claude auth graph walk (2026-08-16)
+
+- Walked `docs/notes/claude-auth-state-graph.md` against `1d04401` + cheap fixes. Report: `docs/notes/claude-auth-graph-walk.md`.
+- Graph stale vs code: H2 smoke is on browser add/reauth; H6 wipe clears last-good (tokenless no longer keeps old rings).
+- Cheap fixes: smoke-reject rollback (`clearManagedCredentials` on add/reauth catch); `requireCredentials` file-only (H10); add-cancel + `AccountStore.remove` wipe scoped KC (H4 file/KC).
+- Still open: H1 residual (both tokens rotate), H3 logout fire-and-forget, H7 global KC, H8 adopted+401, H9 429 soft-keep, live CLI/HTTP untested.

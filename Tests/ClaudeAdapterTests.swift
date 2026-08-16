@@ -616,6 +616,55 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.looksLikeSetupToken(tok))
             try assertTrue(!ClaudeAdapter.isLongLived(oatWithRefresh))
         }
+        failures += check("requireCredentials is file-only (H10)") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            do {
+                _ = try ClaudeAdapter.requireCredentials(configDir: dir)
+                try assertTrue(false, "empty dir must not harvest a leftover session")
+            } catch let error as ClaudeAdapterError {
+                try assertEqual(error, ClaudeAdapterError.credentialsMissing(configDir: dir.path))
+            }
+            ClaudeAdapter.persistCredentialsFile(
+                creds: ClaudeAdapter.ClaudeCreds(
+                    accessToken: "file-only",
+                    refreshToken: "rt",
+                    subscriptionType: "pro",
+                    expiresAt: Date().addingTimeInterval(3600),
+                    rawJSON: nil
+                ),
+                configDir: dir,
+                overwrite: true
+            )
+            try assertEqual(try ClaudeAdapter.requireCredentials(configDir: dir).accessToken, "file-only")
+        }
+        failures += check("failed reauth rollback wipes a smoke-rejected harvest") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            ClaudeAdapter.persistCredentialsFile(
+                creds: ClaudeAdapter.ClaudeCreds(
+                    accessToken: "rejected-harvest",
+                    refreshToken: "rt-new",
+                    subscriptionType: "pro",
+                    expiresAt: Date().addingTimeInterval(3600),
+                    rawJSON: nil
+                ),
+                configDir: dir,
+                overwrite: true
+            )
+            let lastGood = CredentialStore.lastGoodUsageURL(inDirectory: dir)
+            let snap = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0.2, kind: .fiveHour),
+                secondary: nil,
+                plan: "pro",
+                fetchedAt: Date()
+            )
+            try assertTrue(UsageOrchestrator.saveLastGood(snap, to: lastGood))
+            // Same helper reauthenticate/beginAdd catch now call after smoke reject.
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+            try assertTrue(ClaudeAdapter.readCredentials(configDir: dir) == nil)
+            try assertTrue(!FileManager.default.fileExists(atPath: lastGood.path))
+        }
         failures += check("last-good encode/decode refuses error snapshots") {
             let errSnap = UsageSnapshot(
                 primary: WindowUsage(usedFraction: 0, kind: .fiveHour),

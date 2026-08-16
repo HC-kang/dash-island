@@ -96,13 +96,19 @@ struct ClaudeAdapter: VendorAdapter {
         let ref = accountID.uuidString
         do {
             let dir = try CredentialStore.createDirectory(for: ref)
-            try await runLogin(configDir: dir)
-            // H2: browser add used to markAuthenticated on harvest alone.
-            try await Self.verifyUsageAccess(configDir: dir)
-            let creds = try Self.requireCredentials(configDir: dir)
-            let short = String(ref.prefix(8))
-            let label = Self.suggestedLabel(plan: creds.subscriptionType, short: short)
-            return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+            do {
+                try await runLogin(configDir: dir)
+                // H2: browser add used to markAuthenticated on harvest alone.
+                try await Self.verifyUsageAccess(configDir: dir)
+                let creds = try Self.requireCredentials(configDir: dir)
+                let short = String(ref.prefix(8))
+                let label = Self.suggestedLabel(plan: creds.subscriptionType, short: short)
+                return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
+            } catch {
+                Self.clearManagedCredentials(configDir: dir)
+                try? CredentialStore.removeDirectory(for: ref)
+                throw error
+            }
         } catch {
             try? CredentialStore.removeDirectory(for: ref)
             throw error
@@ -117,14 +123,20 @@ struct ClaudeAdapter: VendorAdapter {
         let ref = accountID.uuidString
         do {
             let dir = try CredentialStore.createDirectory(for: ref)
-            try Self.installSetupToken(rawToken, configDir: dir)
-            try await Self.verifyUsageAccess(configDir: dir)
-            let short = String(ref.prefix(8))
-            return AddAccountResult(
-                vendorID: id,
-                label: "Claude \(short)",
-                credentialRef: ref
-            )
+            do {
+                try Self.installSetupToken(rawToken, configDir: dir)
+                try await Self.verifyUsageAccess(configDir: dir)
+                let short = String(ref.prefix(8))
+                return AddAccountResult(
+                    vendorID: id,
+                    label: "Claude \(short)",
+                    credentialRef: ref
+                )
+            } catch {
+                Self.clearManagedCredentials(configDir: dir)
+                try? CredentialStore.removeDirectory(for: ref)
+                throw error
+            }
         } catch {
             try? CredentialStore.removeDirectory(for: ref)
             throw error
@@ -149,9 +161,10 @@ struct ClaudeAdapter: VendorAdapter {
             try await Self.verifyUsageAccess(configDir: dir)
             _ = try Self.requireCredentials(configDir: dir)
             return ref
-        } catch let error as ClaudeAdapterError {
-            throw error
         } catch {
+            // Smoke-rejected or failed harvest must not stay as the live file.
+            Self.clearManagedCredentials(configDir: dir)
+            if let error = error as? ClaudeAdapterError { throw error }
             throw ClaudeAdapterError.reauthFailed(error.localizedDescription)
         }
     }
@@ -159,10 +172,15 @@ struct ClaudeAdapter: VendorAdapter {
     /// Replace managed creds with a pasted token (smoke-tested against usage API).
     func reauthenticateWithSetupToken(_ ref: CredentialRef, token: String) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
-        Self.clearManagedCredentials(configDir: dir)
-        try Self.installSetupToken(token, configDir: dir)
-        try await Self.verifyUsageAccess(configDir: dir)
-        return ref
+        do {
+            Self.clearManagedCredentials(configDir: dir)
+            try Self.installSetupToken(token, configDir: dir)
+            try await Self.verifyUsageAccess(configDir: dir)
+            return ref
+        } catch {
+            Self.clearManagedCredentials(configDir: dir)
+            throw error
+        }
     }
 
     /// Pure policy for the usage smoke test (browser add/reauth + setup-token).
@@ -494,12 +512,10 @@ struct ClaudeAdapter: VendorAdapter {
         throw ClaudeAdapterError.loginTimeout(configDir: configDir.path)
     }
 
-    private static func requireCredentials(configDir: URL) throws -> ClaudeCreds {
+    /// File only. Do not re-harvest Keychain here — that would persist a leftover
+    /// session that `runLogin` already rejected (H10).
+    static func requireCredentials(configDir: URL) throws -> ClaudeCreds {
         if let creds = readCredentials(configDir: configDir) {
-            return creds
-        }
-        if let creds = captureLoginCredentials(configDir: configDir) {
-            persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
             return creds
         }
         throw ClaudeAdapterError.credentialsMissing(configDir: configDir.path)
