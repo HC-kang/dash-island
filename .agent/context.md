@@ -319,3 +319,4 @@ Fixes:
 - Claude CLI 2.1.229 on macOS writes login to scoped Keychain only — **no** `.credentials.json`. Pure file capture made Reauth fail (`credentialsMissing`).
 - Harvest-once restored: after Add/Reauth, copy scoped `Claude Code-credentials-<sha8>` into the managed file. Poll/refresh stay file-only.
 - Recovered `9C11FBE9-…` by copying that Keychain item into `.credentials.json` (pro, has refresh).
+- Reauth bug: wipe file only → `auth login` opens browser then harvests leftover scoped Keychain. Fix: snapshot access token, logout + delete scoped item, accept only a *different* access token.

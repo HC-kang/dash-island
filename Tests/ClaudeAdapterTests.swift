@@ -159,6 +159,35 @@ enum ClaudeAdapterSuite {
             try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: "new-access"))
             try assertTrue(!ClaudeAdapter.shouldAdopt(current, failedAccessToken: nil))
         }
+        failures += check("reauth rejects leftover keychain access token") {
+            let leftover = ClaudeAdapter.ClaudeCreds(
+                accessToken: "old-access",
+                refreshToken: "rt",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            let rotated = ClaudeAdapter.ClaudeCreds(
+                accessToken: "new-access",
+                refreshToken: "rt2",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(leftover, priorAccessToken: "old-access"))
+            try assertTrue(ClaudeAdapter.isAcceptableLogin(rotated, priorAccessToken: "old-access"))
+            try assertTrue(ClaudeAdapter.isAcceptableLogin(leftover, priorAccessToken: nil))
+            try assertTrue(!ClaudeAdapter.isAcceptableLogin(
+                ClaudeAdapter.ClaudeCreds(
+                    accessToken: "",
+                    refreshToken: nil,
+                    subscriptionType: nil,
+                    expiresAt: nil,
+                    rawJSON: nil
+                ),
+                priorAccessToken: nil
+            ))
+        }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
             let existing = Data("""
             {"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","subscriptionType":"max","expiresAt":1}}

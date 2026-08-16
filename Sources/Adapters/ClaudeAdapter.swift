@@ -132,10 +132,13 @@ struct ClaudeAdapter: VendorAdapter {
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
         do {
-            // Wipe managed session first — otherwise runLogin short-circuits on
-            // the still-present .credentials.json and never opens a real login.
+            // Snapshot first. Claude CLI on macOS keeps the live session in
+            // scoped Keychain; deleting only .credentials.json lets `auth login`
+            // reopen a browser and immediately succeed with the old token.
+            let priorAccess = Self.existingAccessToken(configDir: dir)
             Self.clearManagedCredentials(configDir: dir)
-            try await runLogin(configDir: dir, expectFreshAfter: Date())
+            await Self.runLogout(configDir: dir)
+            try await runLogin(configDir: dir, priorAccessToken: priorAccess)
             _ = try Self.requireCredentials(configDir: dir)
             return ref
         } catch let error as ClaudeAdapterError {
@@ -308,20 +311,73 @@ struct ClaudeAdapter: VendorAdapter {
     // MARK: - Login (managed CLAUDE_CONFIG_DIR)
 
     /// Wipe app-owned session so the next `claude auth login` cannot succeed
-    /// on leftover state. File only — never a Keychain item.
+    /// on leftover state. Deletes the managed file and this folder's scoped
+    /// Keychain item only (never the user's default `Claude Code-credentials`).
     static func clearManagedCredentials(configDir: URL) {
         let credFile = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
         try? FileManager.default.removeItem(at: credFile)
+        deleteScopedKeychainItem(configDir: configDir)
         NSLog("DashIsland: cleared Claude managed creds at %@", configDir.path)
     }
 
-    private func runLogin(configDir: URL, expectFreshAfter: Date? = nil) async throws {
+    /// Best-effort CLI logout so the next login cannot reuse the scoped session.
+    static func runLogout(configDir: URL) async {
+        guard let binary = locateClaudeBinary() else { return }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: binary)
+        task.arguments = ["auth", "logout"]
+        var env = ProcessInfo.processInfo.environment
+        env["CLAUDE_CONFIG_DIR"] = configDir.path
+        env.removeValue(forKey: "CLAUDE_CODE_OAUTH_TOKEN")
+        env.removeValue(forKey: "ANTHROPIC_API_KEY")
+        task.environment = env
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        task.standardInput = Pipe()
+        do {
+            try task.run()
+        } catch {
+            return
+        }
+        let deadline = Date().addingTimeInterval(8)
+        while task.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        if task.isRunning { task.terminate() }
+    }
+
+    /// File first, then scoped Keychain — used to detect a leftover session.
+    static func existingAccessToken(configDir: URL) -> String? {
+        if let file = readCredentialsFile(configDir: configDir), !file.accessToken.isEmpty {
+            return file.accessToken
+        }
+        if let keychain = readScopedKeychainCredentials(configDir: configDir),
+           !keychain.accessToken.isEmpty
+        {
+            return keychain.accessToken
+        }
+        return nil
+    }
+
+    /// Reauth must mint a *different* access token. Leftover Keychain sessions
+    /// still have a future expiresAt, so expiry-only checks accept the old login.
+    static func isAcceptableLogin(
+        _ creds: ClaudeCreds,
+        priorAccessToken: String?
+    ) -> Bool {
+        guard !creds.accessToken.isEmpty else { return false }
+        if let priorAccessToken, creds.accessToken == priorAccessToken {
+            return false
+        }
+        return true
+    }
+
+    private func runLogin(configDir: URL, priorAccessToken: String? = nil) async throws {
         guard let binary = Self.locateClaudeBinary() else {
             throw ClaudeAdapterError.claudeBinaryNotFound
         }
 
-        // Snapshot so we only accept a *new* token after the process starts.
-        let priorToken = Self.readCredentials(configDir: configDir)?.accessToken
+        let priorToken = priorAccessToken ?? Self.existingAccessToken(configDir: configDir)
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -349,12 +405,7 @@ struct ClaudeAdapter: VendorAdapter {
         let deadline = started.addingTimeInterval(Self.loginTimeout)
 
         func isAcceptable(_ creds: ClaudeCreds) -> Bool {
-            // Must differ from whatever was present at process start (nil after wipe).
-            if let priorToken, creds.accessToken == priorToken { return false }
-            if let expectFreshAfter, let exp = creds.expiresAt, exp <= expectFreshAfter {
-                return false
-            }
-            return !creds.accessToken.isEmpty
+            Self.isAcceptableLogin(creds, priorAccessToken: priorToken)
         }
 
         while Date() < deadline {
@@ -815,6 +866,17 @@ struct ClaudeAdapter: VendorAdapter {
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         let suffix = String(hex.prefix(8))
         return "\(keychainServiceBase)-\(suffix)"
+    }
+
+    private static func deleteScopedKeychainItem(configDir: URL) {
+        let service = scopedKeychainService(for: configDir)
+        let account = NSUserName()
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 
     /// One-shot read after `claude auth login`. The CLI does not write
