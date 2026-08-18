@@ -215,11 +215,20 @@ enum AccountChromeActions {
 
     // MARK: - Alerts / activation
 
-    /// Drop the managed folder. Claude also wipes the scoped Keychain item
-    /// (never the unsuffixed default) so cancel/remove cannot leave a leftover session.
+    /// Drop the managed folder. Vendor wipes leftover session files first.
     private static func discardManagedFolder(ref: CredentialRef, vendorID: VendorID) {
-        if vendorID == "claude" {
-            ClaudeAdapter.clearManagedCredentials(configDir: CredentialStore.directoryURL(for: ref))
+        let dir = CredentialStore.directoryURL(for: ref)
+        switch vendorID {
+        case "claude":
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+        case "codex":
+            CodexAdapter.clearManagedCredentials(codexHome: dir)
+        case "grok":
+            GrokAdapter.clearManagedCredentials(grokHome: dir)
+        case "gemini":
+            GeminiAdapter.clearManagedCredentials(home: dir)
+        default:
+            break
         }
         try? CredentialStore.removeDirectory(for: ref)
     }

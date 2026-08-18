@@ -123,10 +123,18 @@ final class AccountStore: ObservableObject {
     func remove(id: AccountID) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         let removed = accounts.remove(at: index)
-        if removed.vendorID == "claude" {
-            ClaudeAdapter.clearManagedCredentials(
-                configDir: CredentialStore.directoryURL(for: removed.credentialRef)
-            )
+        let dir = CredentialStore.directoryURL(for: removed.credentialRef)
+        switch removed.vendorID {
+        case "claude":
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+        case "codex":
+            CodexAdapter.clearManagedCredentials(codexHome: dir)
+        case "grok":
+            GrokAdapter.clearManagedCredentials(grokHome: dir)
+        case "gemini":
+            GeminiAdapter.clearManagedCredentials(home: dir)
+        default:
+            break
         }
         try? CredentialStore.removeDirectory(for: removed.credentialRef)
         reindex()
@@ -214,6 +222,7 @@ final class AccountStore: ObservableObject {
             case "claude": label = "Claude"
             case "codex": label = "Codex"
             case "grok": label = "Grok"
+            case "gemini": label = "Gemini"
             default: label = vendor
             }
             recovered.append(

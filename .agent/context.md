@@ -321,6 +321,12 @@ Fixes:
 - Recovered `9C11FBE9-…` by copying that Keychain item into `.credentials.json` (pro, has refresh).
 - Reauth bug: wipe file only → `auth login` opens browser then harvests leftover scoped Keychain. Fix: snapshot access token, logout + delete scoped item, accept only a *different* access token.
 
+## Orchestration auth graph (2026-08-16)
+
+- Run `run_43471c922fa7`: graph → harden → verify (3 Grok workers, ~20 min).
+- Landed on feat: leftover refresh rejected (H1), usage smoke after harvest (H2), last-good wiped on clear (H6), rollback rejected harvest, scoped KC wipe on cancel/remove (H4).
+- Still open: leftover that rotates *both* tokens; `runLogout` fire-and-forget (H3); global Claude Code KC clone (H7); adopt+401 skip POST (H8).
+
 ## Claude auth graph (2026-08-16)
 
 - Audit: `docs/notes/claude-auth-state-graph.md` (states, transitions, holes, unit-test list).

@@ -525,6 +525,7 @@ extension VendorTint {
         case .claude: return IslandColor.claude
         case .codex: return IslandColor.codex
         case .grok: return IslandColor.grok
+        case .gemini: return IslandColor.gemini
         case .neutral: return Color(red: 0.75, green: 0.72, blue: 0.68)
         }
     }

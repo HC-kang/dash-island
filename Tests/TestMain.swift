@@ -13,6 +13,7 @@ struct TestMain {
         failures += ClaudeAdapterSuite.run()
         failures += CodexAdapterSuite.run()
         failures += GrokAdapterSuite.run()
+        failures += GeminiAdapterSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

@@ -7,6 +7,7 @@ enum VendorRegistry {
         ClaudeAdapter(),
         CodexAdapter(),
         GrokAdapter(),
+        GeminiAdapter(),
     ]
 
     /// Full set including Fake — for tests / `adapter(for:)` only.
