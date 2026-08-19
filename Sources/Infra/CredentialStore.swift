@@ -140,7 +140,7 @@ enum CredentialStore {
                   let access = obj["access_token"] as? String,
                   !access.isEmpty
             else { continue }
-            return "gemini"
+            return "agy"
         }
 
         return nil

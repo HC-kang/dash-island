@@ -33,7 +33,7 @@ struct VendorLogoView: View {
         case "claude": return "C"
         case "codex": return "O"
         case "grok": return "G"
-        case "gemini": return "g"
+        case "agy": return "A"
         case "fake": return "F"
         default: return String(vendorID.prefix(1)).uppercased()
         }

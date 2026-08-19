@@ -1,7 +1,7 @@
 import Foundation
 
-enum GeminiAdapterError: Error, Equatable, LocalizedError {
-    case geminiBinaryNotFound
+enum AgyAdapterError: Error, Equatable, LocalizedError {
+    case agyBinaryNotFound
     case spawnFailed(String)
     case loginTimeout(home: String)
     case credentialsMissing(home: String)
@@ -9,26 +9,27 @@ enum GeminiAdapterError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .geminiBinaryNotFound:
+        case .agyBinaryNotFound:
             return """
-            Could not find the Gemini CLI (`gemini`). Install it, then retry \
-            or run login with HOME pointed at the managed account folder.
+            Could not find the Antigravity CLI (`agy`). Install it, then retry:
+
+              curl -fsSL https://antigravity.google/cli/install.sh | bash
             """
         case .spawnFailed(let message):
-            return "Failed to start Gemini login: \(message)"
+            return "Failed to start Antigravity login: \(message)"
         case .loginTimeout(let home):
             return """
-            Gemini login timed out. Complete browser sign-in, or run:
+            Antigravity login timed out. Complete browser sign-in, or run:
 
-              HOME='\(home)' gemini auth login
+              HOME='\(home)' agy
 
             Then choose Reauthenticate (or remove and re-add).
             """
         case .credentialsMissing(let home):
             return """
-            Gemini login finished but no oauth_creds.json was found. Run:
+            Antigravity login finished but no oauth_creds.json was found. Run:
 
-              HOME='\(home)' gemini auth login
+              HOME='\(home)' agy
             """
         case .reauthFailed(let message):
             return message
@@ -36,19 +37,19 @@ enum GeminiAdapterError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Gemini CLI usage via `cloudcode-pa.googleapis.com` `retrieveUserQuota`.
+/// Antigravity CLI (`agy`) — Gemini CLI’s replacement.
 ///
-/// **Credentials:** managed folder as `HOME` so the CLI writes
-/// `$HOME/.gemini/oauth_creds.json` — never the user’s default `~/.gemini`.
-/// Leftover-session guards match Claude: snapshot access+refresh, smoke quota,
-/// wipe last-good, roll back a rejected harvest.
-struct GeminiAdapter: VendorAdapter {
-    let id: VendorID = "gemini"
-    let displayName = "Gemini"
+/// Usage: `POST daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+/// (oh-my-pi / Orca-proven). Credentials live under the managed folder as `HOME`
+/// so login writes `$HOME/.gemini/oauth_creds.json`, never the user’s default
+/// `~/.gemini`. Leftover-session guards match Claude.
+struct AgyAdapter: VendorAdapter {
+    let id: VendorID = "agy"
+    let displayName = "Antigravity"
     let minPollSeconds = 300
 
-    private static let quotaURL = URL(
-        string: "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+    private static let modelsURL = URL(
+        string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
     )!
     private static let loadCodeAssistURL = URL(
         string: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
@@ -66,7 +67,7 @@ struct GeminiAdapter: VendorAdapter {
                 try await runLogin(home: dir)
                 try await Self.verifyUsageAccess(home: dir)
                 let short = String(ref.prefix(8))
-                return AddAccountResult(vendorID: id, label: "Gemini \(short)", credentialRef: ref)
+                return AddAccountResult(vendorID: id, label: "Agy \(short)", credentialRef: ref)
             } catch {
                 Self.clearManagedCredentials(home: dir)
                 try? CredentialStore.removeDirectory(for: ref)
@@ -93,8 +94,8 @@ struct GeminiAdapter: VendorAdapter {
             return ref
         } catch {
             Self.clearManagedCredentials(home: dir)
-            if let error = error as? GeminiAdapterError { throw error }
-            throw GeminiAdapterError.reauthFailed(error.localizedDescription)
+            if let error = error as? AgyAdapterError { throw error }
+            throw AgyAdapterError.reauthFailed(error.localizedDescription)
         }
     }
 
@@ -125,20 +126,19 @@ struct GeminiAdapter: VendorAdapter {
 
     static func verifyUsageAccess(home: URL) async throws {
         guard let creds = readCredentials(home: home) else {
-            throw GeminiAdapterError.reauthFailed("No credentials written.")
+            throw AgyAdapterError.reauthFailed("No credentials written.")
         }
         let snap = await probeUsage(token: creds.accessToken, fetchedAt: Date())
         switch usageSmokeDecision(snap) {
         case .pass:
             return
         case .softKeep:
-            NSLog("DashIsland: Gemini token smoke-test soft error %@", String(describing: snap.error))
+            NSLog("DashIsland: Agy token smoke-test soft error %@", String(describing: snap.error))
         case .reject:
-            throw GeminiAdapterError.reauthFailed(
+            throw AgyAdapterError.reauthFailed(
                 """
-                Token rejected by Google (invalid or missing Gemini CLI scopes).
-                Use Reauthenticate → browser login:
-                  HOME='\(home.path)' gemini auth login
+                Token rejected by Google. Use Reauthenticate → browser login:
+                  HOME='\(home.path)' agy
                 """
             )
         }
@@ -149,17 +149,19 @@ struct GeminiAdapter: VendorAdapter {
         let paths = [
             home.appendingPathComponent(".gemini", isDirectory: true)
                 .appendingPathComponent(credsFileName, isDirectory: false),
+            home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
+                .appendingPathComponent(credsFileName, isDirectory: false),
             home.appendingPathComponent(credsFileName, isDirectory: false),
         ]
         for path in paths where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         CredentialStore.removeLastGoodUsage(inDirectory: home)
-        NSLog("DashIsland: cleared Gemini managed creds at %@", home.path)
+        NSLog("DashIsland: cleared Agy managed creds at %@", home.path)
     }
 
     static func isAcceptableLogin(
-        _ creds: GeminiCreds,
+        _ creds: AgyCreds,
         priorAccessToken: String?,
         priorRefreshToken: String? = nil
     ) -> Bool {
@@ -182,8 +184,8 @@ struct GeminiAdapter: VendorAdapter {
         priorAccessToken: String? = nil,
         priorRefreshToken: String? = nil
     ) async throws {
-        guard let binary = Self.locateGeminiBinary() else {
-            throw GeminiAdapterError.geminiBinaryNotFound
+        guard let binary = Self.locateAgyBinary() else {
+            throw AgyAdapterError.agyBinaryNotFound
         }
         let prior = Self.readCredentials(home: home)
         let priorToken = priorAccessToken ?? prior?.accessToken
@@ -191,7 +193,8 @@ struct GeminiAdapter: VendorAdapter {
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
-        task.arguments = ["auth", "login"]
+        // Launching `agy` with no args opens the TUI, which signs in if needed.
+        task.arguments = []
         var env = ProcessInfo.processInfo.environment
         env["HOME"] = home.path
         env.removeValue(forKey: "GEMINI_API_KEY")
@@ -204,12 +207,12 @@ struct GeminiAdapter: VendorAdapter {
         do {
             try task.run()
         } catch {
-            throw GeminiAdapterError.spawnFailed(error.localizedDescription)
+            throw AgyAdapterError.spawnFailed(error.localizedDescription)
         }
 
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
 
-        func isAcceptable(_ creds: GeminiCreds) -> Bool {
+        func isAcceptable(_ creds: AgyCreds) -> Bool {
             Self.isAcceptableLogin(
                 creds,
                 priorAccessToken: priorToken,
@@ -232,7 +235,7 @@ struct GeminiAdapter: VendorAdapter {
                 if let creds = Self.readCredentials(home: home), isAcceptable(creds) {
                     return
                 }
-                throw GeminiAdapterError.credentialsMissing(home: home.path)
+                throw AgyAdapterError.credentialsMissing(home: home.path)
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
@@ -241,25 +244,27 @@ struct GeminiAdapter: VendorAdapter {
         if let creds = Self.readCredentials(home: home), isAcceptable(creds) {
             return
         }
-        throw GeminiAdapterError.loginTimeout(home: home.path)
+        throw AgyAdapterError.loginTimeout(home: home.path)
     }
 
-    static func requireCredentials(home: URL) throws -> GeminiCreds {
+    static func requireCredentials(home: URL) throws -> AgyCreds {
         if let creds = readCredentials(home: home) {
             return creds
         }
-        throw GeminiAdapterError.credentialsMissing(home: home.path)
+        throw AgyAdapterError.credentialsMissing(home: home.path)
     }
 
-    struct GeminiCreds: Equatable {
+    struct AgyCreds: Equatable {
         var accessToken: String
         var refreshToken: String?
         var expiryDate: Date?
     }
 
-    static func readCredentials(home: URL) -> GeminiCreds? {
+    static func readCredentials(home: URL) -> AgyCreds? {
         let candidates = [
             home.appendingPathComponent(".gemini", isDirectory: true)
+                .appendingPathComponent(credsFileName, isDirectory: false),
+            home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
                 .appendingPathComponent(credsFileName, isDirectory: false),
             home.appendingPathComponent(credsFileName, isDirectory: false),
         ]
@@ -273,7 +278,7 @@ struct GeminiAdapter: VendorAdapter {
         return nil
     }
 
-    static func parseOAuthCredsJSON(_ data: Data) -> GeminiCreds? {
+    static func parseOAuthCredsJSON(_ data: Data) -> AgyCreds? {
         guard let blob = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let access = blob["access_token"] as? String,
               !access.isEmpty
@@ -287,14 +292,14 @@ struct GeminiAdapter: VendorAdapter {
         } else {
             expiry = nil
         }
-        return GeminiCreds(
+        return AgyCreds(
             accessToken: access,
             refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
             expiryDate: expiry
         )
     }
 
-    static func persistCredentialsFile(_ creds: GeminiCreds, home: URL) {
+    static func persistCredentialsFile(_ creds: AgyCreds, home: URL) {
         let dir = home.appendingPathComponent(".gemini", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var blob: [String: Any] = ["access_token": creds.accessToken]
@@ -309,52 +314,56 @@ struct GeminiAdapter: VendorAdapter {
         try? data.write(to: path, options: .atomic)
     }
 
-    static func parseQuotaResponse(data: Data, fetchedAt: Date = Date()) -> UsageSnapshot {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) else {
-            return errorSnapshot(.parse("parse error"), fetchedAt: fetchedAt)
-        }
-        let rawBuckets: [Any]
-        if let arr = obj as? [Any] {
-            rawBuckets = arr
-        } else if let dict = obj as? [String: Any], let arr = dict["buckets"] as? [Any] {
-            rawBuckets = arr
-        } else {
-            return errorSnapshot(.parse("missing buckets"), fetchedAt: fetchedAt)
+    /// `fetchAvailableModels` → rings. Dedupes shared quota counters (oh-my-pi).
+    static func parseAvailableModelsResponse(data: Data, fetchedAt: Date = Date()) -> UsageSnapshot {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = obj["models"] as? [String: Any]
+        else {
+            return errorSnapshot(.parse("missing models"), fetchedAt: fetchedAt)
         }
 
         var windows: [WindowUsage] = []
-        for item in rawBuckets {
-            guard let bucket = item as? [String: Any],
-                  let remaining = bucket["remainingFraction"] as? Double,
-                  remaining.isFinite
-            else { continue }
-            let used = min(1, max(0, 1 - remaining))
-            let reset = parseResetTime(bucket["resetTime"])
-            let model = (bucket["modelId"] as? String) ?? "gemini"
-            windows.append(
-                WindowUsage(
-                    usedFraction: used,
-                    resetAt: reset,
-                    kind: .fiveHour,
-                    labelOverride: shortModelLabel(model)
+        var seen = Set<String>()
+        for (modelId, raw) in models {
+            guard let info = raw as? [String: Any] else { continue }
+            for quota in quotaInfos(from: info) {
+                guard let remaining = remainingFraction(quota), remaining.isFinite else { continue }
+                let used = min(1, max(0, 1 - remaining))
+                let kind = windowKind(quota)
+                let reset = parseResetTime(quota["resetTime"])
+                let label = (info["displayName"] as? String)
+                    ?? shortModelLabel(modelId)
+                let key = "\(Int((used * 1000).rounded()))-\(kind.rawValue)-\(reset?.timeIntervalSince1970 ?? 0)"
+                if seen.contains(key) { continue }
+                seen.insert(key)
+                windows.append(
+                    WindowUsage(
+                        usedFraction: used,
+                        resetAt: reset,
+                        kind: kind,
+                        labelOverride: label
+                    )
                 )
-            )
+            }
         }
+        windows.sort { $0.usedFraction > $1.usedFraction }
         guard let primary = windows.first else {
             return UsageSnapshot(
                 primary: WindowUsage(usedFraction: 0, kind: .unknown),
-                plan: "gemini",
+                plan: "agy",
                 fetchedAt: fetchedAt
             )
         }
         let extras = Array(windows.dropFirst())
-        let tertiary = UsageRingLayout.preferredTertiary(from: extras)
+        let weekly = extras.first(where: { $0.kind == .weekly })
+        let rest = extras.filter { $0 != weekly }
+        let tertiary = UsageRingLayout.preferredTertiary(from: rest)
         return UsageSnapshot(
             primary: primary,
-            secondary: nil,
+            secondary: weekly,
             tertiary: tertiary,
-            extras: UsageRingLayout.remainingExtras(extras: extras, tertiary: tertiary),
-            plan: "gemini",
+            extras: UsageRingLayout.remainingExtras(extras: rest, tertiary: tertiary),
+            plan: "agy",
             fetchedAt: fetchedAt
         )
     }
@@ -362,7 +371,7 @@ struct GeminiAdapter: VendorAdapter {
     static func probeUsage(token: String, fetchedAt: Date) async -> UsageSnapshot {
         do {
             let project = try await loadProjectID(token: token)
-            var req = URLRequest(url: quotaURL)
+            var req = URLRequest(url: modelsURL)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -374,7 +383,7 @@ struct GeminiAdapter: VendorAdapter {
             }
             switch http.statusCode {
             case 200:
-                return parseQuotaResponse(data: data, fetchedAt: fetchedAt)
+                return parseAvailableModelsResponse(data: data, fetchedAt: fetchedAt)
             case 401, 403:
                 return errorSnapshot(.authRequired, fetchedAt: fetchedAt)
             case 429:
@@ -397,19 +406,71 @@ struct GeminiAdapter: VendorAdapter {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 12
         req.httpBody = try JSONSerialization.data(
-            withJSONObject: ["metadata": ["ideType": "GEMINI_CLI", "pluginType": "GEMINI"]]
+            withJSONObject: [
+                "metadata": [
+                    "ideType": "ANTIGRAVITY",
+                    "platform": "PLATFORM_UNSPECIFIED",
+                    "pluginType": "GEMINI",
+                ]
+            ]
         )
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw GeminiAdapterError.reauthFailed("loadCodeAssist failed")
+            throw AgyAdapterError.reauthFailed("loadCodeAssist failed")
         }
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let project = obj["cloudaicompanionProject"] as? String,
-              !project.isEmpty
-        else {
-            throw GeminiAdapterError.reauthFailed("Gemini project ID not found")
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AgyAdapterError.reauthFailed("Gemini project ID not found")
         }
-        return project
+        if let project = obj["cloudaicompanionProject"] as? String, !project.isEmpty {
+            return project
+        }
+        if let wrapped = obj["cloudaicompanionProject"] as? [String: Any],
+           let project = wrapped["id"] as? String, !project.isEmpty
+        {
+            return project
+        }
+        throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
+    }
+
+    private static func quotaInfos(from info: [String: Any]) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        func append(_ raw: Any?) {
+            if let dict = raw as? [String: Any] { out.append(dict) }
+            if let arr = raw as? [Any] {
+                for item in arr {
+                    if let dict = item as? [String: Any] { out.append(dict) }
+                }
+            }
+        }
+        append(info["quotaInfo"])
+        append(info["quotaInfos"])
+        append(info["dailyQuotaInfo"])
+        append(info["dailyQuotaInfos"])
+        append(info["weeklyQuotaInfo"])
+        append(info["weeklyQuotaInfos"])
+        return out
+    }
+
+    private static func remainingFraction(_ quota: [String: Any]) -> Double? {
+        if let n = quota["remainingFraction"] as? Double { return n }
+        if let n = quota["remainingFraction"] as? Int { return Double(n) }
+        return nil
+    }
+
+    private static func windowKind(_ quota: [String: Any]) -> UsageWindowKind {
+        let source = [
+            quota["windowId"] as? String,
+            quota["windowLabel"] as? String,
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+        .lowercased()
+        if source.contains("week") || source.contains("7d") { return .weekly }
+        if source.contains("month") { return .monthly }
+        if source.contains("day") || source.contains("daily") || source.contains("24h") {
+            return .fiveHour
+        }
+        return .fiveHour
     }
 
     private static func parseResetTime(_ raw: Any?) -> Date? {
@@ -428,26 +489,25 @@ struct GeminiAdapter: VendorAdapter {
         return trimmed.isEmpty ? modelId : trimmed
     }
 
-    static func locateGeminiBinary() -> String? {
+    static func locateAgyBinary() -> String? {
         let env = ProcessInfo.processInfo.environment
-        if let override = env["GEMINI_BIN"], !override.isEmpty,
+        if let override = env["AGY_BIN"], !override.isEmpty,
            FileManager.default.isExecutableFile(atPath: override)
         {
             return override
         }
         let home = NSHomeDirectory()
         let candidates = [
-            "/opt/homebrew/bin/gemini",
-            "/usr/local/bin/gemini",
-            "\(home)/.local/bin/gemini",
-            "\(home)/.npm-global/bin/gemini",
+            "\(home)/.local/bin/agy",
+            "/opt/homebrew/bin/agy",
+            "/usr/local/bin/agy",
         ]
         if let hit = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             return hit
         }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        task.arguments = ["gemini"]
+        task.arguments = ["agy"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()

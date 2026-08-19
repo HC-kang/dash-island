@@ -131,8 +131,8 @@ final class AccountStore: ObservableObject {
             CodexAdapter.clearManagedCredentials(codexHome: dir)
         case "grok":
             GrokAdapter.clearManagedCredentials(grokHome: dir)
-        case "gemini":
-            GeminiAdapter.clearManagedCredentials(home: dir)
+        case "agy":
+            AgyAdapter.clearManagedCredentials(home: dir)
         default:
             break
         }
@@ -222,7 +222,7 @@ final class AccountStore: ObservableObject {
             case "claude": label = "Claude"
             case "codex": label = "Codex"
             case "grok": label = "Grok"
-            case "gemini": label = "Gemini"
+            case "agy": label = "Antigravity"
             default: label = vendor
             }
             recovered.append(

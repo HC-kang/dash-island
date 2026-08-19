@@ -225,8 +225,8 @@ enum AccountChromeActions {
             CodexAdapter.clearManagedCredentials(codexHome: dir)
         case "grok":
             GrokAdapter.clearManagedCredentials(grokHome: dir)
-        case "gemini":
-            GeminiAdapter.clearManagedCredentials(home: dir)
+        case "agy":
+            AgyAdapter.clearManagedCredentials(home: dir)
         default:
             break
         }
