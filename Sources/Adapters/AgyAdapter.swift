@@ -55,6 +55,8 @@ struct AgyAdapter: VendorAdapter {
     private static let loadCodeAssistURL = URL(
         string: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
     )!
+    private static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
+    private static let userAgent = "antigravity/hub/2.1.4 darwin/arm64"
     private static let credsFileName = "oauth_creds.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
@@ -103,10 +105,10 @@ struct AgyAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        guard let creds = Self.readCredentials(home: dir) else {
+        guard let creds = await Self.freshCredentials(home: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        return await Self.probeUsage(token: creds.accessToken, fetchedAt: now)
+        return await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
     }
 
     enum UsageSmokeDecision: Equatable {
@@ -126,10 +128,10 @@ struct AgyAdapter: VendorAdapter {
     }
 
     static func verifyUsageAccess(home: URL) async throws {
-        guard let creds = readCredentials(home: home) else {
+        guard let creds = await freshCredentials(home: home) else {
             throw AgyAdapterError.reauthFailed("No credentials written.")
         }
-        let snap = await probeUsage(token: creds.accessToken, fetchedAt: Date())
+        let snap = await probeUsage(token: creds.accessToken, home: home, fetchedAt: Date())
         switch usageSmokeDecision(snap) {
         case .pass:
             return
@@ -429,13 +431,14 @@ struct AgyAdapter: VendorAdapter {
         )
     }
 
-    static func probeUsage(token: String, fetchedAt: Date) async -> UsageSnapshot {
+    static func probeUsage(token: String, home: URL? = nil, fetchedAt: Date) async -> UsageSnapshot {
         do {
-            let project = try await loadProjectID(token: token)
+            let project = try await loadProjectID(token: token, home: home)
             var req = URLRequest(url: modelsURL)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             req.timeoutInterval = 12
             req.httpBody = try JSONSerialization.data(withJSONObject: ["project": project])
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -452,6 +455,13 @@ struct AgyAdapter: VendorAdapter {
             default:
                 return errorSnapshot(.network("HTTP \(http.statusCode)"), fetchedAt: fetchedAt)
             }
+        } catch let error as AgyAdapterError {
+            switch error {
+            case .reauthFailed(let message) where message.contains("401") || message.contains("403"):
+                return errorSnapshot(.authRequired, fetchedAt: fetchedAt)
+            default:
+                return errorSnapshot(.unavailable(error.localizedDescription), fetchedAt: fetchedAt)
+            }
         } catch {
             if (error as NSError).domain == NSURLErrorDomain {
                 return errorSnapshot(.network(error.localizedDescription), fetchedAt: fetchedAt)
@@ -460,11 +470,80 @@ struct AgyAdapter: VendorAdapter {
         }
     }
 
-    private static func loadProjectID(token: String) async throws -> String {
+    /// Refresh when access is missing expiry or expires within 5 minutes.
+    static func freshCredentials(home: URL) async -> AgyCreds? {
+        guard var creds = readCredentials(home: home) else { return nil }
+        let stillFresh = creds.expiryDate.map { $0.timeIntervalSinceNow > 5 * 60 } ?? false
+        if stillFresh { return creds }
+        let expired = creds.expiryDate.map { $0 <= Date() } ?? false
+        guard let refresh = creds.refreshToken, !refresh.isEmpty else {
+            return expired ? nil : creds
+        }
+        guard let next = await refreshAccessToken(refresh) else {
+            return expired ? nil : creds
+        }
+        creds.accessToken = next.access
+        if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
+        if let expiresIn = next.expiresIn {
+            creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+        }
+        persistCredentialsFile(creds, home: home)
+        return creds
+    }
+
+    private static func refreshAccessToken(_ refreshToken: String) async -> (
+        access: String,
+        refresh: String?,
+        expiresIn: Int?
+    )? {
+        var req = URLRequest(url: tokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        var parts: [String] = []
+        let form = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        func add(_ k: String, _ v: String) {
+            let ek = k.addingPercentEncoding(withAllowedCharacters: form) ?? k
+            let ev = v.addingPercentEncoding(withAllowedCharacters: form) ?? v
+            parts.append("\(ek)=\(ev)")
+        }
+        guard let client = oauthClientFromAgyBinary() else {
+            NSLog("DashIsland: Agy OAuth client not found in agy binary")
+            return nil
+        }
+        add("client_id", client.id)
+        add("client_secret", client.secret)
+        add("refresh_token", refreshToken)
+        add("grant_type", "refresh_token")
+        req.httpBody = parts.joined(separator: "&").data(using: .utf8)
+        req.timeoutInterval = 12
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let access = obj["access_token"] as? String, !access.isEmpty
+            else {
+                NSLog("DashIsland: Agy token refresh failed")
+                return nil
+            }
+            let rotated = obj["refresh_token"] as? String
+            let expiresIn = obj["expires_in"] as? Int
+            return (access, rotated, expiresIn)
+        } catch {
+            NSLog("DashIsland: Agy token refresh error %@", error.localizedDescription)
+            return nil
+        }
+    }
+
+    private static func loadProjectID(token: String, home: URL?) async throws -> String {
+        if let home, let cached = readCachedProjectID(home: home) {
+            return cached
+        }
         var req = URLRequest(url: loadCodeAssistURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 12
         req.httpBody = try JSONSerialization.data(
             withJSONObject: [
@@ -476,21 +555,49 @@ struct AgyAdapter: VendorAdapter {
             ]
         )
         let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw AgyAdapterError.reauthFailed("loadCodeAssist failed")
         }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AgyAdapterError.reauthFailed("loadCodeAssist HTTP \(http.statusCode)")
+        }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AgyAdapterError.reauthFailed("Gemini project ID not found")
+            throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
         }
-        if let project = obj["cloudaicompanionProject"] as? String, !project.isEmpty {
-            return project
-        }
-        if let wrapped = obj["cloudaicompanionProject"] as? [String: Any],
-           let project = wrapped["id"] as? String, !project.isEmpty
+        let project: String?
+        if let s = obj["cloudaicompanionProject"] as? String, !s.isEmpty {
+            project = s
+        } else if let wrapped = obj["cloudaicompanionProject"] as? [String: Any],
+                  let s = wrapped["id"] as? String, !s.isEmpty
         {
-            return project
+            project = s
+        } else {
+            project = nil
         }
-        throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
+        guard let project else {
+            throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
+        }
+        if let home { writeCachedProjectID(project, home: home) }
+        return project
+    }
+
+    private static func cachedProjectURL(home: URL) -> URL {
+        home.appendingPathComponent(".gemini/antigravity-cli/cache/default_project_id.txt")
+    }
+
+    private static func readCachedProjectID(home: URL) -> String? {
+        let raw = try? String(contentsOf: cachedProjectURL(home: home), encoding: .utf8)
+        let id = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return id.isEmpty || id == "default-cli-project" ? nil : id
+    }
+
+    private static func writeCachedProjectID(_ id: String, home: URL) {
+        let url = cachedProjectURL(home: home)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? id.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private static func quotaInfos(from info: [String: Any]) -> [[String: Any]] {
@@ -548,6 +655,47 @@ struct AgyAdapter: VendorAdapter {
     static func shortModelLabel(_ modelId: String) -> String {
         let trimmed = modelId.replacingOccurrences(of: "gemini-", with: "", options: .caseInsensitive)
         return trimmed.isEmpty ? modelId : trimmed
+    }
+
+    private static var cachedOAuthClient: (id: String, secret: String)?
+
+    /// Installed-app OAuth client is embedded in the `agy` binary; never commit it.
+    static func oauthClientFromAgyBinary() -> (id: String, secret: String)? {
+        if let cachedOAuthClient { return cachedOAuthClient }
+        guard let path = locateAgyBinary(),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let id = scanEmbeddedClientID(data),
+              let secret = scanEmbeddedClientSecret(data)
+        else { return nil }
+        cachedOAuthClient = (id, secret)
+        return cachedOAuthClient
+    }
+
+    private static func scanEmbeddedClientID(_ data: Data) -> String? {
+        let marker = Data(".apps.googleusercontent.com".utf8)
+        guard let range = data.range(of: marker) else { return nil }
+        var start = range.lowerBound
+        while start > 0 {
+            let b = data[data.index(before: start)]
+            let ok = (b >= 48 && b <= 57) || (b >= 97 && b <= 122) || b == 45
+            if !ok { break }
+            start = data.index(before: start)
+        }
+        return String(data: data[start..<range.upperBound], encoding: .ascii)
+    }
+
+    private static func scanEmbeddedClientSecret(_ data: Data) -> String? {
+        let marker = Data("GOCSPX-".utf8)
+        guard let range = data.range(of: marker) else { return nil }
+        var end = range.upperBound
+        while end < data.endIndex {
+            let b = data[end]
+            let ok = (b >= 48 && b <= 57) || (b >= 65 && b <= 90)
+                || (b >= 97 && b <= 122) || b == 45 || b == 95
+            if !ok { break }
+            end = data.index(after: end)
+        }
+        return String(data: data[range.lowerBound..<end], encoding: .ascii)
     }
 
     static func locateAgyBinary() -> String? {

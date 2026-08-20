@@ -45,6 +45,7 @@ struct VendorLogoView: View {
         case "claude": return "claude"
         case "codex": return "openai" // Codex uses OpenAI mark
         case "grok": return "grok"
+        case "agy": return "agy"
         default: return nil
         }
     }

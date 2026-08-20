@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="128" height="128">
+  <!-- Distinct from Claude's A: upward chevron (lift) over a ground bar. -->
+  <path fill="#FFFFFF" d="M12 2.2L21.2 16.4h-3.6L12 6.7 6.4 16.4H2.8L12 2.2z"/>
+  <rect fill="#FFFFFF" x="6.2" y="18.4" width="11.6" height="3.2" rx="1.1"/>
+</svg>
