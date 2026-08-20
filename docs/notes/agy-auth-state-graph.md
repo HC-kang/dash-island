@@ -22,7 +22,10 @@ wipe last-good, roll back failed add/reauth. Cancel/remove wipes Agy files.
 
 ## Known gaps
 
-- `agy` may also store the session in the OS keyring. File harvest is the
-  managed-folder path; a global keyring leftover is still possible.
+- CLI tokens live in Keychain `service=gemini` / `account=antigravity`
+  (`go-keyring-base64:{token:{access_token,refresh_token,expiry}}`). Piped
+  `agy` never opens a browser — login is harvest-that-item, else Terminal.app.
+- Global keyring is one Google session; leftover access/refresh inequality
+  would deadlock reauth, so Agy accepts the same tokens after smoke.
 - This machine may not have `agy` on PATH until
   `curl -fsSL https://antigravity.google/cli/install.sh | bash`.

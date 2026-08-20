@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 enum AgyAdapterError: Error, Equatable, LocalizedError {
     case agyBinaryNotFound
@@ -181,70 +182,130 @@ struct AgyAdapter: VendorAdapter {
 
     private func runLogin(
         home: URL,
-        priorAccessToken: String? = nil,
-        priorRefreshToken: String? = nil
+        priorAccessToken _: String? = nil,
+        priorRefreshToken _: String? = nil
     ) async throws {
         guard let binary = Self.locateAgyBinary() else {
             throw AgyAdapterError.agyBinaryNotFound
         }
-        let prior = Self.readCredentials(home: home)
-        let priorToken = priorAccessToken ?? prior?.accessToken
-        let priorRefresh = priorRefreshToken ?? prior?.refreshToken
+        func isAcceptable(_ creds: AgyCreds) -> Bool {
+            !creds.accessToken.isEmpty
+        }
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: binary)
-        // Launching `agy` with no args opens the TUI, which signs in if needed.
-        task.arguments = []
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = home.path
-        env.removeValue(forKey: "GEMINI_API_KEY")
-        env.removeValue(forKey: "GOOGLE_API_KEY")
-        task.environment = env
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        task.standardInput = Pipe()
+        // `agy` is a TUI. Piped stdin never opens a browser, and tokens live in
+        // Keychain service `gemini` / account `antigravity` — not oauth_creds.json.
+        if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
+            Self.persistCredentialsFile(creds, home: home)
+            return
+        }
 
         do {
-            try task.run()
+            try Self.launchVisibleLogin(binary: binary, home: home)
         } catch {
             throw AgyAdapterError.spawnFailed(error.localizedDescription)
         }
 
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
-
-        func isAcceptable(_ creds: AgyCreds) -> Bool {
-            Self.isAcceptableLogin(
-                creds,
-                priorAccessToken: priorToken,
-                priorRefreshToken: priorRefresh
-            )
-        }
-
         while Date() < deadline {
-            if Task.isCancelled {
-                if task.isRunning { task.terminate() }
-                throw CancellationError()
-            }
-            if let creds = Self.readCredentials(home: home), isAcceptable(creds) {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning { task.terminate() }
+            if Task.isCancelled { throw CancellationError() }
+            if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
+                Self.persistCredentialsFile(creds, home: home)
                 return
-            }
-            if !task.isRunning {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if let creds = Self.readCredentials(home: home), isAcceptable(creds) {
-                    return
-                }
-                throw AgyAdapterError.credentialsMissing(home: home.path)
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
-
-        if task.isRunning { task.terminate() }
-        if let creds = Self.readCredentials(home: home), isAcceptable(creds) {
+        if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
+            Self.persistCredentialsFile(creds, home: home)
             return
         }
         throw AgyAdapterError.loginTimeout(home: home.path)
+    }
+
+    /// File first, then the CLI's global Keychain blob (one-shot copy into the
+    /// managed folder). Never writes Keychain.
+    static func captureLoginCredentials(home: URL) -> AgyCreds? {
+        if let file = readCredentials(home: home) { return file }
+        return readKeychainCredentials()
+    }
+
+    static func parseKeychainBlob(_ data: Data) -> AgyCreds? {
+        let raw = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let payload: Data
+        if raw.hasPrefix("go-keyring-base64:") {
+            let b64 = String(raw.dropFirst("go-keyring-base64:".count))
+            guard let decoded = Data(base64Encoded: b64) else { return nil }
+            payload = decoded
+        } else if let decoded = Data(base64Encoded: raw) {
+            payload = decoded
+        } else {
+            payload = data
+        }
+        if let nested = parseOAuthCredsJSON(payload) { return nested }
+        guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            return nil
+        }
+        let token = (obj["token"] as? [String: Any]) ?? obj
+        guard let access = token["access_token"] as? String, !access.isEmpty else { return nil }
+        let refresh = token["refresh_token"] as? String
+        let expiry: Date?
+        if let s = token["expiry"] as? String {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let plain = ISO8601DateFormatter()
+            plain.formatOptions = [.withInternetDateTime]
+            expiry = iso.date(from: s) ?? plain.date(from: s)
+        } else {
+            expiry = nil
+        }
+        return AgyCreds(
+            accessToken: access,
+            refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
+            expiryDate: expiry
+        )
+    }
+
+    private static func readKeychainCredentials() -> AgyCreds? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "gemini",
+            kSecAttrAccount as String: "antigravity",
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return parseKeychainBlob(data)
+    }
+
+    /// TTY login in Terminal.app. Piped `agy` never shows the sign-in UI.
+    static func launchVisibleLogin(binary: String, home: URL) throws {
+        let script = home.appendingPathComponent(".dash-island-agy-login.command")
+        let body = """
+        #!/bin/zsh
+        export HOME=\(shellEscape(home.path))
+        unset GEMINI_API_KEY GOOGLE_API_KEY
+        echo "Dash Island — sign in to Antigravity, then close this window."
+        exec \(shellEscape(binary))
+        """
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: script.path
+        )
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-a", "Terminal", script.path]
+        try task.run()
+        task.waitUntilExit()
+        if task.terminationStatus != 0 {
+            throw AgyAdapterError.spawnFailed("open Terminal failed (\(task.terminationStatus))")
+        }
+    }
+
+    private static func shellEscape(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func requireCredentials(home: URL) throws -> AgyCreds {

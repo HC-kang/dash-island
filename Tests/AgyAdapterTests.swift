@@ -5,6 +5,17 @@ enum AgyAdapterSuite {
         print("AgyAdapterSuite")
         var failures = 0
 
+        failures += check("parse go-keyring-base64 keychain blob") {
+            let inner = """
+            {"token":{"access_token":"ya29.t","token_type":"Bearer","refresh_token":"1//r","expiry":"2026-08-19T22:50:03Z"},"auth_method":"consumer"}
+            """
+            let b64 = Data(inner.utf8).base64EncodedString()
+            let blob = Data("go-keyring-base64:\(b64)".utf8)
+            let creds = AgyAdapter.parseKeychainBlob(blob)
+            try assertEqual(creds?.accessToken, "ya29.t")
+            try assertEqual(creds?.refreshToken, "1//r")
+        }
+
         failures += check("parse oauth_creds.json") {
             let json = """
             {"access_token":"ya29.a","refresh_token":"1//r","expiry_date":1780000000000}

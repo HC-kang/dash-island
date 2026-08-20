@@ -79,7 +79,9 @@ enum AccountChromeActions {
     private static func beginAddBrowserLogin(adapter: any VendorAdapter) {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
-            message: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
+            message: adapter.id == "agy"
+                ? "A Terminal window should open for Antigravity. If you already use agy, we copy that session — wait a moment."
+                : "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()
