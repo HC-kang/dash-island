@@ -124,15 +124,24 @@ struct AgyAdapter: VendorAdapter {
         }
     }
 
+    static func isFresh(_ creds: AgyCreds, slack: TimeInterval = 60) -> Bool {
+        guard !creds.accessToken.isEmpty else { return false }
+        guard let exp = creds.expiryDate else { return true }
+        return exp.timeIntervalSinceNow > slack
+    }
+
     static func verifyUsageAccess(home: URL) async throws {
+        if readCredentials(home: home) == nil, let harvested = captureLoginCredentials(home: home) {
+            try? persistCredentialsFile(harvested, home: home)
+        }
         guard readCredentials(home: home) != nil else {
             throw AgyAdapterError.reauthFailed("No credentials written.")
         }
         guard let creds = await freshCredentials(home: home) else {
             throw AgyAdapterError.reauthFailed(
                 """
-                Google session expired and refresh failed. Sign in with `agy` \
-                in Terminal, then retry Reauthenticate.
+                Antigravity session is expired. A Terminal window should have \
+                opened — sign in with agy, then retry Reauthenticate.
                 """
             )
         }
@@ -195,15 +204,22 @@ struct AgyAdapter: VendorAdapter {
         guard let binary = Self.locateAgyBinary() else {
             throw AgyAdapterError.agyBinaryNotFound
         }
-        func isAcceptable(_ creds: AgyCreds) -> Bool {
-            !creds.accessToken.isEmpty
-        }
+        func accept(_ creds: AgyCreds) -> Bool { Self.isFresh(creds) }
 
-        // `agy` is a TUI. Piped stdin never opens a browser, and tokens live in
-        // Keychain service `gemini` / account `antigravity` — not oauth_creds.json.
-        if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
-            try Self.persistCredentialsFile(creds, home: home)
-            return
+        // Keychain harvest is not enough when access is already expired.
+        // Claude pattern: let the CLI refresh, then re-read the store.
+        if let creds = Self.captureLoginCredentials(home: home), !creds.accessToken.isEmpty {
+            if accept(creds) {
+                try Self.persistCredentialsFile(creds, home: home)
+                return
+            }
+            if let pinged = await Self.pingCLIThenHarvest(
+                home: home,
+                failedAccessToken: creds.accessToken
+            ), accept(pinged) {
+                try Self.persistCredentialsFile(pinged, home: home)
+                return
+            }
         }
 
         do {
@@ -215,13 +231,13 @@ struct AgyAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }
-            if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
+            if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
                 try Self.persistCredentialsFile(creds, home: home)
                 return
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
-        if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
+        if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
             try Self.persistCredentialsFile(creds, home: home)
             return
         }
@@ -474,24 +490,107 @@ struct AgyAdapter: VendorAdapter {
     }
 
     /// Refresh when access is missing expiry or expires within 5 minutes.
+    /// Google POST first; if that fails, Claude-style CLI ping then re-harvest.
     static func freshCredentials(home: URL) async -> AgyCreds? {
+        if readCredentials(home: home) == nil, let harvested = captureLoginCredentials(home: home) {
+            try? persistCredentialsFile(harvested, home: home)
+        }
         guard var creds = readCredentials(home: home) else { return nil }
-        let stillFresh = creds.expiryDate.map { $0.timeIntervalSinceNow > 5 * 60 } ?? false
-        if stillFresh { return creds }
+        if isFresh(creds, slack: 5 * 60) { return creds }
         let expired = creds.expiryDate.map { $0 <= Date() } ?? false
-        guard let refresh = creds.refreshToken, !refresh.isEmpty else {
-            return expired ? nil : creds
+        if let refresh = creds.refreshToken, !refresh.isEmpty,
+           let next = await refreshAccessToken(refresh)
+        {
+            creds.accessToken = next.access
+            if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
+            if let expiresIn = next.expiresIn {
+                creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+            }
+            try? persistCredentialsFile(creds, home: home)
+            return creds
         }
-        guard let next = await refreshAccessToken(refresh) else {
-            return expired ? nil : creds
+        if let pinged = await pingCLIThenHarvest(home: home, failedAccessToken: creds.accessToken) {
+            try? persistCredentialsFile(pinged, home: home)
+            return pinged
         }
-        creds.accessToken = next.access
-        if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
-        if let expiresIn = next.expiresIn {
-            creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+        return expired ? nil : creds
+    }
+
+    static var refreshPingSpawner: ((URL) async -> Bool)?
+
+    static func pingCLIThenHarvest(home: URL, failedAccessToken: String?) async -> AgyCreds? {
+        if pingRecentlyAttempted(home: home) { return nil }
+        markPingAttempted(home: home)
+        let beforeExpiry = captureLoginCredentials(home: home)?.expiryDate
+        let spawned: Bool
+        if let refreshPingSpawner {
+            spawned = await refreshPingSpawner(home)
+        } else {
+            spawned = await spawnManagedRefreshPing()
         }
-        try? persistCredentialsFile(creds, home: home)
-        return creds
+        guard spawned else { return nil }
+        let deadline = Date().addingTimeInterval(55)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let creds = captureLoginCredentials(home: home), isFresh(creds) {
+                if creds.accessToken != failedAccessToken { return creds }
+                if let exp = creds.expiryDate, let before = beforeExpiry, exp > before {
+                    return creds
+                }
+                if creds.accessToken != failedAccessToken || beforeExpiry == nil {
+                    return creds
+                }
+            }
+        }
+        if let creds = captureLoginCredentials(home: home), isFresh(creds) {
+            return creds
+        }
+        return nil
+    }
+
+    private static func pingDefaultsKey(home: URL) -> String {
+        "DashIsland.AgyCLIPing.\(home.path)"
+    }
+
+    static func pingRecentlyAttempted(home: URL, now: Date = Date()) -> Bool {
+        let t = UserDefaults.standard.double(forKey: pingDefaultsKey(home: home))
+        guard t > 0 else { return false }
+        return now.timeIntervalSince(Date(timeIntervalSince1970: t)) < 6 * 3600
+    }
+
+    static func markPingAttempted(home: URL, now: Date = Date()) {
+        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: pingDefaultsKey(home: home))
+    }
+
+    /// `agy --print ok` refreshes the global Keychain session (Claude's
+    /// `claude -p` analogue). HOME is *not* overridden so the CLI hits the
+    /// same `gemini`/`antigravity` item we harvest.
+    static func spawnManagedRefreshPing() async -> Bool {
+        guard let path = locateAgyBinary() else { return false }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = ["--print", "ok", "--print-timeout", "45s", "--output-format", "text"]
+        var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "GEMINI_API_KEY")
+        env.removeValue(forKey: "GOOGLE_API_KEY")
+        task.environment = env
+        task.currentDirectoryPath = NSHomeDirectory()
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        task.standardInput = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            NSLog("DashIsland: Agy CLI ping failed %@", error.localizedDescription)
+            return false
+        }
+        let deadline = Date().addingTimeInterval(50)
+        while task.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        if task.isRunning { task.terminate() }
+        NSLog("DashIsland: Agy CLI ping finished")
+        return true
     }
 
     private static func refreshAccessToken(_ refreshToken: String) async -> (

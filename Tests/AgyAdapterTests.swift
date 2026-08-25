@@ -141,6 +141,31 @@ enum AgyAdapterSuite {
             try assertTrue(!FileManager.default.fileExists(atPath: lastGood.path))
         }
 
+        failures += check("expired harvest is not treated as a fresh login") {
+            let expired = AgyAdapter.AgyCreds(
+                accessToken: "ya29.old",
+                refreshToken: "rt",
+                expiryDate: Date().addingTimeInterval(-60)
+            )
+            try assertTrue(!AgyAdapter.isFresh(expired))
+            let live = AgyAdapter.AgyCreds(
+                accessToken: "ya29.new",
+                refreshToken: "rt",
+                expiryDate: Date().addingTimeInterval(3600)
+            )
+            try assertTrue(AgyAdapter.isFresh(live))
+        }
+
+        failures += check("CLI ping is 6h gated per managed dir") {
+            let dir = URL(fileURLWithPath: "/tmp/dash-island-agy-ping-\(UUID().uuidString)", isDirectory: true)
+            let key = "DashIsland.AgyCLIPing.\(dir.path)"
+            UserDefaults.standard.removeObject(forKey: key)
+            defer { UserDefaults.standard.removeObject(forKey: key) }
+            try assertTrue(!AgyAdapter.pingRecentlyAttempted(home: dir))
+            AgyAdapter.markPingAttempted(home: dir)
+            try assertTrue(AgyAdapter.pingRecentlyAttempted(home: dir))
+        }
+
         failures += check("registry includes agy and still includes codex") {
             try assertTrue(VendorRegistry.adapter(for: "agy")?.id == "agy")
             try assertTrue(VendorRegistry.adapter(for: "codex")?.id == "codex")
