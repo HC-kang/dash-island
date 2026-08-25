@@ -17,11 +17,11 @@ struct VendorLogoView: View {
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
+                    .colorMultiply(Self.markTint(for: vendorID))
             } else {
-                // Fallback monogram if asset missing from the bundle.
                 Text(monogram)
                     .font(.system(size: size * 0.72, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.85))
+                    .foregroundStyle(Self.markTint(for: vendorID).opacity(0.92))
             }
         }
         .frame(width: size, height: size)
@@ -36,6 +36,16 @@ struct VendorLogoView: View {
         case "agy": return "A"
         case "fake": return "F"
         default: return String(vendorID.prefix(1)).uppercased()
+        }
+    }
+
+    /// Official-ish product accents. Grok stays white (xAI mark is mono).
+    static func markTint(for vendorID: VendorID) -> Color {
+        switch vendorID {
+        case "claude": return IslandColor.claude
+        case "codex": return IslandColor.codex
+        case "agy": return IslandColor.agy
+        default: return .white
         }
     }
 

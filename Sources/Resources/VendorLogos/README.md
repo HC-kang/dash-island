@@ -1,6 +1,13 @@
 # Vendor logos
 
-White monochrome marks for dark island chrome (widget top-leading badge).
+White monochrome marks, tinted at runtime for dark island chrome.
+
+| Vendor | Tint | Hex |
+|--------|------|-----|
+| Claude | Anthropic Book Cloth | `#CC785C` |
+| Codex | OpenAI Teal | `#10A37F` |
+| Grok | white (official mono) | `#FFFFFF` |
+| Agy | Google Blue | `#4285F4` |
 
 | File | Brand | Source |
 |------|--------|--------|
