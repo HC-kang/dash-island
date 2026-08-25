@@ -215,33 +215,18 @@ struct AgyAdapter: VendorAdapter {
         priorAccessToken _: String? = nil,
         priorRefreshToken _: String? = nil
     ) async throws {
-        guard let binary = Self.locateAgyBinary() else {
+        guard Self.locateAgyBinary() != nil else {
             throw AgyAdapterError.agyBinaryNotFound
         }
         func accept(_ creds: AgyCreds) -> Bool { Self.isFresh(creds) }
 
-        // Keychain harvest is not enough when access is already expired.
-        // Claude pattern: let the CLI refresh, then re-read the store.
-        if let creds = Self.captureLoginCredentials(home: home), !creds.accessToken.isEmpty {
-            if accept(creds) {
-                try Self.persistCredentialsFile(creds, home: home)
-                return
-            }
-            if let pinged = await Self.pingCLIThenHarvest(
-                home: home,
-                failedAccessToken: creds.accessToken
-            ), accept(pinged) {
-                try Self.persistCredentialsFile(pinged, home: home)
-                return
-            }
+        if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
+            try Self.persistCredentialsFile(creds, home: home)
+            return
         }
 
-        do {
-            try Self.launchVisibleLogin(binary: binary, home: home)
-        } catch {
-            throw AgyAdapterError.spawnFailed(error.localizedDescription)
-        }
-
+        // Hidden `agy --print` (no Terminal.app). May open a browser for OAuth.
+        _ = await Self.spawnManagedRefreshPing()
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }

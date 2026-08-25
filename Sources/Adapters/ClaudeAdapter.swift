@@ -236,7 +236,13 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
 
-        // Steady-state: managed file only (one file per account — multi-account safe).
+        // File first, but CLI ping/login may have rotated the scoped Keychain
+        // only — adopt that into the managed file (same as Agy prefer-fresher).
+        if let live = Self.captureLoginCredentials(configDir: dir),
+           live.accessToken != Self.readCredentials(configDir: dir)?.accessToken
+        {
+            Self.persistCredentialsFile(creds: live, configDir: dir, overwrite: true)
+        }
         guard let creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
@@ -365,26 +371,36 @@ struct ClaudeAdapter: VendorAdapter {
         configDir: URL,
         failedAccessToken: String?
     ) async -> ClaudeCreds? {
-        if pingRecentlyAttempted(configDir: configDir) { return nil }
+        let expired = readCredentials(configDir: configDir)
+            .map { needsRefresh($0) } ?? true
+        // Don't 6h-gate an already-dead access token — that's the case ping exists for.
+        if !expired, pingRecentlyAttempted(configDir: configDir) { return nil }
         markPingAttempted(configDir: configDir)
-        let before = readCredentials(configDir: configDir)?.accessToken
-        let spawned = (refreshPingSpawner ?? spawnManagedRefreshPing)(configDir)
+        let before = captureLoginCredentials(configDir: configDir)?.accessToken
+        let spawned: Bool
+        if let refreshPingSpawner {
+            spawned = refreshPingSpawner(configDir)
+        } else {
+            spawned = await spawnManagedRefreshPing(configDir: configDir)
+        }
         guard spawned else { return nil }
-        let deadline = Date().addingTimeInterval(20)
+        let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            if let creds = readCredentials(configDir: configDir),
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if let creds = captureLoginCredentials(configDir: configDir),
                !creds.accessToken.isEmpty,
                creds.accessToken != before,
                creds.accessToken != failedAccessToken
             {
+                persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                 NSLog("DashIsland: Claude CLI ping adopted new token")
                 return creds
             }
         }
-        if let creds = readCredentials(configDir: configDir),
+        if let creds = captureLoginCredentials(configDir: configDir),
            shouldAdopt(creds, failedAccessToken: failedAccessToken)
         {
+            persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
             return creds
         }
         return nil
@@ -404,11 +420,9 @@ struct ClaudeAdapter: VendorAdapter {
         UserDefaults.standard.set(now.timeIntervalSince1970, forKey: pingDefaultsKey(configDir: configDir))
     }
 
-    /// Detached `claude -p ok --model haiku` with this account's CLAUDE_CONFIG_DIR.
-    /// Mirrors Codex Island `spawnTokenRefreshPing` but never touches the
-    /// user's default `~/.claude` or unsuffixed Keychain.
-    @discardableResult
-    static func spawnManagedRefreshPing(configDir: URL) -> Bool {
+    /// Hidden `claude -p ok --model haiku` with this account's CLAUDE_CONFIG_DIR.
+    /// No Terminal window — the CLI refreshes and writes the scoped store.
+    static func spawnManagedRefreshPing(configDir: URL) async -> Bool {
         guard let path = locateClaudeBinary() else { return false }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
@@ -425,12 +439,17 @@ struct ClaudeAdapter: VendorAdapter {
         task.standardInput = FileHandle.nullDevice
         do {
             try task.run()
-            NSLog("DashIsland: Claude CLI ping spawned dir=%@", configDir.path)
-            return true
         } catch {
             NSLog("DashIsland: Claude CLI ping failed %@", error.localizedDescription)
             return false
         }
+        let deadline = Date().addingTimeInterval(45)
+        while task.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        if task.isRunning { task.terminate() }
+        NSLog("DashIsland: Claude CLI ping finished dir=%@", configDir.path)
+        return true
     }
 
     private static func logUsage(_ snap: UsageSnapshot, ref: CredentialRef) -> UsageSnapshot {
