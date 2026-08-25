@@ -295,12 +295,25 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// Gated recover + re-probe. Soft outcomes keep orchestrator last-good rings.
+    /// CLI ping first: access dies ~8h, but the CLI login/refresh token does not.
+    /// oauth/token POST is backup (this managed dir is ours).
     private static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
         failedAccessToken: String?,
         fallback: UsageSnapshot
     ) async -> UsageSnapshot {
+        if let pinged = await pingCLIThenAdopt(
+            configDir: configDir,
+            failedAccessToken: failedAccessToken
+        ) {
+            NSLog("DashIsland: Claude CLI ping recovered ref=%@", String(ref.prefix(8)))
+            return await probeUsage(
+                token: pinged.accessToken,
+                plan: pinged.subscriptionType,
+                fetchedAt: Date()
+            )
+        }
         switch await refreshManagedCredentialsDetailed(
             configDir: configDir,
             failedAccessToken: failedAccessToken
@@ -323,16 +336,6 @@ struct ClaudeAdapter: VendorAdapter {
             return errorSnapshot(.authRequired, fetchedAt: Date())
         case .unavailable(let message):
             NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
-            if let pinged = await pingCLIThenAdopt(
-                configDir: configDir,
-                failedAccessToken: failedAccessToken
-            ) {
-                return await probeUsage(
-                    token: pinged.accessToken,
-                    plan: pinged.subscriptionType,
-                    fetchedAt: Date()
-                )
-            }
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — \(message)"),
@@ -341,16 +344,6 @@ struct ClaudeAdapter: VendorAdapter {
             }
             return fallback
         case .skipped:
-            if let pinged = await pingCLIThenAdopt(
-                configDir: configDir,
-                failedAccessToken: failedAccessToken
-            ) {
-                return await probeUsage(
-                    token: pinged.accessToken,
-                    plan: pinged.subscriptionType,
-                    fetchedAt: Date()
-                )
-            }
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — no refresh token. Reauthenticate this account"),
@@ -372,9 +365,10 @@ struct ClaudeAdapter: VendorAdapter {
         failedAccessToken: String?
     ) async -> ClaudeCreds? {
         let expired = readCredentials(configDir: configDir)
-            .map { needsRefresh($0) } ?? true
-        // Don't 6h-gate an already-dead access token — that's the case ping exists for.
-        if !expired, pingRecentlyAttempted(configDir: configDir) { return nil }
+            .map { isExpired($0) } ?? true
+        // Access ~8h; CLI login is not. Dead access retries every 15m, not 6h.
+        let gap: TimeInterval = expired ? 15 * 60 : 6 * 3600
+        if pingRecentlyAttempted(configDir: configDir, gap: gap) { return nil }
         markPingAttempted(configDir: configDir)
         let before = captureLoginCredentials(configDir: configDir)?.accessToken
         let spawned: Bool
@@ -410,10 +404,14 @@ struct ClaudeAdapter: VendorAdapter {
         "DashIsland.ClaudeCLIPing.\(configDir.path)"
     }
 
-    static func pingRecentlyAttempted(configDir: URL, now: Date = Date()) -> Bool {
+    static func pingRecentlyAttempted(
+        configDir: URL,
+        now: Date = Date(),
+        gap: TimeInterval = 6 * 3600
+    ) -> Bool {
         let t = UserDefaults.standard.double(forKey: pingDefaultsKey(configDir: configDir))
         guard t > 0 else { return false }
-        return now.timeIntervalSince(Date(timeIntervalSince1970: t)) < 6 * 3600
+        return now.timeIntervalSince(Date(timeIntervalSince1970: t)) < gap
     }
 
     static func markPingAttempted(configDir: URL, now: Date = Date()) {
