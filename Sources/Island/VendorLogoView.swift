@@ -39,11 +39,10 @@ struct VendorLogoView: View {
         }
     }
 
-    /// Official-ish product accents. Grok stays white (xAI mark is mono).
+    /// Marks only. Rings keep IslandColor. Codex/Grok stay white (official mono).
     static func markTint(for vendorID: VendorID) -> Color {
         switch vendorID {
         case "claude": return IslandColor.claude
-        case "codex": return IslandColor.codex
         case "agy": return IslandColor.agy
         default: return .white
         }

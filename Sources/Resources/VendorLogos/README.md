@@ -5,7 +5,7 @@ White monochrome marks, tinted at runtime for dark island chrome.
 | Vendor | Tint | Hex |
 |--------|------|-----|
 | Claude | Anthropic Book Cloth | `#CC785C` |
-| Codex | OpenAI Teal | `#10A37F` |
+| Codex | white (official mono) | `#FFFFFF` |
 | Grok | white (official mono) | `#FFFFFF` |
 | Agy | Google Blue | `#4285F4` |
 
