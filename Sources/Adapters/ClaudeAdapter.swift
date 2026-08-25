@@ -236,13 +236,8 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
 
-        // File first, but CLI ping/login may have rotated the scoped Keychain
-        // only — adopt that into the managed file (same as Agy prefer-fresher).
-        if let live = Self.captureLoginCredentials(configDir: dir),
-           live.accessToken != Self.readCredentials(configDir: dir)?.accessToken
-        {
-            Self.persistCredentialsFile(creds: live, configDir: dir, overwrite: true)
-        }
+        // Steady-state is the managed file. Keychain is login/ping only —
+        // polling it every cycle triggers the macOS password dialog.
         guard let creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
@@ -370,7 +365,7 @@ struct ClaudeAdapter: VendorAdapter {
         let gap: TimeInterval = expired ? 15 * 60 : 6 * 3600
         if pingRecentlyAttempted(configDir: configDir, gap: gap) { return nil }
         markPingAttempted(configDir: configDir)
-        let before = captureLoginCredentials(configDir: configDir)?.accessToken
+        let before = readCredentialsFile(configDir: configDir)?.accessToken
         let spawned: Bool
         if let refreshPingSpawner {
             spawned = refreshPingSpawner(configDir)
@@ -381,21 +376,41 @@ struct ClaudeAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 400_000_000)
-            if let creds = captureLoginCredentials(configDir: configDir),
-               !creds.accessToken.isEmpty,
-               creds.accessToken != before,
-               creds.accessToken != failedAccessToken
-            {
-                persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
-                NSLog("DashIsland: Claude CLI ping adopted new token")
+            if let creds = harvestAfterPing(
+                configDir: configDir,
+                failedAccessToken: failedAccessToken,
+                before: before
+            ) {
                 return creds
             }
         }
-        if let creds = captureLoginCredentials(configDir: configDir),
-           shouldAdopt(creds, failedAccessToken: failedAccessToken)
+        return harvestAfterPing(
+            configDir: configDir,
+            failedAccessToken: failedAccessToken,
+            before: before
+        )
+    }
+
+    /// After CLI ping: file, then silent Keychain (no password sheet).
+    private static func harvestAfterPing(
+        configDir: URL,
+        failedAccessToken: String?,
+        before: String?
+    ) -> ClaudeCreds? {
+        if let kc = readScopedKeychainCredentials(configDir: configDir, allowPrompt: false),
+           !kc.accessToken.isEmpty,
+           kc.accessToken != failedAccessToken,
+           kc.accessToken != before
         {
-            persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
-            return creds
+            persistCredentialsFile(creds: kc, configDir: configDir, overwrite: true)
+            NSLog("DashIsland: Claude CLI ping adopted Keychain token")
+            return kc
+        }
+        if let file = readCredentialsFile(configDir: configDir),
+           shouldAdopt(file, failedAccessToken: failedAccessToken)
+        {
+            persistCredentialsFile(creds: file, configDir: configDir, overwrite: true)
+            return file
         }
         return nil
     }
@@ -513,7 +528,7 @@ struct ClaudeAdapter: VendorAdapter {
         if let file = readCredentialsFile(configDir: configDir), !file.accessToken.isEmpty {
             return file
         }
-        if let keychain = readScopedKeychainCredentials(configDir: configDir),
+        if let keychain = readScopedKeychainCredentials(configDir: configDir, allowPrompt: false),
            !keychain.accessToken.isEmpty
         {
             return keychain
@@ -584,6 +599,7 @@ struct ClaudeAdapter: VendorAdapter {
 
         let started = Date()
         let deadline = started.addingTimeInterval(Self.loginTimeout)
+        var allowKeychainPrompt = true
 
         func isAcceptable(_ creds: ClaudeCreds) -> Bool {
             Self.isAcceptableLogin(
@@ -598,7 +614,10 @@ struct ClaudeAdapter: VendorAdapter {
                 if task.isRunning { task.terminate() }
                 throw CancellationError()
             }
-            if let creds = Self.captureLoginCredentials(configDir: configDir), isAcceptable(creds) {
+            if let creds = Self.captureLoginCredentials(
+                configDir: configDir,
+                allowKeychainPrompt: allowKeychainPrompt
+            ), isAcceptable(creds) {
                 Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 if task.isRunning {
@@ -606,9 +625,13 @@ struct ClaudeAdapter: VendorAdapter {
                 }
                 return
             }
+            allowKeychainPrompt = false
             if !task.isRunning {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                if let creds = Self.captureLoginCredentials(configDir: configDir), isAcceptable(creds) {
+                if let creds = Self.captureLoginCredentials(
+                    configDir: configDir,
+                    allowKeychainPrompt: false
+                ), isAcceptable(creds) {
                     Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                     return
                 }
@@ -620,7 +643,10 @@ struct ClaudeAdapter: VendorAdapter {
         if task.isRunning {
             task.terminate()
         }
-        if let creds = Self.captureLoginCredentials(configDir: configDir), isAcceptable(creds) {
+        if let creds = Self.captureLoginCredentials(
+            configDir: configDir,
+            allowKeychainPrompt: false
+        ), isAcceptable(creds) {
             Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
             return
         }
@@ -668,13 +694,20 @@ struct ClaudeAdapter: VendorAdapter {
         return parseCredentialsJSON(data)
     }
 
-    /// Login capture only. File first; if the CLI wrote Keychain and not the
-    /// file (macOS 2.1+), copy once into `.credentials.json`.
-    static func captureLoginCredentials(configDir: URL) -> ClaudeCreds? {
+    /// File first. Keychain only when the file is missing (login/ping).
+    /// `allowKeychainPrompt` is login only — polls use silent fail so we
+    /// never pop the Keychain password sheet on a timer.
+    static func captureLoginCredentials(
+        configDir: URL,
+        allowKeychainPrompt: Bool = false
+    ) -> ClaudeCreds? {
         if let file = readCredentialsFile(configDir: configDir) {
             return file
         }
-        return readScopedKeychainCredentials(configDir: configDir)
+        return readScopedKeychainCredentials(
+            configDir: configDir,
+            allowPrompt: allowKeychainPrompt
+        )
     }
 
     /// Setup-token / pasted long-lived OAuth: no refresh_token (or explicit flag).
@@ -1058,13 +1091,17 @@ struct ClaudeAdapter: VendorAdapter {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         SecItemDelete(query as CFDictionary)
     }
 
-    /// One-shot read after `claude auth login`. The CLI does not write
-    /// `.credentials.json` on current macOS builds.
-    private static func readScopedKeychainCredentials(configDir: URL) -> ClaudeCreds? {
+    /// One-shot read after `claude auth login`. Polls pass `allowPrompt: false`
+    /// so Keychain never puts up the password sheet on a timer.
+    private static func readScopedKeychainCredentials(
+        configDir: URL,
+        allowPrompt: Bool
+    ) -> ClaudeCreds? {
         let service = scopedKeychainService(for: configDir)
         let account = NSUserName()
         let query: [String: Any] = [
@@ -1073,6 +1110,9 @@ struct ClaudeAdapter: VendorAdapter {
             kSecAttrAccount as String: account,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true,
+            kSecUseAuthenticationUI as String: allowPrompt
+                ? kSecUseAuthenticationUIAllow
+                : kSecUseAuthenticationUIFail,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

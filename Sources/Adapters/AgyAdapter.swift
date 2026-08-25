@@ -102,16 +102,13 @@ struct AgyAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        Self.syncManagedCredentials(home: dir)
         guard var creds = await Self.freshCredentials(home: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
         var snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
-        // Claude pattern: 401 is often a stale in-memory/file copy. CLI
-        // login writes `antigravity-oauth-token` + Keychain; re-read those.
         if case .authRequired = snap.error {
-            Self.syncManagedCredentials(home: dir)
-            if let live = Self.captureLoginCredentials(home: dir),
+            Self.syncManagedCredentials(home: dir, includeKeychain: true, allowPrompt: false)
+            if let live = Self.captureLoginCredentials(home: dir, includeKeychain: true, allowPrompt: false),
                live.accessToken != creds.accessToken
             {
                 try? Self.persistCredentialsFile(live, home: dir)
@@ -145,7 +142,9 @@ struct AgyAdapter: VendorAdapter {
     }
 
     static func verifyUsageAccess(home: URL) async throws {
-        if readCredentials(home: home) == nil, let harvested = captureLoginCredentials(home: home) {
+        if readCredentials(home: home) == nil,
+           let harvested = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: true)
+        {
             try? persistCredentialsFile(harvested, home: home)
         }
         guard readCredentials(home: home) != nil else {
@@ -220,7 +219,9 @@ struct AgyAdapter: VendorAdapter {
         }
         func accept(_ creds: AgyCreds) -> Bool { Self.isFresh(creds) }
 
-        if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
+        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: true),
+           accept(creds)
+        {
             try Self.persistCredentialsFile(creds, home: home)
             return
         }
@@ -230,13 +231,17 @@ struct AgyAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }
-            if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
+            if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+               accept(creds)
+            {
                 try Self.persistCredentialsFile(creds, home: home)
                 return
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
-        if let creds = Self.captureLoginCredentials(home: home), accept(creds) {
+        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+           accept(creds)
+        {
             try Self.persistCredentialsFile(creds, home: home)
             return
         }
@@ -253,8 +258,16 @@ struct AgyAdapter: VendorAdapter {
     }
 
     /// Copy the freshest store (CLI file / Keychain) into oauth_creds.json.
-    static func syncManagedCredentials(home: URL) {
-        guard let live = captureLoginCredentials(home: home) else { return }
+    static func syncManagedCredentials(
+        home: URL,
+        includeKeychain: Bool = false,
+        allowPrompt: Bool = false
+    ) {
+        guard let live = captureLoginCredentials(
+            home: home,
+            includeKeychain: includeKeychain,
+            allowPrompt: allowPrompt
+        ) else { return }
         if let file = readOAuthCredsJSONFile(home: home),
            file.accessToken == live.accessToken,
            (file.expiryDate ?? .distantPast) >= (live.expiryDate ?? .distantPast)
@@ -264,12 +277,16 @@ struct AgyAdapter: VendorAdapter {
         try? persistCredentialsFile(live, home: home)
     }
 
-    /// Managed files + Keychain. Never writes Keychain.
-    static func captureLoginCredentials(home: URL) -> AgyCreds? {
+    /// Files always. Keychain only when asked — polling it pops the password sheet.
+    static func captureLoginCredentials(
+        home: URL,
+        includeKeychain: Bool = false,
+        allowPrompt: Bool = false
+    ) -> AgyCreds? {
         preferFresher(
             readOAuthCredsJSONFile(home: home),
             readCLITokenFile(home: home),
-            readKeychainCredentials()
+            includeKeychain ? readKeychainCredentials(allowPrompt: allowPrompt) : nil
         )
     }
 
@@ -310,13 +327,16 @@ struct AgyAdapter: VendorAdapter {
         )
     }
 
-    private static func readKeychainCredentials() -> AgyCreds? {
+    private static func readKeychainCredentials(allowPrompt: Bool) -> AgyCreds? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "gemini",
             kSecAttrAccount as String: "antigravity",
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true,
+            kSecUseAuthenticationUI as String: allowPrompt
+                ? kSecUseAuthenticationUIAllow
+                : kSecUseAuthenticationUIFail,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -530,7 +550,7 @@ struct AgyAdapter: VendorAdapter {
     /// Refresh when access is missing expiry or expires within 5 minutes.
     /// Google POST first; if that fails, Claude-style CLI ping then re-harvest.
     static func freshCredentials(home: URL) async -> AgyCreds? {
-        syncManagedCredentials(home: home)
+        syncManagedCredentials(home: home, includeKeychain: false)
         guard var creds = readCredentials(home: home) else { return nil }
         if isFresh(creds, slack: 5 * 60) { return creds }
         let expired = creds.expiryDate.map { $0 <= Date() } ?? false
@@ -557,7 +577,7 @@ struct AgyAdapter: VendorAdapter {
     static func pingCLIThenHarvest(home: URL, failedAccessToken: String?) async -> AgyCreds? {
         if pingRecentlyAttempted(home: home) { return nil }
         markPingAttempted(home: home)
-        let beforeExpiry = captureLoginCredentials(home: home)?.expiryDate
+        let beforeExpiry = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false)?.expiryDate
         let spawned: Bool
         if let refreshPingSpawner {
             spawned = await refreshPingSpawner(home)
@@ -568,7 +588,9 @@ struct AgyAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(55)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            if let creds = captureLoginCredentials(home: home), isFresh(creds) {
+            if let creds = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+               isFresh(creds)
+            {
                 if creds.accessToken != failedAccessToken { return creds }
                 if let exp = creds.expiryDate, let before = beforeExpiry, exp > before {
                     return creds
@@ -578,7 +600,9 @@ struct AgyAdapter: VendorAdapter {
                 }
             }
         }
-        if let creds = captureLoginCredentials(home: home), isFresh(creds) {
+        if let creds = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+           isFresh(creds)
+        {
             return creds
         }
         return nil
