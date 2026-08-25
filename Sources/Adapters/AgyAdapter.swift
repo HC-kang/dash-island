@@ -84,19 +84,16 @@ struct AgyAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let prior = Self.readCredentials(home: dir)
         do {
-            let prior = Self.readCredentials(home: dir)
-            Self.clearManagedCredentials(home: dir)
-            try await runLogin(
-                home: dir,
-                priorAccessToken: prior?.accessToken,
-                priorRefreshToken: prior?.refreshToken
-            )
+            try await runLogin(home: dir)
             try await Self.verifyUsageAccess(home: dir)
             _ = try Self.requireCredentials(home: dir)
             return ref
         } catch {
-            Self.clearManagedCredentials(home: dir)
+            if let prior {
+                try? Self.persistCredentialsFile(prior, home: dir)
+            }
             if let error = error as? AgyAdapterError { throw error }
             throw AgyAdapterError.reauthFailed(error.localizedDescription)
         }
@@ -128,8 +125,16 @@ struct AgyAdapter: VendorAdapter {
     }
 
     static func verifyUsageAccess(home: URL) async throws {
-        guard let creds = await freshCredentials(home: home) else {
+        guard readCredentials(home: home) != nil else {
             throw AgyAdapterError.reauthFailed("No credentials written.")
+        }
+        guard let creds = await freshCredentials(home: home) else {
+            throw AgyAdapterError.reauthFailed(
+                """
+                Google session expired and refresh failed. Sign in with `agy` \
+                in Terminal, then retry Reauthenticate.
+                """
+            )
         }
         let snap = await probeUsage(token: creds.accessToken, home: home, fetchedAt: Date())
         switch usageSmokeDecision(snap) {
@@ -197,7 +202,7 @@ struct AgyAdapter: VendorAdapter {
         // `agy` is a TUI. Piped stdin never opens a browser, and tokens live in
         // Keychain service `gemini` / account `antigravity` — not oauth_creds.json.
         if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
-            Self.persistCredentialsFile(creds, home: home)
+            try Self.persistCredentialsFile(creds, home: home)
             return
         }
 
@@ -211,13 +216,13 @@ struct AgyAdapter: VendorAdapter {
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }
             if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
-                Self.persistCredentialsFile(creds, home: home)
+                try Self.persistCredentialsFile(creds, home: home)
                 return
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
         if let creds = Self.captureLoginCredentials(home: home), isAcceptable(creds) {
-            Self.persistCredentialsFile(creds, home: home)
+            try Self.persistCredentialsFile(creds, home: home)
             return
         }
         throw AgyAdapterError.loginTimeout(home: home.path)
@@ -362,19 +367,17 @@ struct AgyAdapter: VendorAdapter {
         )
     }
 
-    static func persistCredentialsFile(_ creds: AgyCreds, home: URL) {
+    static func persistCredentialsFile(_ creds: AgyCreds, home: URL) throws {
         let dir = home.appendingPathComponent(".gemini", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var blob: [String: Any] = ["access_token": creds.accessToken]
         if let refresh = creds.refreshToken { blob["refresh_token"] = refresh }
         if let expiry = creds.expiryDate {
             blob["expiry_date"] = expiry.timeIntervalSince1970 * 1000
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted]) else {
-            return
-        }
+        let data = try JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted])
         let path = dir.appendingPathComponent(credsFileName, isDirectory: false)
-        try? data.write(to: path, options: .atomic)
+        try data.write(to: path, options: .atomic)
     }
 
     /// `fetchAvailableModels` → rings. Dedupes shared quota counters (oh-my-pi).
@@ -487,7 +490,7 @@ struct AgyAdapter: VendorAdapter {
         if let expiresIn = next.expiresIn {
             creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
         }
-        persistCredentialsFile(creds, home: home)
+        try? persistCredentialsFile(creds, home: home)
         return creds
     }
 

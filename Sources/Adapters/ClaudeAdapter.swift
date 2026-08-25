@@ -317,6 +317,16 @@ struct ClaudeAdapter: VendorAdapter {
             return errorSnapshot(.authRequired, fetchedAt: Date())
         case .unavailable(let message):
             NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
+            if let pinged = await pingCLIThenAdopt(
+                configDir: configDir,
+                failedAccessToken: failedAccessToken
+            ) {
+                return await probeUsage(
+                    token: pinged.accessToken,
+                    plan: pinged.subscriptionType,
+                    fetchedAt: Date()
+                )
+            }
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — \(message)"),
@@ -325,6 +335,16 @@ struct ClaudeAdapter: VendorAdapter {
             }
             return fallback
         case .skipped:
+            if let pinged = await pingCLIThenAdopt(
+                configDir: configDir,
+                failedAccessToken: failedAccessToken
+            ) {
+                return await probeUsage(
+                    token: pinged.accessToken,
+                    plan: pinged.subscriptionType,
+                    fetchedAt: Date()
+                )
+            }
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — no refresh token. Reauthenticate this account"),
@@ -332,6 +352,84 @@ struct ClaudeAdapter: VendorAdapter {
                 )
             }
             return fallback
+        }
+    }
+
+    /// Codex Island pattern: the CLI is a legitimate refresher for *this*
+    /// managed dir. We never POST oauth/token ourselves here — `claude -p`
+    /// writes `.credentials.json` under CLAUDE_CONFIG_DIR, then we re-read.
+    /// One attempt per dir per 6h so a doomed ping cannot bill in a loop.
+    static var refreshPingSpawner: ((URL) -> Bool)?
+
+    static func pingCLIThenAdopt(
+        configDir: URL,
+        failedAccessToken: String?
+    ) async -> ClaudeCreds? {
+        if pingRecentlyAttempted(configDir: configDir) { return nil }
+        markPingAttempted(configDir: configDir)
+        let before = readCredentials(configDir: configDir)?.accessToken
+        let spawned = (refreshPingSpawner ?? spawnManagedRefreshPing)(configDir)
+        guard spawned else { return nil }
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let creds = readCredentials(configDir: configDir),
+               !creds.accessToken.isEmpty,
+               creds.accessToken != before,
+               creds.accessToken != failedAccessToken
+            {
+                NSLog("DashIsland: Claude CLI ping adopted new token")
+                return creds
+            }
+        }
+        if let creds = readCredentials(configDir: configDir),
+           shouldAdopt(creds, failedAccessToken: failedAccessToken)
+        {
+            return creds
+        }
+        return nil
+    }
+
+    private static func pingDefaultsKey(configDir: URL) -> String {
+        "DashIsland.ClaudeCLIPing.\(configDir.path)"
+    }
+
+    static func pingRecentlyAttempted(configDir: URL, now: Date = Date()) -> Bool {
+        let t = UserDefaults.standard.double(forKey: pingDefaultsKey(configDir: configDir))
+        guard t > 0 else { return false }
+        return now.timeIntervalSince(Date(timeIntervalSince1970: t)) < 6 * 3600
+    }
+
+    static func markPingAttempted(configDir: URL, now: Date = Date()) {
+        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: pingDefaultsKey(configDir: configDir))
+    }
+
+    /// Detached `claude -p ok --model haiku` with this account's CLAUDE_CONFIG_DIR.
+    /// Mirrors Codex Island `spawnTokenRefreshPing` but never touches the
+    /// user's default `~/.claude` or unsuffixed Keychain.
+    @discardableResult
+    static func spawnManagedRefreshPing(configDir: URL) -> Bool {
+        guard let path = locateClaudeBinary() else { return false }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = ["-p", "ok", "--model", "haiku", "--strict-mcp-config"]
+        task.currentDirectoryPath = NSHomeDirectory()
+        var env = ProcessInfo.processInfo.environment
+        env["CLAUDE_CONFIG_DIR"] = configDir.path
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            env.removeValue(forKey: key)
+        }
+        task.environment = env
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        task.standardInput = FileHandle.nullDevice
+        do {
+            try task.run()
+            NSLog("DashIsland: Claude CLI ping spawned dir=%@", configDir.path)
+            return true
+        } catch {
+            NSLog("DashIsland: Claude CLI ping failed %@", error.localizedDescription)
+            return false
         }
     }
 

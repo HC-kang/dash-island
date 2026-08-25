@@ -120,7 +120,7 @@ enum AgyAdapterSuite {
         failures += check("clearManagedCredentials deletes file and last-good") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }
-            AgyAdapter.persistCredentialsFile(
+            try AgyAdapter.persistCredentialsFile(
                 AgyAdapter.AgyCreds(
                     accessToken: "tok",
                     refreshToken: "rt",
