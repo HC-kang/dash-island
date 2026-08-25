@@ -5,6 +5,31 @@ enum AgyAdapterSuite {
         print("AgyAdapterSuite")
         var failures = 0
 
+        failures += check("preferFresher picks later expiry across stores") {
+            let stale = AgyAdapter.AgyCreds(
+                accessToken: "old",
+                refreshToken: "rt",
+                expiryDate: Date().addingTimeInterval(-3600)
+            )
+            let live = AgyAdapter.AgyCreds(
+                accessToken: "new",
+                refreshToken: "rt2",
+                expiryDate: Date().addingTimeInterval(3600)
+            )
+            try assertEqual(AgyAdapter.preferFresher(stale, live)?.accessToken, "new")
+            try assertEqual(AgyAdapter.preferFresher(live, stale)?.accessToken, "new")
+            try assertEqual(AgyAdapter.preferFresher(stale, nil)?.accessToken, "old")
+        }
+
+        failures += check("parse nested antigravity-oauth-token JSON") {
+            let json = """
+            {"token":{"access_token":"ya29.t","token_type":"Bearer","refresh_token":"1//r","expiry":"2026-08-25T16:57:23Z"},"auth_method":"consumer"}
+            """
+            let creds = AgyAdapter.parseKeychainBlob(Data(json.utf8))
+            try assertEqual(creds?.accessToken, "ya29.t")
+            try assertTrue(creds?.expiryDate != nil)
+        }
+
         failures += check("parse go-keyring-base64 keychain blob") {
             let inner = """
             {"token":{"access_token":"ya29.t","token_type":"Bearer","refresh_token":"1//r","expiry":"2026-08-19T22:50:03Z"},"auth_method":"consumer"}

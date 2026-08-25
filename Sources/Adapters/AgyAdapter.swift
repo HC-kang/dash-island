@@ -102,10 +102,24 @@ struct AgyAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        guard let creds = await Self.freshCredentials(home: dir) else {
+        Self.syncManagedCredentials(home: dir)
+        guard var creds = await Self.freshCredentials(home: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        return await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
+        var snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
+        // Claude pattern: 401 is often a stale in-memory/file copy. CLI
+        // login writes `antigravity-oauth-token` + Keychain; re-read those.
+        if case .authRequired = snap.error {
+            Self.syncManagedCredentials(home: dir)
+            if let live = Self.captureLoginCredentials(home: dir),
+               live.accessToken != creds.accessToken
+            {
+                try? Self.persistCredentialsFile(live, home: dir)
+                creds = live
+                snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: Date())
+            }
+        }
+        return snap
     }
 
     enum UsageSmokeDecision: Equatable {
@@ -244,11 +258,34 @@ struct AgyAdapter: VendorAdapter {
         throw AgyAdapterError.loginTimeout(home: home.path)
     }
 
-    /// File first, then the CLI's global Keychain blob (one-shot copy into the
-    /// managed folder). Never writes Keychain.
+    /// Later expiry wins. CLI login writes `antigravity-oauth-token` and
+    /// Keychain; `oauth_creds.json` is often a stale harvest.
+    static func preferFresher(_ candidates: AgyCreds?...) -> AgyCreds? {
+        candidates.compactMap { $0 }.filter { !$0.accessToken.isEmpty }
+            .max { a, b in
+                (a.expiryDate ?? .distantPast) < (b.expiryDate ?? .distantPast)
+            }
+    }
+
+    /// Copy the freshest store (CLI file / Keychain) into oauth_creds.json.
+    static func syncManagedCredentials(home: URL) {
+        guard let live = captureLoginCredentials(home: home) else { return }
+        if let file = readOAuthCredsJSONFile(home: home),
+           file.accessToken == live.accessToken,
+           (file.expiryDate ?? .distantPast) >= (live.expiryDate ?? .distantPast)
+        {
+            return
+        }
+        try? persistCredentialsFile(live, home: home)
+    }
+
+    /// Managed files + Keychain. Never writes Keychain.
     static func captureLoginCredentials(home: URL) -> AgyCreds? {
-        if let file = readCredentials(home: home) { return file }
-        return readKeychainCredentials()
+        preferFresher(
+            readOAuthCredsJSONFile(home: home),
+            readCLITokenFile(home: home),
+            readKeychainCredentials()
+        )
     }
 
     static func parseKeychainBlob(_ data: Data) -> AgyCreds? {
@@ -345,6 +382,13 @@ struct AgyAdapter: VendorAdapter {
     }
 
     static func readCredentials(home: URL) -> AgyCreds? {
+        preferFresher(
+            readOAuthCredsJSONFile(home: home),
+            readCLITokenFile(home: home)
+        )
+    }
+
+    static func readOAuthCredsJSONFile(home: URL) -> AgyCreds? {
         let candidates = [
             home.appendingPathComponent(".gemini", isDirectory: true)
                 .appendingPathComponent(credsFileName, isDirectory: false),
@@ -360,6 +404,15 @@ struct AgyAdapter: VendorAdapter {
             }
         }
         return nil
+    }
+
+    static func readCLITokenFile(home: URL) -> AgyCreds? {
+        let path = home.appendingPathComponent(
+            ".gemini/antigravity-cli/antigravity-oauth-token",
+            isDirectory: false
+        )
+        guard let data = try? Data(contentsOf: path) else { return nil }
+        return parseKeychainBlob(data)
     }
 
     static func parseOAuthCredsJSON(_ data: Data) -> AgyCreds? {
@@ -492,9 +545,7 @@ struct AgyAdapter: VendorAdapter {
     /// Refresh when access is missing expiry or expires within 5 minutes.
     /// Google POST first; if that fails, Claude-style CLI ping then re-harvest.
     static func freshCredentials(home: URL) async -> AgyCreds? {
-        if readCredentials(home: home) == nil, let harvested = captureLoginCredentials(home: home) {
-            try? persistCredentialsFile(harvested, home: home)
-        }
+        syncManagedCredentials(home: home)
         guard var creds = readCredentials(home: home) else { return nil }
         if isFresh(creds, slack: 5 * 60) { return creds }
         let expired = creds.expiryDate.map { $0 <= Date() } ?? false
