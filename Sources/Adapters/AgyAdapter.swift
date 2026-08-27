@@ -102,21 +102,17 @@ struct AgyAdapter: VendorAdapter {
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
-        guard var creds = await Self.freshCredentials(home: dir) else {
+        switch await Self.freshCredentials(home: dir) {
+        case .ok(let creds):
+            return await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
+        case .needsReauth:
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
+        case .retryLater:
+            return Self.errorSnapshot(
+                .unavailable("token refresh failed — retrying"),
+                fetchedAt: now
+            )
         }
-        var snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
-        if case .authRequired = snap.error {
-            Self.syncManagedCredentials(home: dir, includeKeychain: false)
-            if let live = Self.captureLoginCredentials(home: dir, includeKeychain: false),
-               live.accessToken != creds.accessToken
-            {
-                try? Self.persistCredentialsFile(live, home: dir)
-                creds = live
-                snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: Date())
-            }
-        }
-        return snap
     }
 
     enum UsageSmokeDecision: Equatable {
@@ -142,20 +138,20 @@ struct AgyAdapter: VendorAdapter {
     }
 
     static func verifyUsageAccess(home: URL) async throws {
-        if readCredentials(home: home) == nil,
-           let harvested = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: true)
-        {
-            try? persistCredentialsFile(harvested, home: home)
-        }
         guard readCredentials(home: home) != nil else {
             throw AgyAdapterError.reauthFailed("No credentials written.")
         }
-        guard let creds = await freshCredentials(home: home) else {
+        let creds: AgyCreds
+        switch await freshCredentials(home: home) {
+        case .ok(let live):
+            creds = live
+        case .needsReauth:
             throw AgyAdapterError.reauthFailed(
-                """
-                Antigravity session is expired. A Terminal window should have \
-                opened — sign in with agy, then retry Reauthenticate.
-                """
+                "Google refresh token was revoked. Sign in with agy, then retry."
+            )
+        case .retryLater:
+            throw AgyAdapterError.reauthFailed(
+                "Token refresh failed. Retry Reauthenticate in a moment."
             )
         }
         let snap = await probeUsage(token: creds.accessToken, home: home, fetchedAt: Date())
@@ -224,28 +220,29 @@ struct AgyAdapter: VendorAdapter {
                 try Self.persistCredentialsFile(file, home: home)
                 return
             }
-            if let refresh = file.refreshToken, !refresh.isEmpty,
-               let next = await Self.refreshAccessToken(refresh)
-            {
-                var creds = file
-                creds.accessToken = next.access
-                if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
-                if let expiresIn = next.expiresIn {
-                    creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+            if let refresh = file.refreshToken, !refresh.isEmpty {
+                switch await Self.refreshAccessToken(refresh) {
+                case .success(let access, let rotated, let expiresIn):
+                    var creds = file
+                    creds.accessToken = access
+                    if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
+                    if let expiresIn {
+                        creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+                    }
+                    try Self.persistCredentialsFile(creds, home: home)
+                    return
+                case .invalidGrant:
+                    break
+                case .failed:
+                    throw AgyAdapterError.reauthFailed(
+                        "Token refresh failed. Retry in a moment — no Keychain prompt needed."
+                    )
                 }
-                try Self.persistCredentialsFile(creds, home: home)
-                return
             }
         }
 
-        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: true),
-           accept(creds)
-        {
-            try Self.persistCredentialsFile(creds, home: home)
-            return
-        }
-
-        // Last resort (Add / long-idle reauth). May touch Keychain once.
+        // Add / truly dead refresh: one CLI login. Do not harvest Keychain first
+        // (that was the extra password sheet before agy itself prompted).
         _ = await Self.spawnManagedRefreshPing()
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
         while Date() < deadline {
@@ -566,25 +563,34 @@ struct AgyAdapter: VendorAdapter {
         }
     }
 
-    /// Extend from the file's refresh_token. Never spawn `agy` on the poll
-    /// path — that hits Keychain and pops a password sheet every ~1h.
-    static func freshCredentials(home: URL) async -> AgyCreds? {
+    enum FreshResult {
+        case ok(AgyCreds)
+        case needsReauth
+        case retryLater
+    }
+
+    /// Extend from the file's refresh_token. Never spawn `agy` or touch Keychain.
+    static func freshCredentials(home: URL) async -> FreshResult {
         syncManagedCredentials(home: home, includeKeychain: false)
-        guard var creds = readCredentials(home: home) else { return nil }
-        if isFresh(creds, slack: 5 * 60) { return creds }
-        let expired = creds.expiryDate.map { $0 <= Date() } ?? false
-        if let refresh = creds.refreshToken, !refresh.isEmpty,
-           let next = await refreshAccessToken(refresh)
-        {
-            creds.accessToken = next.access
-            if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
-            if let expiresIn = next.expiresIn {
+        guard var creds = readCredentials(home: home) else { return .needsReauth }
+        if isFresh(creds, slack: 5 * 60) { return .ok(creds) }
+        guard let refresh = creds.refreshToken, !refresh.isEmpty else {
+            return .needsReauth
+        }
+        switch await refreshAccessToken(refresh) {
+        case .success(let access, let rotated, let expiresIn):
+            creds.accessToken = access
+            if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
+            if let expiresIn {
                 creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
             }
             try? persistCredentialsFile(creds, home: home)
-            return creds
+            return .ok(creds)
+        case .invalidGrant:
+            return .needsReauth
+        case .failed:
+            return .retryLater
         }
-        return expired ? nil : creds
     }
 
     static var refreshPingSpawner: ((URL) async -> Bool)?
@@ -668,47 +674,82 @@ struct AgyAdapter: VendorAdapter {
         return true
     }
 
-    private static func refreshAccessToken(_ refreshToken: String) async -> (
-        access: String,
-        refresh: String?,
-        expiresIn: Int?
-    )? {
+    enum TokenRefreshResult {
+        case success(access: String, refresh: String?, expiresIn: Int?)
+        case invalidGrant
+        case failed
+    }
+
+    private static func refreshAccessToken(_ refreshToken: String) async -> TokenRefreshResult {
+        guard let secret = oauthSecretFromAgyBinary(),
+              !oauthClientIDsFromAgyBinary().isEmpty
+        else {
+            NSLog("DashIsland: Agy OAuth client not found in agy binary")
+            return .failed
+        }
+        var last: TokenRefreshResult = .failed
+        for id in oauthClientIDsFromAgyBinary() {
+            let result = await refreshAccessToken(
+                refreshToken,
+                clientID: id,
+                clientSecret: secret
+            )
+            switch result {
+            case .success:
+                cachedOAuthClient = (id, secret)
+                return result
+            case .invalidGrant:
+                last = .invalidGrant
+            case .failed:
+                continue
+            }
+        }
+        return last
+    }
+
+    private static func refreshAccessToken(
+        _ refreshToken: String,
+        clientID: String,
+        clientSecret: String
+    ) async -> TokenRefreshResult {
         var req = URLRequest(url: tokenURL)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        var parts: [String] = []
         let form = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-        func add(_ k: String, _ v: String) {
-            let ek = k.addingPercentEncoding(withAllowedCharacters: form) ?? k
-            let ev = v.addingPercentEncoding(withAllowedCharacters: form) ?? v
-            parts.append("\(ek)=\(ev)")
+        func enc(_ s: String) -> String {
+            s.addingPercentEncoding(withAllowedCharacters: form) ?? s
         }
-        guard let client = oauthClientFromAgyBinary() else {
-            NSLog("DashIsland: Agy OAuth client not found in agy binary")
-            return nil
-        }
-        add("client_id", client.id)
-        add("client_secret", client.secret)
-        add("refresh_token", refreshToken)
-        add("grant_type", "refresh_token")
-        req.httpBody = parts.joined(separator: "&").data(using: .utf8)
+        let body = [
+            "client_id=\(enc(clientID))",
+            "client_secret=\(enc(clientSecret))",
+            "refresh_token=\(enc(refreshToken))",
+            "grant_type=refresh_token",
+        ].joined(separator: "&")
+        req.httpBody = body.data(using: .utf8)
         req.timeoutInterval = 12
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let access = obj["access_token"] as? String, !access.isEmpty
-            else {
-                NSLog("DashIsland: Agy token refresh failed")
-                return nil
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200,
+               let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let access = obj["access_token"] as? String, !access.isEmpty
+            {
+                let rotated = obj["refresh_token"] as? String
+                let expiresIn = obj["expires_in"] as? Int
+                    ?? (obj["expires_in"] as? Double).map { Int($0) }
+                return .success(access: access, refresh: rotated, expiresIn: expiresIn)
             }
-            let rotated = obj["refresh_token"] as? String
-            let expiresIn = obj["expires_in"] as? Int
-            return (access, rotated, expiresIn)
+            let errBody = String(data: data, encoding: .utf8) ?? ""
+            if status == 400, errBody.contains("invalid_grant") {
+                NSLog("DashIsland: Agy refresh invalid_grant")
+                return .invalidGrant
+            }
+            NSLog("DashIsland: Agy token refresh HTTP %d", status)
+            return .failed
         } catch {
             NSLog("DashIsland: Agy token refresh error %@", error.localizedDescription)
-            return nil
+            return .failed
         }
     }
 
@@ -836,29 +877,52 @@ struct AgyAdapter: VendorAdapter {
 
     private static var cachedOAuthClient: (id: String, secret: String)?
 
-    /// Installed-app OAuth client is embedded in the `agy` binary; never commit it.
-    static func oauthClientFromAgyBinary() -> (id: String, secret: String)? {
-        if let cachedOAuthClient { return cachedOAuthClient }
-        guard let path = locateAgyBinary(),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let id = scanEmbeddedClientID(data),
-              let secret = scanEmbeddedClientSecret(data)
-        else { return nil }
-        cachedOAuthClient = (id, secret)
-        return cachedOAuthClient
+    private static var cachedBinaryOAuth: (ids: [String], secret: String?)?
+
+    /// Installed-app OAuth clients embedded in `agy`. The binary has more than
+    /// one googleusercontent id; the first hit is often the wrong one.
+    static func oauthClientIDsFromAgyBinary() -> [String] {
+        if let cachedOAuthClient { return [cachedOAuthClient.id] }
+        return loadBinaryOAuth().ids
     }
 
-    private static func scanEmbeddedClientID(_ data: Data) -> String? {
+    static func oauthSecretFromAgyBinary() -> String? {
+        if let cachedOAuthClient { return cachedOAuthClient.secret }
+        return loadBinaryOAuth().secret
+    }
+
+    private static func loadBinaryOAuth() -> (ids: [String], secret: String?) {
+        if let cachedBinaryOAuth { return cachedBinaryOAuth }
+        guard let path = locateAgyBinary(),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        else { return ([], nil) }
+        let loaded = (ids: Array(scanEmbeddedClientIDs(data).reversed()), secret: scanEmbeddedClientSecret(data))
+        cachedBinaryOAuth = loaded
+        return loaded
+    }
+
+    private static func scanEmbeddedClientIDs(_ data: Data) -> [String] {
         let marker = Data(".apps.googleusercontent.com".utf8)
-        guard let range = data.range(of: marker) else { return nil }
-        var start = range.lowerBound
-        while start > 0 {
-            let b = data[data.index(before: start)]
-            let ok = (b >= 48 && b <= 57) || (b >= 97 && b <= 122) || b == 45
-            if !ok { break }
-            start = data.index(before: start)
+        var ids: [String] = []
+        var search = data.startIndex
+        while search < data.endIndex,
+              let range = data[search...].range(of: marker)
+        {
+            var start = range.lowerBound
+            while start > data.startIndex {
+                let b = data[data.index(before: start)]
+                let ok = (b >= 48 && b <= 57) || (b >= 97 && b <= 122) || b == 45
+                if !ok { break }
+                start = data.index(before: start)
+            }
+            if let id = String(data: data[start..<range.upperBound], encoding: .ascii),
+               !ids.contains(id)
+            {
+                ids.append(id)
+            }
+            search = range.upperBound
         }
-        return String(data: data[start..<range.upperBound], encoding: .ascii)
+        return ids
     }
 
     private static func scanEmbeddedClientSecret(_ data: Data) -> String? {
