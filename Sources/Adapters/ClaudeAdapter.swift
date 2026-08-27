@@ -290,25 +290,15 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// Gated recover + re-probe. Soft outcomes keep orchestrator last-good rings.
-    /// CLI ping first: access dies ~8h, but the CLI login/refresh token does not.
-    /// oauth/token POST is backup (this managed dir is ours).
+    /// This managed dir is ours: extend from the file's refresh_token via
+    /// oauth/token. Do **not** spawn `claude -p` on the poll path — that hits
+    /// Keychain and pops a password sheet every expiry.
     private static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
         failedAccessToken: String?,
         fallback: UsageSnapshot
     ) async -> UsageSnapshot {
-        if let pinged = await pingCLIThenAdopt(
-            configDir: configDir,
-            failedAccessToken: failedAccessToken
-        ) {
-            NSLog("DashIsland: Claude CLI ping recovered ref=%@", String(ref.prefix(8)))
-            return await probeUsage(
-                token: pinged.accessToken,
-                plan: pinged.subscriptionType,
-                fetchedAt: Date()
-            )
-        }
         switch await refreshManagedCredentialsDetailed(
             configDir: configDir,
             failedAccessToken: failedAccessToken
@@ -349,10 +339,7 @@ struct ClaudeAdapter: VendorAdapter {
         }
     }
 
-    /// Codex Island pattern: the CLI is a legitimate refresher for *this*
-    /// managed dir. We never POST oauth/token ourselves here — `claude -p`
-    /// writes `.credentials.json` under CLAUDE_CONFIG_DIR, then we re-read.
-    /// One attempt per dir per 6h so a doomed ping cannot bill in a loop.
+    /// Unused on the poll path (Keychain spam). Kept for tests / last-resort.
     static var refreshPingSpawner: ((URL) -> Bool)?
 
     static func pingCLIThenAdopt(
@@ -376,40 +363,17 @@ struct ClaudeAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 400_000_000)
-            if let creds = harvestAfterPing(
-                configDir: configDir,
-                failedAccessToken: failedAccessToken,
-                before: before
-            ) {
-                return creds
+            if let file = readCredentialsFile(configDir: configDir),
+               !file.accessToken.isEmpty,
+               file.accessToken != failedAccessToken,
+               file.accessToken != before
+            {
+                return file
             }
-        }
-        return harvestAfterPing(
-            configDir: configDir,
-            failedAccessToken: failedAccessToken,
-            before: before
-        )
-    }
-
-    /// After CLI ping: file, then silent Keychain (no password sheet).
-    private static func harvestAfterPing(
-        configDir: URL,
-        failedAccessToken: String?,
-        before: String?
-    ) -> ClaudeCreds? {
-        if let kc = readScopedKeychainCredentials(configDir: configDir, allowPrompt: false),
-           !kc.accessToken.isEmpty,
-           kc.accessToken != failedAccessToken,
-           kc.accessToken != before
-        {
-            persistCredentialsFile(creds: kc, configDir: configDir, overwrite: true)
-            NSLog("DashIsland: Claude CLI ping adopted Keychain token")
-            return kc
         }
         if let file = readCredentialsFile(configDir: configDir),
            shouldAdopt(file, failedAccessToken: failedAccessToken)
         {
-            persistCredentialsFile(creds: file, configDir: configDir, overwrite: true)
             return file
         }
         return nil
@@ -522,16 +486,10 @@ struct ClaudeAdapter: VendorAdapter {
         if task.isRunning { task.terminate() }
     }
 
-    /// File first, then scoped Keychain — used to detect a leftover session.
-    /// Never reads the unsuffixed global `Claude Code-credentials` item.
+    /// File only. Keychain harvest is login-when-file-missing, never a poll.
     static func existingCredentials(configDir: URL) -> ClaudeCreds? {
         if let file = readCredentialsFile(configDir: configDir), !file.accessToken.isEmpty {
             return file
-        }
-        if let keychain = readScopedKeychainCredentials(configDir: configDir, allowPrompt: false),
-           !keychain.accessToken.isEmpty
-        {
-            return keychain
         }
         return nil
     }
@@ -694,9 +652,7 @@ struct ClaudeAdapter: VendorAdapter {
         return parseCredentialsJSON(data)
     }
 
-    /// File first. Keychain only when the file is missing (login/ping).
-    /// `allowKeychainPrompt` is login only — polls use silent fail so we
-    /// never pop the Keychain password sheet on a timer.
+    /// File first. Keychain only on interactive login when the file is missing.
     static func captureLoginCredentials(
         configDir: URL,
         allowKeychainPrompt: Bool = false
@@ -704,9 +660,10 @@ struct ClaudeAdapter: VendorAdapter {
         if let file = readCredentialsFile(configDir: configDir) {
             return file
         }
+        guard allowKeychainPrompt else { return nil }
         return readScopedKeychainCredentials(
             configDir: configDir,
-            allowPrompt: allowKeychainPrompt
+            allowPrompt: true
         )
     }
 

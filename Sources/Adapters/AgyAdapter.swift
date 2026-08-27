@@ -107,8 +107,8 @@ struct AgyAdapter: VendorAdapter {
         }
         var snap = await Self.probeUsage(token: creds.accessToken, home: dir, fetchedAt: now)
         if case .authRequired = snap.error {
-            Self.syncManagedCredentials(home: dir, includeKeychain: true, allowPrompt: false)
-            if let live = Self.captureLoginCredentials(home: dir, includeKeychain: true, allowPrompt: false),
+            Self.syncManagedCredentials(home: dir, includeKeychain: false)
+            if let live = Self.captureLoginCredentials(home: dir, includeKeychain: false),
                live.accessToken != creds.accessToken
             {
                 try? Self.persistCredentialsFile(live, home: dir)
@@ -219,6 +219,25 @@ struct AgyAdapter: VendorAdapter {
         }
         func accept(_ creds: AgyCreds) -> Bool { Self.isFresh(creds) }
 
+        if let file = Self.captureLoginCredentials(home: home, includeKeychain: false) {
+            if accept(file) {
+                try Self.persistCredentialsFile(file, home: home)
+                return
+            }
+            if let refresh = file.refreshToken, !refresh.isEmpty,
+               let next = await Self.refreshAccessToken(refresh)
+            {
+                var creds = file
+                creds.accessToken = next.access
+                if let rotated = next.refresh, !rotated.isEmpty { creds.refreshToken = rotated }
+                if let expiresIn = next.expiresIn {
+                    creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+                }
+                try Self.persistCredentialsFile(creds, home: home)
+                return
+            }
+        }
+
         if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: true),
            accept(creds)
         {
@@ -226,12 +245,12 @@ struct AgyAdapter: VendorAdapter {
             return
         }
 
-        // Hidden `agy --print` (no Terminal.app). May open a browser for OAuth.
+        // Last resort (Add / long-idle reauth). May touch Keychain once.
         _ = await Self.spawnManagedRefreshPing()
         let deadline = Date().addingTimeInterval(Self.loginTimeout)
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }
-            if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+            if let creds = Self.captureLoginCredentials(home: home, includeKeychain: false),
                accept(creds)
             {
                 try Self.persistCredentialsFile(creds, home: home)
@@ -239,7 +258,7 @@ struct AgyAdapter: VendorAdapter {
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
-        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: false),
            accept(creds)
         {
             try Self.persistCredentialsFile(creds, home: home)
@@ -547,8 +566,8 @@ struct AgyAdapter: VendorAdapter {
         }
     }
 
-    /// Refresh when access is missing expiry or expires within 5 minutes.
-    /// Google POST first; if that fails, Claude-style CLI ping then re-harvest.
+    /// Extend from the file's refresh_token. Never spawn `agy` on the poll
+    /// path — that hits Keychain and pops a password sheet every ~1h.
     static func freshCredentials(home: URL) async -> AgyCreds? {
         syncManagedCredentials(home: home, includeKeychain: false)
         guard var creds = readCredentials(home: home) else { return nil }
@@ -565,10 +584,6 @@ struct AgyAdapter: VendorAdapter {
             try? persistCredentialsFile(creds, home: home)
             return creds
         }
-        if let pinged = await pingCLIThenHarvest(home: home, failedAccessToken: creds.accessToken) {
-            try? persistCredentialsFile(pinged, home: home)
-            return pinged
-        }
         return expired ? nil : creds
     }
 
@@ -577,7 +592,7 @@ struct AgyAdapter: VendorAdapter {
     static func pingCLIThenHarvest(home: URL, failedAccessToken: String?) async -> AgyCreds? {
         if pingRecentlyAttempted(home: home) { return nil }
         markPingAttempted(home: home)
-        let beforeExpiry = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false)?.expiryDate
+        let beforeExpiry = captureLoginCredentials(home: home, includeKeychain: false)?.expiryDate
         let spawned: Bool
         if let refreshPingSpawner {
             spawned = await refreshPingSpawner(home)
@@ -588,7 +603,7 @@ struct AgyAdapter: VendorAdapter {
         let deadline = Date().addingTimeInterval(55)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            if let creds = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+            if let creds = captureLoginCredentials(home: home, includeKeychain: false),
                isFresh(creds)
             {
                 if creds.accessToken != failedAccessToken { return creds }
@@ -600,7 +615,7 @@ struct AgyAdapter: VendorAdapter {
                 }
             }
         }
-        if let creds = captureLoginCredentials(home: home, includeKeychain: true, allowPrompt: false),
+        if let creds = captureLoginCredentials(home: home, includeKeychain: false),
            isFresh(creds)
         {
             return creds
