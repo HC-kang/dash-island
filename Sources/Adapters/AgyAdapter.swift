@@ -681,27 +681,29 @@ struct AgyAdapter: VendorAdapter {
     }
 
     private static func refreshAccessToken(_ refreshToken: String) async -> TokenRefreshResult {
-        guard let secret = oauthSecretFromAgyBinary(),
-              !oauthClientIDsFromAgyBinary().isEmpty
-        else {
+        let ids = oauthClientIDsFromAgyBinary()
+        let secrets = oauthSecretsFromAgyBinary()
+        guard !ids.isEmpty, !secrets.isEmpty else {
             NSLog("DashIsland: Agy OAuth client not found in agy binary")
             return .failed
         }
         var last: TokenRefreshResult = .failed
-        for id in oauthClientIDsFromAgyBinary() {
-            let result = await refreshAccessToken(
-                refreshToken,
-                clientID: id,
-                clientSecret: secret
-            )
-            switch result {
-            case .success:
-                cachedOAuthClient = (id, secret)
-                return result
-            case .invalidGrant:
-                last = .invalidGrant
-            case .failed:
-                continue
+        for id in ids {
+            for secret in secrets {
+                let result = await refreshAccessToken(
+                    refreshToken,
+                    clientID: id,
+                    clientSecret: secret
+                )
+                switch result {
+                case .success:
+                    cachedOAuthClient = (id, secret)
+                    return result
+                case .invalidGrant:
+                    last = .invalidGrant
+                case .failed:
+                    continue
+                }
             }
         }
         return last
@@ -877,8 +879,6 @@ struct AgyAdapter: VendorAdapter {
 
     private static var cachedOAuthClient: (id: String, secret: String)?
 
-    private static var cachedBinaryOAuth: (ids: [String], secret: String?)?
-
     /// Installed-app OAuth clients embedded in `agy`. The binary has more than
     /// one googleusercontent id; the first hit is often the wrong one.
     static func oauthClientIDsFromAgyBinary() -> [String] {
@@ -886,17 +886,22 @@ struct AgyAdapter: VendorAdapter {
         return loadBinaryOAuth().ids
     }
 
-    static func oauthSecretFromAgyBinary() -> String? {
-        if let cachedOAuthClient { return cachedOAuthClient.secret }
-        return loadBinaryOAuth().secret
+    static func oauthSecretsFromAgyBinary() -> [String] {
+        if let cachedOAuthClient { return [cachedOAuthClient.secret] }
+        return loadBinaryOAuth().secrets
     }
 
-    private static func loadBinaryOAuth() -> (ids: [String], secret: String?) {
+    private static var cachedBinaryOAuth: (ids: [String], secrets: [String])?
+
+    private static func loadBinaryOAuth() -> (ids: [String], secrets: [String]) {
         if let cachedBinaryOAuth { return cachedBinaryOAuth }
         guard let path = locateAgyBinary(),
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
-        else { return ([], nil) }
-        let loaded = (ids: Array(scanEmbeddedClientIDs(data).reversed()), secret: scanEmbeddedClientSecret(data))
+        else { return ([], []) }
+        let loaded = (
+            ids: Array(scanEmbeddedClientIDs(data).reversed()),
+            secrets: scanEmbeddedClientSecrets(data)
+        )
         cachedBinaryOAuth = loaded
         return loaded
     }
@@ -925,18 +930,38 @@ struct AgyAdapter: VendorAdapter {
         return ids
     }
 
-    private static func scanEmbeddedClientSecret(_ data: Data) -> String? {
+    /// Secrets are packed back-to-back (`GOCSPX-…GOCSPX-…https://`). Stop at the
+    /// next marker or `http` so we don't swallow a URL.
+    private static func scanEmbeddedClientSecrets(_ data: Data) -> [String] {
         let marker = Data("GOCSPX-".utf8)
-        guard let range = data.range(of: marker) else { return nil }
-        var end = range.upperBound
-        while end < data.endIndex {
-            let b = data[end]
-            let ok = (b >= 48 && b <= 57) || (b >= 65 && b <= 90)
-                || (b >= 97 && b <= 122) || b == 45 || b == 95
-            if !ok { break }
-            end = data.index(after: end)
+        let http = Data("http".utf8)
+        var secrets: [String] = []
+        var search = data.startIndex
+        while search < data.endIndex, let range = data[search...].range(of: marker) {
+            let bodyStart = range.upperBound
+            var bodyEnd = data.index(bodyStart, offsetBy: 40, limitedBy: data.endIndex) ?? data.endIndex
+            if let next = data[bodyStart...].range(of: marker) {
+                bodyEnd = min(bodyEnd, next.lowerBound)
+            }
+            if let ht = data[bodyStart...].range(of: http) {
+                bodyEnd = min(bodyEnd, ht.lowerBound)
+            }
+            var end = bodyStart
+            while end < bodyEnd {
+                let b = data[end]
+                let ok = (b >= 48 && b <= 57) || (b >= 65 && b <= 90)
+                    || (b >= 97 && b <= 122) || b == 45 || b == 95
+                if !ok { break }
+                end = data.index(after: end)
+            }
+            if let s = String(data: data[range.lowerBound..<end], encoding: .ascii),
+               s.count >= 20, s.count <= 50, !secrets.contains(s)
+            {
+                secrets.append(s)
+            }
+            search = range.upperBound
         }
-        return String(data: data[range.lowerBound..<end], encoding: .ascii)
+        return secrets
     }
 
     static func locateAgyBinary() -> String? {
