@@ -557,7 +557,6 @@ struct ClaudeAdapter: VendorAdapter {
 
         let started = Date()
         let deadline = started.addingTimeInterval(Self.loginTimeout)
-        var allowKeychainPrompt = true
 
         func isAcceptable(_ creds: ClaudeCreds) -> Bool {
             Self.isAcceptableLogin(
@@ -567,29 +566,24 @@ struct ClaudeAdapter: VendorAdapter {
             )
         }
 
+        func harvest(prompt: Bool) -> ClaudeCreds? {
+            Self.captureLoginCredentials(configDir: configDir, allowKeychainPrompt: prompt)
+        }
+
         while Date() < deadline {
             if Task.isCancelled {
                 if task.isRunning { task.terminate() }
                 throw CancellationError()
             }
-            if let creds = Self.captureLoginCredentials(
-                configDir: configDir,
-                allowKeychainPrompt: allowKeychainPrompt
-            ), isAcceptable(creds) {
+            if let creds = harvest(prompt: false), isAcceptable(creds) {
                 Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                 try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning {
-                    task.terminate()
-                }
+                if task.isRunning { task.terminate() }
                 return
             }
-            allowKeychainPrompt = false
             if !task.isRunning {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                if let creds = Self.captureLoginCredentials(
-                    configDir: configDir,
-                    allowKeychainPrompt: false
-                ), isAcceptable(creds) {
+                if let creds = harvest(prompt: true), isAcceptable(creds) {
                     Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
                     return
                 }
@@ -598,13 +592,8 @@ struct ClaudeAdapter: VendorAdapter {
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
 
-        if task.isRunning {
-            task.terminate()
-        }
-        if let creds = Self.captureLoginCredentials(
-            configDir: configDir,
-            allowKeychainPrompt: false
-        ), isAcceptable(creds) {
+        if task.isRunning { task.terminate() }
+        if let creds = harvest(prompt: true), isAcceptable(creds) {
             Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
             return
         }
@@ -652,7 +641,8 @@ struct ClaudeAdapter: VendorAdapter {
         return parseCredentialsJSON(data)
     }
 
-    /// File first. Keychain only on interactive login when the file is missing.
+    /// File first. If missing, copy from this dir's scoped Keychain.
+    /// Prompt at most during login (`allowKeychainPrompt`); polls stay silent.
     static func captureLoginCredentials(
         configDir: URL,
         allowKeychainPrompt: Bool = false
@@ -660,10 +650,9 @@ struct ClaudeAdapter: VendorAdapter {
         if let file = readCredentialsFile(configDir: configDir) {
             return file
         }
-        guard allowKeychainPrompt else { return nil }
         return readScopedKeychainCredentials(
             configDir: configDir,
-            allowPrompt: true
+            allowPrompt: allowKeychainPrompt
         )
     }
 

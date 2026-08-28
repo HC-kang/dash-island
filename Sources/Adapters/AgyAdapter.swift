@@ -231,12 +231,8 @@ struct AgyAdapter: VendorAdapter {
                     }
                     try Self.persistCredentialsFile(creds, home: home)
                     return
-                case .invalidGrant:
+                case .invalidGrant, .failed:
                     break
-                case .failed:
-                    throw AgyAdapterError.reauthFailed(
-                        "Token refresh failed. Retry in a moment — no Keychain prompt needed."
-                    )
                 }
             }
         }
@@ -255,11 +251,23 @@ struct AgyAdapter: VendorAdapter {
             }
             try await Task.sleep(nanoseconds: Self.pollNanos)
         }
-        if let creds = Self.captureLoginCredentials(home: home, includeKeychain: false),
-           accept(creds)
-        {
-            try Self.persistCredentialsFile(creds, home: home)
-            return
+        if let file = Self.captureLoginCredentials(home: home, includeKeychain: false) {
+            if accept(file) {
+                try Self.persistCredentialsFile(file, home: home)
+                return
+            }
+            if let refresh = file.refreshToken, !refresh.isEmpty,
+               case .success(let access, let rotated, let expiresIn) = await Self.refreshAccessToken(refresh)
+            {
+                var creds = file
+                creds.accessToken = access
+                if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
+                if let expiresIn {
+                    creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
+                }
+                try Self.persistCredentialsFile(creds, home: home)
+                return
+            }
         }
         throw AgyAdapterError.loginTimeout(home: home.path)
     }
