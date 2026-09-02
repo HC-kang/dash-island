@@ -168,7 +168,7 @@ enum AccountChromeActions {
         IslandDialogController.shared.showProgress(
             title: "Reauthenticate",
             message: account.vendorID == "claude"
-                ? "Browser OAuth login required (needs user:profile for usage). setup-token alone is rejected by Anthropic. Completing login may take up to 3 minutes."
+                ? "Extending this Claude session. Browser sign-in only if the refresh token is dead."
                 : "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes).",
             vendorID: adapter.id,
             onCancel: {

@@ -30,9 +30,9 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
             """
         case .credentialsMissing(let configDir):
             return """
-            Claude login finished but no credentials file appeared. The CLI stores \
-            tokens in macOS Keychain; allow Keychain access once so Dash can copy \
-            them into this account folder, or run:
+            Claude login finished but no credentials file appeared. Complete browser \
+            sign-in, then retry. Dash copies tokens into this account folder and \
+            deletes the CLI’s per-folder Keychain item so it is not left behind.
 
               CLAUDE_CONFIG_DIR='\(configDir)' claude auth login --claudeai
             """
@@ -48,8 +48,10 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 ///
 /// **Credentials (multi-account safe):** each account owns
 /// `accounts/<uuid>/.credentials.json`. Poll and refresh never touch Keychain.
-/// Claude CLI on macOS writes login tokens to a *scoped* Keychain item only;
-/// we copy that item into the file once after Add/Reauth, then leave Keychain alone.
+/// Claude CLI on macOS writes login to `Claude Code-credentials-<sha8(configDir)>`
+/// — a **new item per account folder**. We copy that once after Add, then
+/// delete it so Keychain is not a graveyard of hashes. Reauth prefers HTTP
+/// refresh of the file (refresh_token lives ~27d) over another CLI login.
 ///
 /// Two auth modes:
 /// 1. **Long-lived setup-token** (`claude setup-token` → paste) — no refresh;
@@ -65,15 +67,20 @@ struct ClaudeAdapter: VendorAdapter {
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    /// Proactive refresh only when this close to expiry (was 15m — too chatty → 429).
-    private static let expiryBuffer: TimeInterval = 3 * 60
-    /// Prefer reactive refresh (usage 401) over long proactive windows.
-    /// Still allow a short proactive window so expand-poll doesn't race expiry mid-request.
+    /// Access-token skew (Orca uses 5m). Refresh *before* usage 401 so the
+    /// ~27-day refresh_token is rotated instead of dying unused.
+    private static let expiryBuffer: TimeInterval = 5 * 60
+    /// Rotate while the refresh token still has this much life (certilife:
+    /// last-minute refresh 400-kills the family at ~27–30 days).
+    private static let refreshRotateBuffer: TimeInterval = 24 * 60 * 60
+    /// Fallback when `refreshTokenExpiresAt` is missing: don't POST a blob
+    /// whose access expired more than a week ago.
     private static let maxStaleForRefresh: TimeInterval = 7 * 24 * 3600
     /// Minimum gap between *any* Claude OAuth refresh calls app-wide.
-    private static let globalRefreshMinGap: TimeInterval = 20 * 60
-    /// Extra quiet after HTTP 429 on the token endpoint (all accounts share this).
-    private static let globalRefresh429Quiet: TimeInterval = 3 * 60 * 60
+    private static let globalRefreshMinGap: TimeInterval = 15 * 60
+    /// Quiet after *both* token hosts 429. Was 3h — that left 20h-stale rings
+    /// with “retry in 4h”. 15m is enough to stop a stampede.
+    private static let globalRefresh429Quiet: TimeInterval = 15 * 60
     private static let credentialsFileName = ".credentials.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
@@ -81,9 +88,10 @@ struct ClaudeAdapter: VendorAdapter {
     private static let betaHeader = "oauth-2025-04-20"
     private static let keychainServiceBase = "Claude Code-credentials"
     /// Token hosts (Claude Code has moved between these; try both).
+    /// console first: certilife’s working issuer; platform often 429s first.
     private static let oauthTokenURLs: [URL] = [
-        URL(string: "https://platform.claude.com/v1/oauth/token")!,
         URL(string: "https://console.anthropic.com/v1/oauth/token")!,
+        URL(string: "https://platform.claude.com/v1/oauth/token")!,
     ]
 
     /// Serializes OAuth refresh so two Claude accounts cannot 429 the token host.
@@ -145,25 +153,72 @@ struct ClaudeAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let credPath = dir.appendingPathComponent(Self.credentialsFileName, isDirectory: false)
+        let priorFile = try? Data(contentsOf: credPath)
+
+        func restorePriorFile() {
+            if let priorFile {
+                try? priorFile.write(to: credPath, options: .atomic)
+            } else {
+                Self.clearManagedCredentials(configDir: dir)
+            }
+        }
+
         do {
-            // Snapshot first. Claude CLI on macOS keeps the live session in
-            // scoped Keychain; deleting only .credentials.json lets `auth login`
-            // reopen a browser and immediately succeed with the old token.
+            // Prefer HTTP refresh of the managed file. Browser login is what
+            // creates a new `Claude Code-credentials-<sha8>` item and the
+            // Keychain password sheet — skip it when the refresh_token still works.
+            if let creds = Self.readCredentialsFile(configDir: dir),
+               Self.canAttemptRefresh(creds)
+            {
+                let outcome = await Self.refreshManagedCredentialsDetailed(
+                    configDir: dir,
+                    failedAccessToken: creds.accessToken,
+                    force: true
+                )
+                switch Self.reauthStep(for: outcome) {
+                case .finished:
+                    // Fresh access. Usage 429 is keep; 401 falls through to browser.
+                    if let live = Self.readCredentialsFile(configDir: dir) {
+                        let snap = await Self.probeUsage(
+                            token: live.accessToken,
+                            plan: live.subscriptionType,
+                            fetchedAt: Date()
+                        )
+                        switch Self.usageSmokeDecision(snap) {
+                        case .pass, .softKeep:
+                            Self.discardCLIKeychainCopy(configDir: dir)
+                            return ref
+                        case .reject:
+                            break
+                        }
+                    }
+                case .keepExisting:
+                    // Token host 429 / blip — session is still ours. Never a
+                    // "Reauthenticate failed" sheet; polls will retry.
+                    Self.discardCLIKeychainCopy(configDir: dir)
+                    return ref
+                case .needBrowser:
+                    break
+                }
+            }
+
             let prior = Self.existingCredentials(configDir: dir)
-            Self.clearManagedCredentials(configDir: dir)
+            // Keep the managed file until a new session is accepted so cancel
+            // is non-destructive. Wipe only the CLI’s hashed Keychain leftover.
+            Self.deleteScopedKeychainItem(configDir: dir)
             await Self.runLogout(configDir: dir)
             try await runLogin(
                 configDir: dir,
                 priorAccessToken: prior?.accessToken,
                 priorRefreshToken: prior?.refreshToken
             )
-            // H2: leftover-but-valid harvest used to skip /api/oauth/usage.
             try await Self.verifyUsageAccess(configDir: dir)
             _ = try Self.requireCredentials(configDir: dir)
+            Self.discardCLIKeychainCopy(configDir: dir)
             return ref
         } catch {
-            // Smoke-rejected or failed harvest must not stay as the live file.
-            Self.clearManagedCredentials(configDir: dir)
+            restorePriorFile()
             if let error = error as? ClaudeAdapterError { throw error }
             throw ClaudeAdapterError.reauthFailed(error.localizedDescription)
         }
@@ -189,6 +244,25 @@ struct ClaudeAdapter: VendorAdapter {
         case pass
         case reject
         case softKeep
+    }
+
+    /// What Reauthenticate should do after an HTTP refresh attempt.
+    /// 429 is not failure — the refresh_token is still live.
+    enum ReauthStep: Equatable {
+        case finished
+        case keepExisting
+        case needBrowser
+    }
+
+    static func reauthStep(for outcome: RefreshOutcome) -> ReauthStep {
+        switch outcome {
+        case .success, .adopted:
+            return .finished
+        case .rateLimited, .unavailable:
+            return .keepExisting
+        case .rejected, .skipped:
+            return .needBrowser
+        }
     }
 
     static func usageSmokeDecision(_ snapshot: UsageSnapshot) -> UsageSmokeDecision {
@@ -236,9 +310,11 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
 
-        // Steady-state is the managed file. Keychain is login/ping only —
-        // polling it every cycle triggers the macOS password dialog.
-        guard let creds = Self.readCredentials(configDir: dir) else {
+        // File is SoT. Drop the CLI’s hashed Keychain copy if we already
+        // persisted — otherwise each account UUID leaves a new item behind.
+        Self.discardCLIKeychainCopy(configDir: dir)
+
+        guard var creds = Self.readCredentials(configDir: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
 
@@ -266,10 +342,18 @@ struct ClaudeAdapter: VendorAdapter {
         }
 
         // --- Short-lived CLI OAuth (managed file only) ---
-        // Orca/Hermes lesson: local expiresAt is advisory. Always probe usage first
-        // and only touch single-use refresh after an authoritative 401/403.
-        // File-only adopt-before-refresh: if a CLI already rotated this managed
-        // dir's .credentials.json, adopt it and skip oauth/token.
+        // Orca: refresh 5m before access expiry. certilife: rotate the
+        // refresh_token a day before *it* dies (~27d), not after usage 401.
+        if Self.shouldProactiveRefresh(creds, now: now) {
+            switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
+            case .success(let next), .adopted(let next):
+                creds = next
+            case .rejected:
+                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+            case .rateLimited, .skipped, .unavailable:
+                break
+            }
+        }
 
         var snap = await Self.probeUsage(
             token: creds.accessToken,
@@ -310,10 +394,24 @@ struct ClaudeAdapter: VendorAdapter {
                 plan: refreshed.subscriptionType,
                 fetchedAt: Date()
             )
-        case .rateLimited(let retry):
+        case .rateLimited:
+            // Token-host 429 is not a usage-quota 429. Do not feed the
+            // orchestrator’s 2h/4h/6h streak — that painted “retry in 4h”
+            // on 20h-stale rings. Probe the current access; it may still work.
+            if let file = readCredentialsFile(configDir: configDir),
+               !file.accessToken.isEmpty
+            {
+                let live = await probeUsage(
+                    token: file.accessToken,
+                    plan: file.subscriptionType,
+                    fetchedAt: Date()
+                )
+                if live.error == nil { return live }
+                if case .rateLimited = live.error { return live }
+            }
             NSLog("DashIsland: Claude refresh quiet ref=%@", String(ref.prefix(8)))
             return errorSnapshot(
-                .rateLimited(retryAfter: retry ?? Date().addingTimeInterval(globalRefresh429Quiet)),
+                .unavailable("token quiet — oauth rate limited"),
                 fetchedAt: Date()
             )
         case .rejected:
@@ -360,23 +458,64 @@ struct ClaudeAdapter: VendorAdapter {
             spawned = await spawnManagedRefreshPing(configDir: configDir)
         }
         guard spawned else { return nil }
-        let deadline = Date().addingTimeInterval(8)
-        while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            if let file = readCredentialsFile(configDir: configDir),
-               !file.accessToken.isEmpty,
-               file.accessToken != failedAccessToken,
-               file.accessToken != before
+        // Darwin CLI writes Keychain and often *deletes* `.credentials.json`.
+        // Harvest via `/usr/bin/security` (no Dash password sheet), then file.
+        if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir) {
+            commitHarvestedCredentials(creds: harvested, configDir: configDir)
+            if harvested.accessToken != failedAccessToken,
+               harvested.accessToken != before
             {
-                return file
+                return harvested
             }
+            if !isExpired(harvested) { return harvested }
         }
         if let file = readCredentialsFile(configDir: configDir),
-           shouldAdopt(file, failedAccessToken: failedAccessToken)
+           !file.accessToken.isEmpty
         {
-            return file
+            if file.accessToken != failedAccessToken, file.accessToken != before {
+                return file
+            }
+            if !isExpired(file) { return file }
         }
         return nil
+    }
+
+    /// `security find-generic-password -w` — the CLI’s ACL allows this without
+    /// a Dash Island Keychain prompt. Never `SecItem` with Allow here.
+    static func harvestScopedCredentialsViaSecurity(configDir: URL) async -> ClaudeCreds? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        task.arguments = [
+            "find-generic-password",
+            "-s", scopedKeychainService(for: configDir),
+            "-a", NSUserName(),
+            "-w",
+        ]
+        let stdout = Pipe()
+        task.standardOutput = stdout
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(4)
+        while task.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if task.isRunning {
+            task.terminate()
+            return nil
+        }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        return parseSecurityPasswordStdout(data)
+    }
+
+    static func parseSecurityPasswordStdout(_ data: Data) -> ClaudeCreds? {
+        guard let raw = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let json = trimmed.data(using: .utf8) else { return nil }
+        return parseCredentialsJSON(json)
     }
 
     private static func pingDefaultsKey(configDir: URL) -> String {
@@ -403,7 +542,7 @@ struct ClaudeAdapter: VendorAdapter {
         guard let path = locateClaudeBinary() else { return false }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
-        task.arguments = ["-p", "ok", "--model", "haiku", "--strict-mcp-config"]
+        task.arguments = ["-p", "ok", "--model", "haiku", "--max-turns", "1"]
         task.currentDirectoryPath = NSHomeDirectory()
         var env = ProcessInfo.processInfo.environment
         env["CLAUDE_CONFIG_DIR"] = configDir.path
@@ -558,16 +697,13 @@ struct ClaudeAdapter: VendorAdapter {
         let started = Date()
         let deadline = started.addingTimeInterval(Self.loginTimeout)
 
-        func isAcceptable(_ creds: ClaudeCreds) -> Bool {
-            Self.isAcceptableLogin(
-                creds,
-                priorAccessToken: priorToken,
-                priorRefreshToken: priorRefresh
-            )
-        }
-
         func harvest(prompt: Bool) -> ClaudeCreds? {
-            Self.captureLoginCredentials(configDir: configDir, allowKeychainPrompt: prompt)
+            Self.harvestLoginCredentials(
+                configDir: configDir,
+                priorAccessToken: priorToken,
+                priorRefreshToken: priorRefresh,
+                allowKeychainPrompt: prompt
+            )
         }
 
         while Date() < deadline {
@@ -575,16 +711,18 @@ struct ClaudeAdapter: VendorAdapter {
                 if task.isRunning { task.terminate() }
                 throw CancellationError()
             }
-            if let creds = harvest(prompt: false), isAcceptable(creds) {
-                Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
+            // Silent Keychain only while waiting — a prompt here would fire
+            // every second with a *new* hashed service name per account folder.
+            if let creds = harvest(prompt: false) {
+                Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 if task.isRunning { task.terminate() }
                 return
             }
             if !task.isRunning {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                if let creds = harvest(prompt: true), isAcceptable(creds) {
-                    Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
+                if let creds = harvest(prompt: true) {
+                    Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
                     return
                 }
                 throw ClaudeAdapterError.credentialsMissing(configDir: configDir.path)
@@ -593,8 +731,8 @@ struct ClaudeAdapter: VendorAdapter {
         }
 
         if task.isRunning { task.terminate() }
-        if let creds = harvest(prompt: true), isAcceptable(creds) {
-            Self.persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
+        if let creds = harvest(prompt: true) {
+            Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
             return
         }
         throw ClaudeAdapterError.loginTimeout(configDir: configDir.path)
@@ -624,6 +762,8 @@ struct ClaudeAdapter: VendorAdapter {
         var subscriptionType: String?
         /// Access-token expiry when known (Claude stores epoch **milliseconds**).
         var expiresAt: Date?
+        /// Refresh-token expiry when known (~27d on current Claude OAuth).
+        var refreshExpiresAt: Date?
         /// `claude setup-token` paste — do not call oauth/token.
         var longLived: Bool = false
         /// Raw JSON blob (for writing `.credentials.json` into the managed folder).
@@ -654,6 +794,49 @@ struct ClaudeAdapter: VendorAdapter {
             configDir: configDir,
             allowPrompt: allowKeychainPrompt
         )
+    }
+
+    /// Login wait: accept a *new* session only. An existing managed file is
+    /// ignored when it matches `prior*` so reauth can keep the file on disk
+    /// (cancel-safe) without treating it as a finished login.
+    static func harvestLoginCredentials(
+        configDir: URL,
+        priorAccessToken: String?,
+        priorRefreshToken: String?,
+        allowKeychainPrompt: Bool = false
+    ) -> ClaudeCreds? {
+        func acceptable(_ creds: ClaudeCreds?) -> ClaudeCreds? {
+            guard let creds else { return nil }
+            guard isAcceptableLogin(
+                creds,
+                priorAccessToken: priorAccessToken,
+                priorRefreshToken: priorRefreshToken
+            ) else { return nil }
+            return creds
+        }
+        if let hit = acceptable(readCredentialsFile(configDir: configDir)) {
+            return hit
+        }
+        return acceptable(
+            readScopedKeychainCredentials(
+                configDir: configDir,
+                allowPrompt: allowKeychainPrompt
+            )
+        )
+    }
+
+    /// Persist the managed file, then delete the CLI’s hashed Keychain item
+    /// so each account UUID does not leave `Claude Code-credentials-<sha8>`.
+    static func commitHarvestedCredentials(creds: ClaudeCreds, configDir: URL) {
+        persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
+        deleteScopedKeychainItem(configDir: configDir)
+    }
+
+    /// If we already have a file, drop the CLI leftover. Silent (`Fail`) —
+    /// never a password sheet.
+    static func discardCLIKeychainCopy(configDir: URL) {
+        guard readCredentialsFile(configDir: configDir) != nil else { return }
+        deleteScopedKeychainItem(configDir: configDir)
     }
 
     /// Setup-token / pasted long-lived OAuth: no refresh_token (or explicit flag).
@@ -742,13 +925,23 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// Safe to call oauth/token when we have a refresh_token (gate handles 429).
-    /// No short wall-clock cut — that left accounts permanently quiet after 429 windows.
+    /// Prefer `refreshTokenExpiresAt` (~27d). Fallback: access `expiresAt` + 7d.
     static func canAttemptRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else { return false }
+        if let refreshExp = creds.refreshExpiresAt {
+            return now < refreshExp
+        }
         guard let exp = creds.expiresAt else { return true }
-        // Extremely old blobs (weeks) — likely revoked; don't burn the endpoint.
         return now < exp.addingTimeInterval(maxStaleForRefresh)
+    }
+
+    /// Orca 5m access skew, plus certilife 24h-before-refresh-expiry.
+    static func shouldProactiveRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
+        guard canAttemptRefresh(creds, now: now) else { return false }
+        if shouldRefresh(creds, now: now) { return true }
+        guard let refreshExp = creds.refreshExpiresAt else { return false }
+        return now.addingTimeInterval(refreshRotateBuffer) >= refreshExp
     }
 
     /// Refresh only after usage 401/403 — never because local expiresAt says so.
@@ -805,7 +998,8 @@ struct ClaudeAdapter: VendorAdapter {
 
     static func refreshManagedCredentialsDetailed(
         configDir: URL,
-        failedAccessToken: String? = nil
+        failedAccessToken: String? = nil,
+        force: Bool = false
     ) async -> RefreshOutcome {
         let path = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
         guard let data = try? Data(contentsOf: path),
@@ -817,12 +1011,13 @@ struct ClaudeAdapter: VendorAdapter {
             return .adopted(creds)
         }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else { return .skipped }
-        if failedAccessToken == nil, !isExpired(creds), !shouldRefresh(creds) {
+        if failedAccessToken == nil, !shouldProactiveRefresh(creds) {
             return .success(creds)
         }
 
         // Atomic reserve: check + book the gap so two accounts cannot double-POST.
-        if let waitUntil = await refreshGate.reserveAttempt(gap: globalRefreshMinGap) {
+        // User-initiated Reauthenticate passes `force` to try once anyway.
+        if !force, let waitUntil = await refreshGate.reserveAttempt(gap: globalRefreshMinGap) {
             return .rateLimited(waitUntil)
         }
 
@@ -835,7 +1030,7 @@ struct ClaudeAdapter: VendorAdapter {
             return .adopted(creds)
         }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else { return .skipped }
-        if failedAccessToken == nil, !isExpired(creds), !shouldRefresh(creds) {
+        if failedAccessToken == nil, !shouldProactiveRefresh(creds) {
             return .success(creds)
         }
 
@@ -849,70 +1044,126 @@ struct ClaudeAdapter: VendorAdapter {
             .joined(separator: "&")
             .data(using: .utf8)
 
-        var lastStatus = 0
-        for tokenURL in oauthTokenURLs {
-            var req = URLRequest(url: tokenURL)
-            req.httpMethod = "POST"
-            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-            req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
-            req.timeoutInterval = 12
-            req.httpBody = body
-
-            do {
-                let (respData, response) = try await URLSession.shared.data(for: req)
-                guard let http = response as? HTTPURLResponse else {
-                    continue
-                }
-                lastStatus = http.statusCode
-                switch http.statusCode {
-                case 200..<300:
-                    guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
-                          let next = parseCredentialsJSON(updated)
-                    else {
-                        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                        return .unavailable("token refresh parse failed")
-                    }
-                    try? updated.write(to: path, options: .atomic)
-                    await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                    return .success(next)
-                case 429:
-                    let retry = retryAfterDate(from: http)
-                        ?? Date().addingTimeInterval(globalRefresh429Quiet)
-                    await refreshGate.noteRateLimited(until: retry)
-                    NSLog("DashIsland: Claude refresh HTTP 429 (global quiet)")
-                    return .rateLimited(retry)
-                case 400, 401, 403:
-                    await refreshGate.noteAttempt(gap: globalRefreshMinGap)
-                    let errBody = String(data: respData, encoding: .utf8) ?? ""
-                    NSLog(
-                        "DashIsland: Claude refresh rejected HTTP %d %@ %@",
-                        http.statusCode,
-                        tokenURL.host ?? "",
-                        errBody
-                    )
-                    return .rejected
-                default:
-                    NSLog(
-                        "DashIsland: Claude refresh HTTP %d host=%@",
-                        http.statusCode,
-                        tokenURL.host ?? ""
-                    )
-                    continue
-                }
-            } catch {
-                NSLog(
-                    "DashIsland: Claude refresh failed host=%@ %@",
-                    tokenURL.host ?? "",
-                    error.localizedDescription
+        let encodings: [(String, Data?)] = [
+            ("application/x-www-form-urlencoded", body),
+            (
+                "application/json",
+                try? JSONSerialization.data(
+                    withJSONObject: [
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh,
+                        "client_id": oauthClientID,
+                    ]
                 )
-                continue
+            ),
+        ]
+
+        var lastStatus = 0
+        var saw429 = false
+        var retry429: Date?
+        for tokenURL in oauthTokenURLs {
+            var hostRateLimited = false
+            for (contentType, payload) in encodings {
+                guard let payload else { continue }
+                var req = URLRequest(url: tokenURL)
+                req.httpMethod = "POST"
+                req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+                req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
+                req.timeoutInterval = 12
+                req.httpBody = payload
+
+                do {
+                    let (respData, response) = try await URLSession.shared.data(for: req)
+                    guard let http = response as? HTTPURLResponse else {
+                        continue
+                    }
+                    lastStatus = http.statusCode
+                    switch http.statusCode {
+                    case 200..<300:
+                        guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
+                              let next = parseCredentialsJSON(updated)
+                        else {
+                            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                            return .unavailable("token refresh parse failed")
+                        }
+                        try? updated.write(to: path, options: .atomic)
+                        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                        NSLog(
+                            "DashIsland: Claude refresh ok host=%@ type=%@",
+                            tokenURL.host ?? "",
+                            contentType
+                        )
+                        return .success(next)
+                    case 429:
+                        saw429 = true
+                        hostRateLimited = true
+                        retry429 = cappedTokenRetryDate(retryAfterDate(from: http))
+                        NSLog(
+                            "DashIsland: Claude refresh HTTP 429 host=%@ — trying next token host",
+                            tokenURL.host ?? ""
+                        )
+                    case 400, 401, 403:
+                        let errBody = String(data: respData, encoding: .utf8) ?? ""
+                        if isFatalOAuthRefreshError(status: http.statusCode, body: errBody) {
+                            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                            NSLog(
+                                "DashIsland: Claude refresh rejected HTTP %d %@ %@",
+                                http.statusCode,
+                                tokenURL.host ?? "",
+                                errBody
+                            )
+                            return .rejected
+                        }
+                        NSLog(
+                            "DashIsland: Claude refresh HTTP %d host=%@ type=%@ — trying next",
+                            http.statusCode,
+                            tokenURL.host ?? "",
+                            contentType
+                        )
+                    default:
+                        NSLog(
+                            "DashIsland: Claude refresh HTTP %d host=%@ type=%@",
+                            http.statusCode,
+                            tokenURL.host ?? "",
+                            contentType
+                        )
+                    }
+                } catch {
+                    NSLog(
+                        "DashIsland: Claude refresh failed host=%@ %@",
+                        tokenURL.host ?? "",
+                        error.localizedDescription
+                    )
+                }
+                if hostRateLimited { break }
             }
+        }
+        if saw429 || lastStatus > 0 {
+            // HTTP oauth/token 429s for days; the Claude CLI still refreshes.
+            if let recovered = await pingCLIThenAdopt(
+                configDir: configDir,
+                failedAccessToken: failedAccessToken ?? creds.accessToken
+            ) {
+                return .success(recovered)
+            }
+        }
+        if saw429 {
+            let retry = retry429 ?? Date().addingTimeInterval(globalRefresh429Quiet)
+            await refreshGate.noteRateLimited(until: retry)
+            return .rateLimited(retry)
         }
         await refreshGate.noteAttempt(gap: globalRefreshMinGap)
         if lastStatus > 0 {
             return .unavailable("token refresh HTTP \(lastStatus)")
         }
         return .unavailable("token refresh: network error")
+    }
+
+    /// Never honor a token-host Retry-After past `globalRefresh429Quiet`.
+    static func cappedTokenRetryDate(_ proposed: Date?, now: Date = Date()) -> Date {
+        let cap = now.addingTimeInterval(globalRefresh429Quiet)
+        guard let proposed else { return cap }
+        return min(proposed, cap)
     }
 
     /// Merge token-endpoint JSON into stored credentials blob. Exposed for tests.
@@ -933,6 +1184,13 @@ struct ClaudeAdapter: VendorAdapter {
         if let newRefresh = resp["refresh_token"] as? String, !newRefresh.isEmpty {
             oauth["refreshToken"] = newRefresh
         }
+        if let expiresIn = resp["refresh_token_expires_in"] as? Double {
+            oauth["refreshTokenExpiresAt"] = Int((now.timeIntervalSince1970 + expiresIn) * 1000)
+        } else if let expiresIn = resp["refresh_token_expires_in"] as? Int {
+            oauth["refreshTokenExpiresAt"] = Int((now.timeIntervalSince1970 + Double(expiresIn)) * 1000)
+        } else if let parsed = parseExpiresAt(resp["refresh_token_expires_at"]) {
+            oauth["refreshTokenExpiresAt"] = Int(parsed.timeIntervalSince1970 * 1000)
+        }
         if let scope = resp["scope"] as? String, !scope.isEmpty {
             oauth["scopes"] = scope.split(separator: " ").map(String.init)
         }
@@ -952,6 +1210,10 @@ struct ClaudeAdapter: VendorAdapter {
         }
         if let raw = creds.rawJSON {
             try? raw.write(to: path, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: path.path
+            )
             return
         }
         var oauth: [String: Any] = ["accessToken": creds.accessToken]
@@ -964,6 +1226,9 @@ struct ClaudeAdapter: VendorAdapter {
         if let exp = creds.expiresAt {
             oauth["expiresAt"] = Int(exp.timeIntervalSince1970 * 1000)
         }
+        if let refreshExp = creds.refreshExpiresAt {
+            oauth["refreshTokenExpiresAt"] = Int(refreshExp.timeIntervalSince1970 * 1000)
+        }
         if creds.longLived {
             oauth["dashIslandLongLived"] = true
         }
@@ -971,6 +1236,10 @@ struct ClaudeAdapter: VendorAdapter {
         if let data = try? JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted]) {
             try? data.write(to: path, options: .atomic)
         }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: path.path
+        )
     }
 
     /// Decode Claude Code credential JSON (`claudeAiOauth.accessToken`, …).
@@ -987,6 +1256,9 @@ struct ClaudeAdapter: VendorAdapter {
             refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
             subscriptionType: oauth["subscriptionType"] as? String,
             expiresAt: parseExpiresAt(oauth["expiresAt"] ?? oauth["expires_at"]),
+            refreshExpiresAt: parseExpiresAt(
+                oauth["refreshTokenExpiresAt"] ?? oauth["refresh_token_expires_at"]
+            ),
             longLived: flagged,
             rawJSON: data
         )
@@ -1000,6 +1272,16 @@ struct ClaudeAdapter: VendorAdapter {
     private static func formEncode(_ value: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    /// Token-host 400/401/403 is fatal only for a spent/invalid grant.
+    /// Other 400s (wrong host, HTML) should try the next URL.
+    static func isFatalOAuthRefreshError(status: Int, body: String) -> Bool {
+        guard (400...403).contains(status) else { return false }
+        let low = body.lowercased()
+        return low.contains("invalid_grant")
+            || low.contains("invalid_token")
+            || low.contains("\"error\":\"invalid_client\"")
     }
 
     /// Claude Code writes `expiresAt` as epoch **milliseconds**.
@@ -1032,11 +1314,11 @@ struct ClaudeAdapter: VendorAdapter {
 
     private static func deleteScopedKeychainItem(configDir: URL) {
         let service = scopedKeychainService(for: configDir)
-        let account = NSUserName()
+        // Service name is unique to this config dir hash — do not also
+        // require kSecAttrAccount (CLI vs Dash can disagree on the account).
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         SecItemDelete(query as CFDictionary)
@@ -1326,9 +1608,16 @@ private actor ClaudeRefreshGate {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let stored = defaults.double(forKey: Self.defaultsKey)
-        self.nextAllowedAt = stored > 0
+        let parsed = stored > 0
             ? Date(timeIntervalSince1970: stored)
-            : .distantPast
+            : Date.distantPast
+        // Drop leftover 3h quiet from older builds so this launch can fetch.
+        if parsed.timeIntervalSinceNow > 20 * 60 {
+            self.nextAllowedAt = .distantPast
+            defaults.removeObject(forKey: Self.defaultsKey)
+        } else {
+            self.nextAllowedAt = parsed
+        }
     }
 
     /// Atomically reserve one attempt. `nil` = reserved now; else wait until date.
@@ -1350,8 +1639,9 @@ private actor ClaudeRefreshGate {
         persist()
     }
 
-    func noteRateLimited(until: Date) {
-        nextAllowedAt = max(nextAllowedAt, until)
+    func noteRateLimited(until: Date, now: Date = Date()) {
+        let cap = now.addingTimeInterval(15 * 60)
+        nextAllowedAt = max(nextAllowedAt, min(until, cap))
         persist()
     }
 

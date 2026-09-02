@@ -353,3 +353,28 @@ Fixes:
 - Graph stale vs code: H2 smoke is on browser add/reauth; H6 wipe clears last-good (tokenless no longer keeps old rings).
 - Cheap fixes: smoke-reject rollback (`clearManagedCredentials` on add/reauth catch); `requireCredentials` file-only (H10); add-cancel + `AccountStore.remove` wipe scoped KC (H4 file/KC).
 - Still open: H1 residual (both tokens rotate), H3 logout fire-and-forget, H7 global KC, H8 adopted+401, H9 429 soft-keep, live CLI/HTTP untested.
+
+## Claude hashed Keychain pollution (2026-08-30)
+
+- CLI 2.1+ writes `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`. Each account UUID (and each failed Add) is a **new Keychain item** + password sheet (`321711bc` = `90A3EF8C-…`).
+- Access ~8h; **refresh ~27d** (`refreshTokenExpiresAt`). Waiting for usage 401 never rotates refresh → certilife 27–30d death. Token-host 429 then Reauth wiped the file and harvested Keychain again.
+- Fix: file is SoT. After harvest (or any poll that already has a file) **delete the hashed item**. Wait-loop harvest is silent; one prompt only after CLI exit on first Add. Reauth tries HTTP refresh first and does **not** wipe the file on failure. Proactive refresh: Orca 5m access skew + 24h-before-refresh-expiry. `invalid_grant` is fatal; other 400s try the next token host.
+- Never touch unsuffixed `Claude Code-credentials` (user's real Claude Code).
+- Ad-hoc codesign still resets ACL on every rebuild — that's why Always Allow dies in dev. Don't re-read Keychain after the file exists.
+
+## Reauth must not fail on token-host 429 (2026-08-30)
+
+- Bug: HTTP-first reauth `throw reauthFailed("token host is rate-limited…")` → "Reauthenticate failed" sheet. User still has a ~27d refresh_token.
+- Fix: `reauthStep` — 429/unavailable → **keep existing** (return ref, no alert). User-initiated refresh uses `force: true` (one POST, skip 20m/3h poll gate). `invalid_grant` still opens browser. Progress copy is "Extending this Claude session", not "browser required".
+
+## Token-host 429 must not hide usage for 4h (2026-08-31)
+
+- Symptom: tooltip “retry in 3h 59m / last ok 20h ago”. First token host 429 aborted the loop; adapter returned `.rateLimited(3h)`; orchestrator streak×2h = **4h lock**. Access already dead → no usage.
+- Fix: try **console.anthropic.com then platform.claude.com**, form + JSON. 429 on one host continues. Cap quiet at **15m**. Token-host 429 → `.unavailable("token quiet")` not usage-quota 429 (no 2h/4h/6h streak). Drop persisted 3h UserDefaults gate on launch. Expand retries if last success ≥2h stale.
+
+## HTTP oauth/token 429 for days; CLI still refreshes (2026-09-02)
+
+- Live: both token hosts 429 (no Retry-After) for ~3 days. Access 401 “expired”. Refresh_token still valid (~24d).
+- `claude -p ok --model haiku` with `CLAUDE_CONFIG_DIR` **does** rotate tokens. Darwin CLI writes scoped Keychain and **deletes** `.credentials.json`.
+- Harvest with `/usr/bin/security find-generic-password -w` (no Dash password sheet), persist file, delete hashed KC. Usage then 200 (max 32%/17%, pro 0%/2%).
+- Adapter: on HTTP 429/fail, `pingCLIThenAdopt` then security harvest. Never poll-path `SecItem` Allow.
