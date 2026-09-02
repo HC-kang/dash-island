@@ -378,3 +378,9 @@ Fixes:
 - `claude -p ok --model haiku` with `CLAUDE_CONFIG_DIR` **does** rotate tokens. Darwin CLI writes scoped Keychain and **deletes** `.credentials.json`.
 - Harvest with `/usr/bin/security find-generic-password -w` (no Dash password sheet), persist file, delete hashed KC. Usage then 200 (max 32%/17%, pro 0%/2%).
 - Adapter: on HTTP 429/fail, `pingCLIThenAdopt` then security harvest. Never poll-path `SecItem` Allow.
+
+## Agy client-id scan ate a leading `it` (2026-09-02)
+
+- Tooltip: `token refresh failed — retrying`, last ok 5d 8h. Access `expiry_date` 2026-08-28. Refresh still valid.
+- Scanner walked back through letters → `it1071006060591-….apps.googleusercontent.com` (invalid). Real Gemini CLI id is `1071006060591-…`. Pair **id[1] × secret[0]** HTTP 200; usage `fetchAvailableModels` 200.
+- Strip leading non-digits from embedded googleusercontent IDs.
