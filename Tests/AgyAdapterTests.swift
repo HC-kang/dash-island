@@ -5,6 +5,18 @@ enum AgyAdapterSuite {
         print("AgyAdapterSuite")
         var failures = 0
 
+        failures += check("embedded Google client IDs must start with digits") {
+            let blob = Data(
+                "xxit1071006060591-abc.apps.googleusercontent.comYY884354919052-def.apps.googleusercontent.com"
+                    .utf8
+            )
+            let ids = AgyAdapter.scanEmbeddedClientIDs(blob)
+            try assertEqual(ids.count, 2)
+            try assertEqual(ids[0], "1071006060591-abc.apps.googleusercontent.com")
+            try assertEqual(ids[1], "884354919052-def.apps.googleusercontent.com")
+            try assertTrue(!ids.contains(where: { $0.hasPrefix("it") }))
+        }
+
         failures += check("preferFresher picks later expiry across stores") {
             let stale = AgyAdapter.AgyCreds(
                 accessToken: "old",

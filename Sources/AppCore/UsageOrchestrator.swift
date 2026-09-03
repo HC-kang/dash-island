@@ -451,7 +451,13 @@ final class UsageOrchestrator: ObservableObject {
         var due: [Account] = []
         for account in accounts {
             if let until = cooldownUntil[account.id], now < until {
-                continue
+                // 20h-stale last-good + 4h 429 lock looked dead. Expand/force
+                // retry when the last *success* is older than 2h.
+                let lastOK = lastSuccessAt[account.id]
+                let veryStale = lastOK.map { now.timeIntervalSince($0) >= 2 * 3600 } ?? true
+                if !(mode == .expand && veryStale) {
+                    continue
+                }
             }
             let minPoll = TimeInterval(
                 VendorRegistry.adapter(for: account.vendorID)?.minPollSeconds ?? 300

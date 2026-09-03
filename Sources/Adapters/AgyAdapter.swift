@@ -914,7 +914,10 @@ struct AgyAdapter: VendorAdapter {
         return loaded
     }
 
-    private static func scanEmbeddedClientIDs(_ data: Data) -> [String] {
+    /// Google installed-app IDs are `{digits}-{slug}.apps.googleusercontent.com`.
+    /// Walking back through letters ate a preceding `it` (`it1071006060591-…`)
+    /// so HTTP refresh used a client that does not exist.
+    static func scanEmbeddedClientIDs(_ data: Data) -> [String] {
         let marker = Data(".apps.googleusercontent.com".utf8)
         var ids: [String] = []
         var search = data.startIndex
@@ -928,10 +931,17 @@ struct AgyAdapter: VendorAdapter {
                 if !ok { break }
                 start = data.index(before: start)
             }
-            if let id = String(data: data[start..<range.upperBound], encoding: .ascii),
-               !ids.contains(id)
-            {
-                ids.append(id)
+            if var id = String(data: data[start..<range.upperBound], encoding: .ascii) {
+                while let first = id.first, !first.isNumber {
+                    id.removeFirst()
+                }
+                if id.first?.isNumber == true,
+                   id.contains("-"),
+                   id.hasSuffix(".apps.googleusercontent.com"),
+                   !ids.contains(id)
+                {
+                    ids.append(id)
+                }
             }
             search = range.upperBound
         }

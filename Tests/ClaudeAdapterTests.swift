@@ -215,6 +215,15 @@ enum ClaudeAdapterSuite {
                 priorRefreshToken: "rt-same"
             ))
         }
+        failures += check("security -w stdout parses Claude credentials JSON") {
+            let json = """
+            {"claudeAiOauth":{"accessToken":"at-from-kc","refreshToken":"rt-from-kc","subscriptionType":"max","expiresAt":1}}
+            """
+            let creds = ClaudeAdapter.parseSecurityPasswordStdout(Data(json.utf8))
+            try assertEqual(creds?.accessToken, "at-from-kc")
+            try assertEqual(creds?.refreshToken, "rt-from-kc")
+            try assertTrue(ClaudeAdapter.parseSecurityPasswordStdout(Data()) == nil)
+        }
         failures += check("CLI ping is 6h gated per managed dir") {
             let dir = URL(fileURLWithPath: "/tmp/dash-island-claude-ping-\(UUID().uuidString)", isDirectory: true)
             let key = "DashIsland.ClaudeCLIPing.\(dir.path)"
@@ -699,6 +708,143 @@ enum ClaudeAdapterSuite {
             encoder.dateEncodingStrategy = .millisecondsSince1970
             let dirty = try encoder.encode(errSnap)
             try assertTrue(UsageOrchestrator.decodeLastGood(dirty) == nil)
+        }
+        failures += check("parse refreshTokenExpiresAt milliseconds") {
+            let accessMs = Int((Date().timeIntervalSince1970 + 8 * 3600) * 1000)
+            let refreshMs = Int((Date().timeIntervalSince1970 + 27 * 24 * 3600) * 1000)
+            let json = """
+            {"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":\(accessMs),"refreshTokenExpiresAt":\(refreshMs)}}
+            """
+            let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
+            try assertEqual(creds?.refreshToken, "rt")
+            let left = creds?.refreshExpiresAt?.timeIntervalSinceNow ?? -1
+            try assertTrue(left > 26 * 24 * 3600, "refresh expiry should be ~27d, got \(left)s")
+        }
+        failures += check("week-old access still refreshable when refreshTokenExpiresAt is live") {
+            let now = Date()
+            let creds = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a",
+                refreshToken: "r",
+                subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(-10 * 24 * 3600),
+                refreshExpiresAt: now.addingTimeInterval(20 * 24 * 3600),
+                rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.isHardExpired(creds, now: now))
+            try assertTrue(ClaudeAdapter.canAttemptRefresh(creds, now: now))
+        }
+        failures += check("proactive refresh: 5m access skew + 24h refresh-rotate") {
+            let now = Date()
+            let live = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(30 * 60), rawJSON: nil
+            )
+            let fourMin = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(4 * 60), rawJSON: nil
+            )
+            let refreshDying = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil,
+                expiresAt: now.addingTimeInterval(8 * 3600),
+                refreshExpiresAt: now.addingTimeInterval(12 * 3600),
+                rawJSON: nil
+            )
+            try assertTrue(!ClaudeAdapter.shouldProactiveRefresh(live, now: now))
+            try assertTrue(ClaudeAdapter.shouldProactiveRefresh(fourMin, now: now))
+            try assertTrue(ClaudeAdapter.shouldProactiveRefresh(refreshDying, now: now))
+            try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: nil, credentials: fourMin, now: now))
+        }
+        failures += check("harvestLogin ignores leftover file matching prior tokens") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let prior = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-A",
+                refreshToken: "refresh-A",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            ClaudeAdapter.persistCredentialsFile(creds: prior, configDir: dir, overwrite: true)
+            try assertTrue(
+                ClaudeAdapter.harvestLoginCredentials(
+                    configDir: dir,
+                    priorAccessToken: "access-A",
+                    priorRefreshToken: "refresh-A"
+                ) == nil
+            )
+            let fresh = ClaudeAdapter.ClaudeCreds(
+                accessToken: "access-B",
+                refreshToken: "refresh-B",
+                subscriptionType: "pro",
+                expiresAt: Date().addingTimeInterval(3600),
+                rawJSON: nil
+            )
+            ClaudeAdapter.commitHarvestedCredentials(creds: fresh, configDir: dir)
+            try assertEqual(
+                ClaudeAdapter.harvestLoginCredentials(
+                    configDir: dir,
+                    priorAccessToken: "access-A",
+                    priorRefreshToken: "refresh-A"
+                )?.accessToken,
+                "access-B"
+            )
+            try assertEqual(ClaudeAdapter.readCredentials(configDir: dir)?.accessToken, "access-B")
+        }
+        failures += check("fatal oauth refresh errors are invalid_grant, not a random 400") {
+            try assertTrue(
+                ClaudeAdapter.isFatalOAuthRefreshError(
+                    status: 400,
+                    body: #"{"error":"invalid_grant","error_description":"expired"}"#
+                )
+            )
+            try assertTrue(
+                !ClaudeAdapter.isFatalOAuthRefreshError(status: 400, body: "<html>not found</html>")
+            )
+            try assertTrue(!ClaudeAdapter.isFatalOAuthRefreshError(status: 429, body: "invalid_grant"))
+        }
+        failures += check("token-host Retry-After is capped at 15m") {
+            let now = Date()
+            let fourHours = now.addingTimeInterval(4 * 3600)
+            let capped = ClaudeAdapter.cappedTokenRetryDate(fourHours, now: now)
+            try assertEqual(capped.timeIntervalSince(now), 15 * 60, accuracy: 1)
+            let nilCap = ClaudeAdapter.cappedTokenRetryDate(nil, now: now)
+            try assertEqual(nilCap.timeIntervalSince(now), 15 * 60, accuracy: 1)
+            let fiveMin = now.addingTimeInterval(5 * 60)
+            try assertEqual(
+                ClaudeAdapter.cappedTokenRetryDate(fiveMin, now: now).timeIntervalSince(now),
+                5 * 60,
+                accuracy: 1
+            )
+        }
+        failures += check("reauth 429/unavailable keeps the session; rejected goes to browser") {
+            let live = ClaudeAdapter.ClaudeCreds(
+                accessToken: "a", refreshToken: "r", subscriptionType: nil,
+                expiresAt: Date().addingTimeInterval(3600), rawJSON: nil
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .success(live)),
+                ClaudeAdapter.ReauthStep.finished
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .adopted(live)),
+                ClaudeAdapter.ReauthStep.finished
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .rateLimited(nil)),
+                ClaudeAdapter.ReauthStep.keepExisting
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .unavailable("token quiet")),
+                ClaudeAdapter.ReauthStep.keepExisting
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .rejected),
+                ClaudeAdapter.ReauthStep.needBrowser
+            )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .skipped),
+                ClaudeAdapter.ReauthStep.needBrowser
+            )
         }
         return failures
     }
