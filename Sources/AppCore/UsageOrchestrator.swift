@@ -776,6 +776,7 @@ final class UsageOrchestrator: ObservableObject {
         case "claude": return .claude
         case "codex": return .codex
         case "grok": return .grok
+        case "agy": return .agy
         default: return .neutral
         }
     }
@@ -790,6 +791,7 @@ final class UsageOrchestrator: ObservableObject {
             case "claude": return "reconnect account"
             case "codex": return "reauth: codex"
             case "grok": return "reauth: grok"
+            case "agy": return "reauth: agy"
             default: return "reauth needed"
             }
         case .rateLimited:
@@ -841,6 +843,11 @@ final class UsageOrchestrator: ObservableObject {
                 return """
                 Grok session rejected. Widget menu → Reauthenticate, or:
                 GROK_HOME='\(home)' grok login --oauth
+                """
+            case "agy":
+                return """
+                Antigravity session rejected. Widget menu → Reauthenticate, or:
+                HOME='\(home)' agy
                 """
             default:
                 return "Reauthenticate from the widget menu."

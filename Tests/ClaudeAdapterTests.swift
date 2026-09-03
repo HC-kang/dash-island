@@ -215,6 +215,15 @@ enum ClaudeAdapterSuite {
                 priorRefreshToken: "rt-same"
             ))
         }
+        failures += check("CLI ping is 6h gated per managed dir") {
+            let dir = URL(fileURLWithPath: "/tmp/dash-island-claude-ping-\(UUID().uuidString)", isDirectory: true)
+            let key = "DashIsland.ClaudeCLIPing.\(dir.path)"
+            UserDefaults.standard.removeObject(forKey: key)
+            defer { UserDefaults.standard.removeObject(forKey: key) }
+            try assertTrue(!ClaudeAdapter.pingRecentlyAttempted(configDir: dir))
+            ClaudeAdapter.markPingAttempted(configDir: dir)
+            try assertTrue(ClaudeAdapter.pingRecentlyAttempted(configDir: dir))
+        }
         failures += check("applyRefreshedToken merges access + rotated refresh") {
             let existing = Data("""
             {"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","subscriptionType":"max","expiresAt":1}}

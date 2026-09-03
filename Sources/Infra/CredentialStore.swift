@@ -129,6 +129,20 @@ enum CredentialStore {
             return "grok"
         }
 
+        let geminiCreds = [
+            dir.appendingPathComponent(".gemini/oauth_creds.json", isDirectory: false),
+            dir.appendingPathComponent("oauth_creds.json", isDirectory: false),
+        ]
+        for path in geminiCreds {
+            guard fm.fileExists(atPath: path.path),
+                  let data = try? Data(contentsOf: path),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let access = obj["access_token"] as? String,
+                  !access.isEmpty
+            else { continue }
+            return "agy"
+        }
+
         return nil
     }
 }

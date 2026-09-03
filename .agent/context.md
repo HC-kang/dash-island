@@ -319,7 +319,19 @@ Fixes:
 - Claude CLI 2.1.229 on macOS writes login to scoped Keychain only — **no** `.credentials.json`. Pure file capture made Reauth fail (`credentialsMissing`).
 - Harvest-once restored: after Add/Reauth, copy scoped `Claude Code-credentials-<sha8>` into the managed file. Poll/refresh stay file-only.
 - Recovered `9C11FBE9-…` by copying that Keychain item into `.credentials.json` (pro, has refresh).
+
+## Gemini → Antigravity (2026-08-19)
+
+- Codex was never removed. Gemini CLI was retired; Add menu now has Antigravity (`agy`) instead of Gemini.
+- Usage: `fetchAvailableModels` on `daily-cloudcode-pa.googleapis.com`. Creds under managed `HOME/.gemini/oauth_creds.json`.
+- Leftover guards same as Claude. `agy` binary may be missing until install.sh.
 - Reauth bug: wipe file only → `auth login` opens browser then harvests leftover scoped Keychain. Fix: snapshot access token, logout + delete scoped item, accept only a *different* access token.
+
+## Orchestration auth graph (2026-08-16)
+
+- Run `run_43471c922fa7`: graph → harden → verify (3 Grok workers, ~20 min).
+- Landed on feat: leftover refresh rejected (H1), usage smoke after harvest (H2), last-good wiped on clear (H6), rollback rejected harvest, scoped KC wipe on cancel/remove (H4).
+- Still open: leftover that rotates *both* tokens; `runLogout` fire-and-forget (H3); global Claude Code KC clone (H7); adopt+401 skip POST (H8).
 
 ## Claude auth graph (2026-08-16)
 

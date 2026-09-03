@@ -79,7 +79,9 @@ enum AccountChromeActions {
     private static func beginAddBrowserLogin(adapter: any VendorAdapter) {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
-            message: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
+            message: adapter.id == "agy"
+                ? "A Terminal window should open for Antigravity. If you already use agy, we copy that session — wait a moment."
+                : "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()
@@ -215,11 +217,20 @@ enum AccountChromeActions {
 
     // MARK: - Alerts / activation
 
-    /// Drop the managed folder. Claude also wipes the scoped Keychain item
-    /// (never the unsuffixed default) so cancel/remove cannot leave a leftover session.
+    /// Drop the managed folder. Vendor wipes leftover session files first.
     private static func discardManagedFolder(ref: CredentialRef, vendorID: VendorID) {
-        if vendorID == "claude" {
-            ClaudeAdapter.clearManagedCredentials(configDir: CredentialStore.directoryURL(for: ref))
+        let dir = CredentialStore.directoryURL(for: ref)
+        switch vendorID {
+        case "claude":
+            ClaudeAdapter.clearManagedCredentials(configDir: dir)
+        case "codex":
+            CodexAdapter.clearManagedCredentials(codexHome: dir)
+        case "grok":
+            GrokAdapter.clearManagedCredentials(grokHome: dir)
+        case "agy":
+            AgyAdapter.clearManagedCredentials(home: dir)
+        default:
+            break
         }
         try? CredentialStore.removeDirectory(for: ref)
     }

@@ -17,11 +17,11 @@ struct VendorLogoView: View {
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
+                    .colorMultiply(Self.markTint(for: vendorID))
             } else {
-                // Fallback monogram if asset missing from the bundle.
                 Text(monogram)
                     .font(.system(size: size * 0.72, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.85))
+                    .foregroundStyle(Self.markTint(for: vendorID).opacity(0.92))
             }
         }
         .frame(width: size, height: size)
@@ -33,8 +33,18 @@ struct VendorLogoView: View {
         case "claude": return "C"
         case "codex": return "O"
         case "grok": return "G"
+        case "agy": return "A"
         case "fake": return "F"
         default: return String(vendorID.prefix(1)).uppercased()
+        }
+    }
+
+    /// Marks only. Rings keep IslandColor. Codex/Grok stay white (official mono).
+    static func markTint(for vendorID: VendorID) -> Color {
+        switch vendorID {
+        case "claude": return IslandColor.claude
+        case "agy": return IslandColor.agy
+        default: return .white
         }
     }
 
@@ -44,6 +54,7 @@ struct VendorLogoView: View {
         case "claude": return "claude"
         case "codex": return "openai" // Codex uses OpenAI mark
         case "grok": return "grok"
+        case "agy": return "agy"
         default: return nil
         }
     }
