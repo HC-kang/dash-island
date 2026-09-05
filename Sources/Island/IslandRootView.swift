@@ -62,11 +62,13 @@ struct IslandRootView: View {
                     ))
             }
         }
-        // Hover target = black body (not bleed). Outer frames only reserve canvas space.
-        .frame(width: hoverWidth, height: hoverHeight, alignment: .top)
+        // Draw on the canvas (includes horizontal bleed). Do NOT frame this
+        // stack to `hoverWidth` — that clips hang tips at the black-body edge.
+        // Hover sits on this stack (not a behind-background) so expand still fires.
+        // Window passthrough already ignores events outside `hitSize`.
+        .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .contentShape(Rectangle())
         .onHover { handleHover($0) }
-        .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(nil, value: model.size)
         .animation(nil, value: model.hitSize)
@@ -197,7 +199,7 @@ struct IslandRootView: View {
                 accent: preferences.rimAccent.color
             )
         }
-        // Black body only; parent hover frame is the same width.
+        // Black body only; hover uses the same width inside the wider canvas.
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
@@ -206,6 +208,12 @@ struct IslandRootView: View {
 
     private var expandedContent: some View {
         let contentW = model.expandedContentWidth
+        let tooltipStrip = IslandClusterLayout.hangTipMaskRect(
+            bodyWidth: Double(contentW),
+            blackHeight: Double(model.blackHeight),
+            tooltipHeight: Double(IslandModel.tooltipHitPad)
+        )
+        let frameW = tooltipStrip.width
         let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
         return VStack(spacing: 0) {
             NotchBandChrome(
@@ -234,21 +242,30 @@ struct IslandRootView: View {
             .padding(.bottom, 12)
             .animation(.spring(response: 0.38, dampingFraction: 0.86), value: model.addRailOpen)
         }
-        // Tall enough for hang-below tips; black silhouette is only the top band.
+        .frame(width: contentW, alignment: .top)
+        // Gutters so a tip centered on the first/last cell can paint past the
+        // black body without sliding off the widget.
         .frame(
-            width: contentW,
+            width: frameW,
             height: model.blackHeight + IslandModel.tooltipHitPad,
             alignment: .top
         )
-        // Clip gauges to the island shape horizontally; keep a full-width strip
-        // under the body so tips are not killed (ScrollView used to shove them off-screen).
+        // Island silhouette on the gauges. Hang tips straddle the body bottom,
+        // so the wide strip starts *inside* the island (caret + top radius)
+        // or the left corner is sheared by IslandShape's contentW clip.
         .mask(alignment: .top) {
-            VStack(spacing: 0) {
+            ZStack(alignment: .top) {
                 IslandShape(bottomRadius: radius)
                     .frame(width: contentW, height: model.blackHeight)
                 Rectangle()
-                    .frame(width: contentW, height: IslandModel.tooltipHitPad)
+                    .frame(width: tooltipStrip.width, height: tooltipStrip.height)
+                    .offset(y: tooltipStrip.minY)
             }
+            .frame(
+                width: frameW,
+                height: model.blackHeight + IslandModel.tooltipHitPad,
+                alignment: .top
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

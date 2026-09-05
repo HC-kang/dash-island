@@ -8,6 +8,7 @@ import Foundation
 enum IslandClusterLayout {
     static let defaultMaxVisible = 5
     static let defaultTipGap: Double = 8
+    static let tooltipHorizontalBleed: Double = 180
 
     static func needsHorizontalScroll(
         slotCount: Int,
@@ -32,6 +33,22 @@ enum IslandClusterLayout {
         tipGap: Double = defaultTipGap
     ) -> Bool {
         hangTipTopY(cellHeight: cellHeight, tipGap: tipGap) >= cellHeight
+    }
+
+    /// Wide mask strip in body coordinates. Overlap clears the tip's caret,
+    /// rounded corners and shadow above the island bottom without shifting X.
+    static func hangTipMaskRect(
+        bodyWidth: Double,
+        blackHeight: Double,
+        tooltipHeight: Double
+    ) -> CGRect {
+        let top = max(0, blackHeight - 28)
+        return CGRect(
+            x: -tooltipHorizontalBleed,
+            y: top,
+            width: bodyWidth + tooltipHorizontalBleed * 2,
+            height: blackHeight + tooltipHeight - top
+        )
     }
 
     /// Viewport width in slots (never more than maxVisible).

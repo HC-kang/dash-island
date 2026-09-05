@@ -29,7 +29,7 @@ struct GaugeClusterView: View {
     @State private var bandWidth: CGFloat = 0
     /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
     @State private var elevatedChrome: WidgetHoverChrome?
-    /// Half-height of the floating tip for correct `position` anchoring.
+    /// Half-height of the floating tip for vertical `position` anchoring.
     @State private var floatingTipHalfHeight: CGFloat = 28
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
@@ -329,6 +329,8 @@ struct GaugeClusterView: View {
                     Color.clear.preference(key: FloatingTipSizeKey.self, value: geo.size)
                 }
             )
+            // Stay on the hovered slot. Horizontal clip is the island mask —
+            // that mask's *tooltip strip* must be wider than the black body.
             .position(x: center.x, y: tipTop + floatingTipHalfHeight)
             .allowsHitTesting(false)
             .transition(.opacity)
