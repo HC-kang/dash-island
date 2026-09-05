@@ -384,3 +384,15 @@ Fixes:
 - Tooltip: `token refresh failed — retrying`, last ok 5d 8h. Access `expiry_date` 2026-08-28. Refresh still valid.
 - Scanner walked back through letters → `it1071006060591-….apps.googleusercontent.com` (invalid). Real Gemini CLI id is `1071006060591-…`. Pair **id[1] × secret[0]** HTTP 200; usage `fetchAvailableModels` 200.
 - Strip leading non-digits from embedded googleusercontent IDs.
+
+## Hang tooltip clipped on first/last slot (2026-09-05)
+
+- Screenshot: Codex hover bubble under the leftmost widget cut off on the left (`wk 15%…`). Tip is `.position`’d on the **slot center** (must stay there — do not slide).
+- Island mask’s tooltip strip was body-width, so a ~220pt bubble overflowed x<0. Widen that strip with `tooltipHorizontalBleed` (180pt) on each side; black silhouette stays `contentW`. Hit target stays the black body (no extra click steal).
+- Still clipped after that: (1) root `.frame(width: hoverWidth)` composited the stack to the black body — hang tips must draw on `model.size` (canvas). (2) tooltip top/caret sits ~6pt inside `blackHeight`, so IslandShape sheared the left corner — wide strip overlaps the island bottom by 28pt.
+
+## Centered tooltip regression coverage (2026-09-05)
+
+- Root mask now consumes `IslandClusterLayout.hangTipMaskRect`; its 180pt side gutters and 28pt bottom overlap are tested together for both edge slots, including scroll-edge centers. Caption cards are 288pt including padding (268pt text + 20pt).
+- Drawing/window widths reserve at least tooltip bleed; hover remains body-width. Tip X stays `slotCenter.x`; only height is measured for vertical anchoring.
+- `./scripts/run-tests.sh` and full-source SwiftUI typecheck passed. Running-app appearance was not checked; no commit or auth implementation changes.

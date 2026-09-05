@@ -91,6 +91,10 @@ final class IslandModel: ObservableObject {
     /// Extra height under the expanded body so tip-down hover cards stay interactive.
     /// Long Claude auth copy needs ~160–200pt; keep headroom past the caret.
     static let tooltipHitPad: CGFloat = 200
+    /// Transparent gutter left/right of the black body so hang tips stay *on*
+    /// the hovered widget instead of sliding inward (first-cell clip).
+    /// Caption cards are 288pt including padding; also leave room for shadows.
+    static let tooltipHorizontalBleed = CGFloat(IslandClusterLayout.tooltipHorizontalBleed)
 
     func setState(_ new: State) {
         guard new != state else { return }
@@ -126,7 +130,7 @@ final class IslandModel: ObservableObject {
         } else {
             let contentW = expandedContentWidth
             size = CGSize(
-                width: contentW + dragBleed * 2,
+                width: contentW + max(dragBleed, Self.tooltipHorizontalBleed) * 2,
                 height: notch.height + expandedContentHeight + dragBleed
             )
         }
@@ -179,7 +183,7 @@ final class IslandModel: ObservableObject {
             addRailOpen: true
         )
         return CGSize(
-            width: contentW + dragBleed * 2,
+            width: contentW + max(dragBleed, tooltipHorizontalBleed) * 2,
             height: notch.height + expandedContentHeight + dragBleed
         )
     }
