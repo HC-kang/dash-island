@@ -3,6 +3,12 @@ import importlib.util
 from pathlib import Path
 import sqlite3
 import json
+import http.client
+import socket
+import subprocess
+import sys
+import tempfile
+import time
 
 
 def load(name):
@@ -67,3 +73,40 @@ for vendor, variable in [('codex','CODEX_HOME'),('claude','CLAUDE_CONFIG_DIR'),(
     assert env[variable] == '/tmp/account-a' and env['KEEP'] == 'yes'
     assert 'OPENAI_API_KEY' not in env and 'ANTHROPIC_API_KEY' not in env
 print('PASS: account isolation, duplicates, cache/reasoning, malformed events, Claude cost, safe/idempotent config merge')
+
+# A client can connect and disappear before sending headers. The collector must
+# still accept the next export rather than waiting indefinitely on that socket.
+with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    (directory / 'collector-token').write_text('test-token')
+    with socket.socket() as reserved:
+        reserved.bind(('127.0.0.1', 0))
+        port = reserved.getsockname()[1]
+    process = subprocess.Popen([sys.executable, str(Path(__file__).with_name('usage-collector.py')),
+                                '--directory', temporary, '--port', str(port)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    idle = None
+    client = http.client.HTTPConnection('127.0.0.1', port, timeout=8)
+    try:
+        deadline = time.monotonic() + 5
+        while idle is None:
+            assert process.poll() is None, 'collector exited during startup'
+            try:
+                idle = socket.create_connection(('127.0.0.1', port), timeout=0.2)
+            except OSError:
+                assert time.monotonic() < deadline, 'collector did not start'
+                time.sleep(0.05)
+        payload = json.dumps({'resourceLogs': [{'scopeLogs': [{'logRecords': [record('http')]}]}]})
+        client.request('POST', '/v1/logs', body=payload,
+                       headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'})
+        response = client.getresponse()
+        assert response.status == 200 and response.read() == b'{}'
+        with sqlite3.connect(directory / 'account-usage.sqlite') as captured:
+            assert captured.execute('SELECT COUNT(*) FROM usage_events').fetchone()[0] == 1
+    finally:
+        client.close()
+        if idle:
+            idle.close()
+        process.terminate()
+        process.wait(timeout=5)
+print('PASS: idle HTTP connection times out and the next usage export is stored')

@@ -146,7 +146,6 @@ def serve(directory, port):
             pass  # Do not log bodies, request headers, URLs, or usage identities.
 
         def do_POST(self):
-            self.connection.settimeout(5)
             if self.path != "/v1/logs":
                 self.send_error(404)
                 return
@@ -187,8 +186,16 @@ def serve(directory, port):
             self.end_headers()
             self.wfile.write(b"{}")
 
+    class CollectorServer(HTTPServer):
+        def get_request(self):
+            connection, address = super().get_request()
+            # Apply before BaseHTTPRequestHandler reads the request line/headers.
+            # A body-only timeout leaves every later export blocked by an idle client.
+            connection.settimeout(5)
+            return connection, address
+
     # ponytail: serial requests bound memory and SQLite writes; a queue is only needed at higher local throughput.
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = CollectorServer(("127.0.0.1", port), Handler)
     server.serve_forever()
 
 

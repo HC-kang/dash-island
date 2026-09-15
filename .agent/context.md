@@ -466,3 +466,10 @@ Fixes:
 - User chose to remove the source selector entirely: selecting a widget already selects the account. Details now always load initial.id and show a small static “This account” caption with the period control. Removed All/transcript navigation, source state, and empty-state links to those views; keep the Grok/Agy account-launch command when needed.
 - Historical archive files and collection stay intact. Updated README to describe the account-only UI. This supersedes the prior decision to expose three source choices; do not reintroduce them without a new user request.
 - UI-only simplification: build and diff whitespace check passed, rebuilt app restarted from build/DashIsland.app at 23:27. No usage parser or attribution logic changed; no new tests added.
+
+## Commit and PR review (2026-09-16)
+
+- Created feat/account-usage-details from origin/main and committed the account-only detail UI, collection/readers, reset-credit and quota fixes, and hover/click fixes. Left the pre-existing unrelated notes/dash-island-burn-ui-motion-brief.md untracked; ignored Python bytecode.
+- Local review found a real collector stall: HTTPServer accepted a connection without a request/header timeout, so an idle socket blocked all subsequent exports. Moved the 5s timeout to accepted sockets via get_request. A loopback subprocess regression timed out before the fix and then stored the next export after the fix. Documented the already-known Claude external-login/stale-identity limitation in README.
+- Final checks passed: 171 Swift checks, Python collection/configuration/launcher checks plus real HTTP regression, native panel first-mouse/toggle smoke, build, diff whitespace, and credential-pattern scan (no matches). No remaining blocking findings in this local review. Runtime behavior on macOS 13/14 remains unverified.
+- PR targets main. Existing open PR #10 overlaps tooltip files and should be considered during merge ordering; it was not modified or closed. No user CLI sessions or installed collector configuration were changed during review.
