@@ -29,8 +29,6 @@ struct GaugeClusterView: View {
     @State private var bandWidth: CGFloat = 0
     /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
     @State private var elevatedChrome: WidgetHoverChrome?
-    /// Half-height of the floating tip for correct `position` anchoring.
-    @State private var floatingTipHalfHeight: CGFloat = 28
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
@@ -324,19 +322,11 @@ struct GaugeClusterView: View {
                 }
             }
             .fixedSize()
-            .background(
-                GeometryReader { geo in
-                    Color.clear.preference(key: FloatingTipSizeKey.self, value: geo.size)
-                }
-            )
-            .position(x: center.x, y: tipTop + floatingTipHalfHeight)
+            // Anchor the top edge directly; measured half-heights lag when cards change.
+            .frame(width: 0, height: 0, alignment: .top)
+            .position(x: center.x, y: tipTop)
             .allowsHitTesting(false)
             .transition(.opacity)
-            .onPreferenceChange(FloatingTipSizeKey.self) { size in
-                if size.height > 1 {
-                    floatingTipHalfHeight = size.height / 2
-                }
-            }
         }
     }
 
@@ -766,10 +756,6 @@ private struct SlotRowFrameKey: PreferenceKey {
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
-private struct FloatingTipSizeKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
-}
 
 extension Notification.Name {
     static let dashIslandDragActive = Notification.Name("dashIslandDragActive")

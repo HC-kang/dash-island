@@ -712,7 +712,7 @@ final class UsageOrchestrator: ObservableObject {
         // lastGood is error-free only; errors live in lastError.
         let err = lastError[account.id]
         // No good sample → skeleton (not fake 0%), even when a soft error caption shows.
-        let awaiting = snap == nil
+        let awaiting = snap == nil || snap?.primary.isReported == false
         let notice = lastNotice[account.id] ?? snap?.notice
         let burnSource = burnSourceByAccount[account.id] ?? .none
         let service = VendorStatusStore.shared.snapshot(for: account.vendorID)
@@ -736,6 +736,7 @@ final class UsageOrchestrator: ObservableObject {
         let retryAt = cool.flatMap { $0 > Date() ? $0 : nil }
 
         return WidgetViewModel(
+            usageSnapshot: snap,
             id: account.id,
             title: account.label,
             vendorID: account.vendorID,

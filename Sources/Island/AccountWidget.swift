@@ -145,13 +145,21 @@ struct AccountWidget: View {
         .contextMenu {
             managedContextMenu
         }
+        .onTapGesture {
+            if !isDragging { UsageDetailPanel.shared.toggle(model: model) }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
+        .accessibilityHint("Click to open or close usage details")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { UsageDetailPanel.shared.toggle(model: model) }
     }
 
     @ViewBuilder
     private var managedContextMenu: some View {
         if let account = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+            Button("Usage details…") { UsageDetailPanel.shared.show(model: model) }
+            Divider()
             Button("Rename…") {
                 AccountChromeActions.rename(accountID: account.id, currentLabel: account.label)
             }

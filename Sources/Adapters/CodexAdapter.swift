@@ -390,10 +390,27 @@ struct CodexAdapter: VendorAdapter {
                 return errorSnapshot(.network("HTTP \(http.statusCode)"), fetchedAt: fetchedAt)
             }
 
-            return parseUsageResponse(data: data, fetchedAt: fetchedAt)
+            var snapshot = parseUsageResponse(data: data, fetchedAt: fetchedAt)
+            if snapshot.error == nil {
+                // Same account headers; a reset-credit failure must not hide quota.
+                req.url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
+                req.timeoutInterval = 5
+                if let (credits, response) = try? await URLSession.shared.data(for: req),
+                   (response as? HTTPURLResponse)?.statusCode == 200 {
+                    snapshot.resetCreditsAvailable = parseResetCredits(credits)
+                }
+            }
+            return snapshot
         } catch {
             return errorSnapshot(.network(error.localizedDescription), fetchedAt: fetchedAt)
         }
+    }
+
+    static func parseResetCredits(_ data: Data) -> Int? {
+        struct Response: Decodable { let available_count: Int }
+        guard let count = try? JSONDecoder().decode(Response.self, from: data).available_count,
+              count >= 0 else { return nil }
+        return count
     }
 
     /// Parse `/wham/usage` JSON → snapshot. Exposed for unit tests.
@@ -410,10 +427,13 @@ struct CodexAdapter: VendorAdapter {
         guard let rateLimit = obj["rate_limit"] as? [String: Any] else {
             return errorSnapshot(.parse("missing rate_limit"), fetchedAt: fetchedAt)
         }
-        let primary = parseWindow(rateLimit["primary_window"], fetchedAt: fetchedAt)
+        let first = parseWindow(rateLimit["primary_window"], fetchedAt: fetchedAt)
+        let second = parseWindow(rateLimit["secondary_window"], fetchedAt: fetchedAt)
+        var primary = first ?? second
             ?? WindowUsage(usedFraction: 0, kind: .unknown)
+        if first == nil && second == nil { primary.reported = false }
         // Null / missing secondary must stay nil — do not invent a 0% week.
-        let secondary = parseWindow(rateLimit["secondary_window"], fetchedAt: fetchedAt)
+        let secondary = first == nil ? nil : second
         let scoped = parseAdditionalRateLimits(obj["additional_rate_limits"], fetchedAt: fetchedAt)
         let tertiary = UsageRingLayout.preferredTertiary(from: scoped)
         let extras = UsageRingLayout.remainingExtras(extras: scoped, tertiary: tertiary)
@@ -438,14 +458,15 @@ struct CodexAdapter: VendorAdapter {
             guard let d = row as? [String: Any] else { continue }
             let name = (d["limit_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let name, !name.isEmpty else { continue }
-            let key = name.lowercased()
-            guard !seen.contains(key) else { continue }
             let rl = d["rate_limit"] as? [String: Any]
-            let windowObj = rl?["primary_window"] ?? d["primary_window"]
-            guard var window = parseWindow(windowObj, fetchedAt: fetchedAt) else { continue }
-            window.labelOverride = shortCodexLimitLabel(name)
-            seen.insert(key)
-            out.append(window)
+            for slot in ["primary_window", "secondary_window"] {
+                guard var window = parseWindow(rl?[slot] ?? d[slot], fetchedAt: fetchedAt) else { continue }
+                let key = "\(name.lowercased()):\(window.kind.rawValue)"
+                guard seen.insert(key).inserted else { continue }
+                let label = shortCodexLimitLabel(name)
+                window.labelOverride = slot == "secondary_window" ? "\(label) \(window.kind.shortLabel)" : label
+                out.append(window)
+            }
         }
         return out
     }
@@ -475,14 +496,14 @@ struct CodexAdapter: VendorAdapter {
         let raw = (d["used_percent"] as? Double)
             ?? (d["used_percent"] as? Int).map(Double.init)
             ?? (d["used_percent"] as? Int64).map(Double.init)
-            ?? 0
         // Percent is always [0, 100] (0.5 = half a percent).
-        let fromPercent = raw / 100.0
+        let fromPercent = raw.map { $0 / 100.0 }
         let fromAbs: Double? = {
             guard let u = usedTok, let lim = limitTok, lim > 0 else { return nil }
             return min(1, max(0, Double(u) / Double(lim)))
         }()
-        let normalized = min(1, max(0, fromAbs ?? fromPercent))
+        guard let fraction = fromAbs ?? fromPercent, fraction.isFinite else { return nil }
+        let normalized = min(1, max(0, fraction))
         let resetAt = parseResetAt(d["reset_at"])
             ?? parseResetAfterSeconds(d["reset_after_seconds"], from: fetchedAt)
         let limitSeconds = (d["limit_window_seconds"] as? Double)

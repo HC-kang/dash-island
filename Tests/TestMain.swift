@@ -3,7 +3,7 @@ import Foundation
 /// Single entry point for all suites (compiled via `scripts/run-tests.sh`).
 @main
 struct TestMain {
-    static func main() {
+    static func main() async {
         var failures = 0
         failures += BurnRateSuite.run()
         failures += BurnMotionSuite.run()
@@ -14,6 +14,7 @@ struct TestMain {
         failures += CodexAdapterSuite.run()
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
+        failures += await LocalUsageSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

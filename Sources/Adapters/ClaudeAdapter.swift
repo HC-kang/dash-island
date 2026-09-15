@@ -546,6 +546,9 @@ struct ClaudeAdapter: VendorAdapter {
         task.currentDirectoryPath = NSHomeDirectory()
         var env = ProcessInfo.processInfo.environment
         env["CLAUDE_CONFIG_DIR"] = configDir.path
+        // Keep automatic authentication maintenance out of work-session usage.
+        env["OTEL_RESOURCE_ATTRIBUTES"] = [env["OTEL_RESOURCE_ATTRIBUTES"], "dash_island.purpose=auth_refresh"]
+            .compactMap { $0 }.joined(separator: ",")
         for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] {
             env.removeValue(forKey: key)
         }

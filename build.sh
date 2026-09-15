@@ -26,6 +26,10 @@ if [ -d Sources/Resources/VendorLogos ]; then
   cp -f Sources/Resources/VendorLogos/*.png "$RES_DIR/VendorLogos/" 2>/dev/null || true
 fi
 
+cp Sources/Resources/usage-prices.json "$RES_DIR/"
+cp THIRD_PARTY_NOTICES.md "$RES_DIR/"
+cp scripts/usage-collector.py scripts/connect-usage.py scripts/account-cli.py "$RES_DIR/"
+
 SWIFT_SOURCES=$(find Sources -name '*.swift' | sort)
 
 DEPLOYMENT_TARGET="13.0"

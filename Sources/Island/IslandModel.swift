@@ -83,13 +83,12 @@ final class IslandModel: ObservableObject {
         case .expanded:
             return CGSize(
                 width: expandedContentWidth,
-                height: blackHeight + Self.tooltipHitPad
+                height: blackHeight + 20
             )
         }
     }
 
-    /// Extra height under the expanded body so tip-down hover cards stay interactive.
-    /// Long Claude auth copy needs ~160–200pt; keep headroom past the caret.
+    /// Drawing space only. Tooltips must not enlarge the mouse retention area.
     static let tooltipHitPad: CGFloat = 200
 
     func setState(_ new: State) {

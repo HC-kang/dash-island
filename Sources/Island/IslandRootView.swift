@@ -11,6 +11,9 @@ struct IslandRootView: View {
     @State private var dialogOpen = false
     @State private var menuTracking = false
     @State private var statusPanelOpen = false
+    @State private var detailsOpen = false
+    @State private var dragActive = false
+    @State private var pointerInside = false
     @State private var collapseTask: Task<Void, Never>?
     /// Dwell before lazy network refresh on expand (avoids hover-flick burns).
     @State private var expandRefreshTask: Task<Void, Never>?
@@ -30,10 +33,21 @@ struct IslandRootView: View {
             || dialogOpen
             || menuTracking
             || statusPanelOpen
+            || detailsOpen
+            || dragActive
             || IslandDialogController.shared.isProgressOpen
     }
 
     var body: some View {
+        if #available(macOS 15.0, *) {
+            // SwiftUI gestures also need to accept the click that activates this window.
+            islandContent.allowsWindowActivationEvents()
+        } else {
+            islandContent
+        }
+    }
+
+    private var islandContent: some View {
         // Layer order (bottom → top):
         // 1) Notch base — always mounted, always drawn (never if/else with expanded).
         // 2) Expanded shell — toggled via `showExpandedShell` so size can shrink *after* it leaves.
@@ -65,7 +79,9 @@ struct IslandRootView: View {
         // Hover target = black body (not bleed). Outer frames only reserve canvas space.
         .frame(width: hoverWidth, height: hoverHeight, alignment: .top)
         .contentShape(Rectangle())
-        .onHover { handleHover($0) }
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandPointerInsideChanged)) { note in
+            handleHover((note.object as? Bool) ?? false)
+        }
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(nil, value: model.size)
@@ -117,13 +133,21 @@ struct IslandRootView: View {
             statusPanelOpen = (note.object as? Bool) ?? false
             handleOverlayChange()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandDetailsOpenChanged)) { note in
+            detailsOpen = (note.object as? Bool) ?? false
+            handleOverlayChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dashIslandDragActive)) { note in
+            dragActive = (note.object as? Bool) ?? false
+            handleOverlayChange()
+        }
     }
 
     private func handleOverlayChange() {
         if blockingOverlay {
             collapseTask?.cancel()
             expandOpen()
-        } else if model.state == .expanded || showExpandedShell {
+        } else if !pointerInside && (model.state == .expanded || showExpandedShell) {
             scheduleCollapse()
         }
     }
@@ -206,7 +230,6 @@ struct IslandRootView: View {
 
     private var expandedContent: some View {
         let contentW = model.expandedContentWidth
-        let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
         return VStack(spacing: 0) {
             NotchBandChrome(
                 notchWidth: model.notch.width,
@@ -240,16 +263,8 @@ struct IslandRootView: View {
             height: model.blackHeight + IslandModel.tooltipHitPad,
             alignment: .top
         )
-        // Clip gauges to the island shape horizontally; keep a full-width strip
-        // under the body so tips are not killed (ScrollView used to shove them off-screen).
-        .mask(alignment: .top) {
-            VStack(spacing: 0) {
-                IslandShape(bottomRadius: radius)
-                    .frame(width: contentW, height: model.blackHeight)
-                Rectangle()
-                    .frame(width: contentW, height: IslandModel.tooltipHitPad)
-            }
-        }
+        // GaugeClusterView clips its slot row before drawing hover overlays.
+        // A second mask here clips the tips where they overlap the body's edge.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -285,12 +300,15 @@ struct IslandRootView: View {
     }
 
     private func handleHover(_ hovering: Bool) {
+        pointerInside = hovering
         if hovering {
             collapseTask?.cancel()
             collapseTask = nil
             expandOpen()
             // Key + activate so SwiftUI Menu / contextMenu can present.
-            NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+            if !detailsOpen {
+                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+            }
         } else if !blockingOverlay {
             scheduleCollapse()
         }
@@ -311,13 +329,13 @@ struct IslandRootView: View {
         collapseTask?.cancel()
         collapseTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 280_000_000)
-            guard !Task.isCancelled, !blockingOverlay else { return }
+            guard !Task.isCancelled, !blockingOverlay, !pointerInside else { return }
 
             withAnimation(.easeIn(duration: 0.20)) {
                 showExpandedShell = false
             }
             try? await Task.sleep(nanoseconds: collapseShellNs)
-            guard !Task.isCancelled, !blockingOverlay else { return }
+            guard !Task.isCancelled, !blockingOverlay, !pointerInside else { return }
             model.setState(.compact)
         }
     }

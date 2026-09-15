@@ -33,7 +33,18 @@ enum AccountHoverTips {
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(Color(white: 0.90))
                 }
+                if let count = model.usageSnapshot?.resetCreditsAvailable {
+                    Text("Resets  \(count) available")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.90))
+                }
+                Text("Click for details")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .padding(.top, 4)
             }
+            .frame(maxWidth: 302, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
             .background(tipBackground(corner: 8))

@@ -123,13 +123,23 @@ enum CodexAdapterSuite {
             try assertEqual(snap.primary.usedFraction, 0.005, accuracy: 0.00001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.01, accuracy: 0.00001)
         }
-        failures += check("missing windows → zero primary, nil secondary") {
+        failures += check("missing windows remain unreported, never a real zero") {
             let json = #"{ "plan_type": "free", "rate_limit": {} }"#
             let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))
             try assertEqual(snap.error, nil as UsageError?)
             try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
             try assertTrue(snap.secondary == nil)
             try assertEqual(snap.plan, "free")
+            try assertTrue(!snap.primary.isReported)
+            try assertTrue(CodexAdapter.parseWindow(["reset_at": 123]) == nil)
+        }
+        failures += check("Spark session and weekly windows both survive") {
+            let json = #"{"rate_limit":{"primary_window":{"used_percent":3}},"additional_rate_limits":[{"limit_name":"GPT-Codex-Spark","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000},"secondary_window":{"used_percent":39,"limit_window_seconds":604800}}}]}"#
+            let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))
+            try assertEqual(snap.tertiary?.displayLabel, "Spark")
+            try assertEqual(snap.extras.count, 1)
+            try assertEqual(snap.extras.first?.displayLabel, "Spark wk")
+            try assertEqual(snap.extras.first?.usedFraction ?? -1, 0.39, accuracy: 0.001)
         }
         failures += check("missing rate_limit → parse error") {
             let snap = CodexAdapter.parseUsageResponse(data: Data("{}".utf8))
@@ -165,6 +175,16 @@ enum CodexAdapterSuite {
         failures += check("missing tokens rejected") {
             let json = #"{"auth_mode":"chatgpt"}"#
             try assertTrue(CodexAdapter.parseAuthJSON(Data(json.utf8)) == nil)
+        }
+        failures += check("reset credits distinguish zero from missing or invalid data") {
+            try assertEqual(CodexAdapter.parseResetCredits(Data(#"{"available_count":3}"#.utf8)), 3)
+            try assertEqual(CodexAdapter.parseResetCredits(Data(#"{"available_count":0}"#.utf8)), 0)
+            for json in ["{}", #"{"available_count":-1}"#, #"{"available_count":true}"#, #"{"available_count":1.5}"#] {
+                try assertTrue(CodexAdapter.parseResetCredits(Data(json.utf8)) == nil)
+            }
+            let old = CodexAdapter.parseUsageResponse(data: Data(#"{"rate_limit":{}}"#.utf8))
+            let roundtrip = try JSONDecoder().decode(UsageSnapshot.self, from: JSONEncoder().encode(old))
+            try assertTrue(roundtrip.resetCreditsAvailable == nil)
         }
         failures += check("registry includes codex") {
             try assertTrue(VendorRegistry.adapter(for: "codex") != nil)
