@@ -473,3 +473,8 @@ Fixes:
 - Local review found a real collector stall: HTTPServer accepted a connection without a request/header timeout, so an idle socket blocked all subsequent exports. Moved the 5s timeout to accepted sockets via get_request. A loopback subprocess regression timed out before the fix and then stored the next export after the fix. Documented the already-known Claude external-login/stale-identity limitation in README.
 - Final checks passed: 171 Swift checks, Python collection/configuration/launcher checks plus real HTTP regression, native panel first-mouse/toggle smoke, build, diff whitespace, and credential-pattern scan (no matches). No remaining blocking findings in this local review. Runtime behavior on macOS 13/14 remains unverified.
 - PR targets main. Existing open PR #10 overlaps tooltip files and should be considered during merge ordering; it was not modified or closed. No user CLI sessions or installed collector configuration were changed during review.
+
+## Account limit raised to 20 (2026-09-16)
+
+- User selected a practical 20-account cap instead of unlimited accounts. AccountStore.maxAccounts is now the single source; IslandModel.maxItems references it. Keep five visible slots and horizontal scrolling, with the existing bounded polling concurrency.
+- Existing cap test exercised 20 successful additions, rejected the 21st, and now reloads the saved store to check all IDs survive. Viewport check covers 20 entries with five visible. All 171 Swift checks and build passed; rebuilt app restarted. Follow-up is included in PR #11.

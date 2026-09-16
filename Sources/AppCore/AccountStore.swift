@@ -14,8 +14,8 @@ enum AccountStoreError: Error, Equatable {
 @MainActor
 final class AccountStore: ObservableObject {
     static let shared = AccountStore()
-    /// Keep in lockstep with `IslandModel.maxItems` (8; viewport scrolls past 5).
-    static let maxAccounts = 8
+    /// Registration limit; the island uses this same cap and scrolls past 5 slots.
+    static let maxAccounts = 20
 
     @Published private(set) var accounts: [Account] = []
 

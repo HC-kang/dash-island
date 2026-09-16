@@ -105,6 +105,10 @@ enum AccountsPersistenceSuite {
                     )
                 }
                 try assertEqual(store.accounts.count, AccountStore.maxAccounts)
+
+                let reopened = AccountStore(persistence: persistence)
+                reopened.load()
+                try assertEqual(reopened.accounts.map(\.id), store.accounts.map(\.id))
             }
         }
 
