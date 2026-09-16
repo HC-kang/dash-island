@@ -499,3 +499,10 @@ Fixes:
 - `rowOriginX` is now live during a drag (old freeze comment predates the current gesture; only changes on real row movement). Native check with 7 fake widgets in a 324pt band did not hang.
 - `onOrderCommitted` callback on GaugeClusterView exists so the native script can observe a demo/local-only reorder; it also fires after a persisted reorder.
 - Verified: native render/drag check (right-edge hold lands at last slot, left-edge hold returns to first), 172 Swift checks, build. App restarted (PID 16126).
+
+## Pre-merge review of PR #11 (2026-09-17)
+
+- Ran /code-review at high effort; it fanned out many agents and hit the session limit. User: "리뷰 적당히만 돌려". Default to inline review or low effort here.
+- Salvaged one confirmed finding: `apply` success path took any error-free snapshot as last-good. A Codex response with no windows yields a placeholder primary (`reported = false`), which replaced real rings, was written to disk, and pushed 0% into burn. Now placeholders only fill an empty last-good, are never persisted (`encodeLastGood` guards `isReported`), and never feed burn. Regression in ClaudeAdapterTests.
+- Not acted on: LocalUsageStore per-account loop / roots simplification (efficiency, no behavior change); context.md now well past the ~200 line soft limit and should be split per Memory Scaling Policy in a separate housekeeping change.
+- PR #10 (older tooltip mask fix on feat/v1-implementation) conflicts with this branch in GaugeClusterView/IslandRootView/context.md and is superseded by the overlay tip approach here. Left open for the user to close.
