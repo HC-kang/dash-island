@@ -28,8 +28,8 @@ struct GaugeClusterView: View {
     @State private var clusterSize: CGSize = .zero
     /// Live width of the drag overlay (slot band). Used for trash centering.
     @State private var bandWidth: CGFloat = 0
-    /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
-    @State private var elevatedChrome: WidgetHoverChrome?
+    /// Latest hover chrome from every cell (usage / caption / status).
+    @State private var hoverChrome: [WidgetHoverChrome] = []
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
@@ -102,6 +102,12 @@ struct GaugeClusterView: View {
     private var trashCenterLocal: CGPoint {
         let w = bandWidth > 1 ? bandWidth : (clusterSize.width > 1 ? clusterSize.width : 400)
         return CGPoint(x: w * 0.5, y: Self.cellH + Self.trashZoneH * 0.42)
+    }
+
+    /// Active hover chrome — derived so a drop restores tips without a fresh hover
+    /// event (the dragged widget stays hovered under the pointer; no preference change).
+    private var elevatedChrome: WidgetHoverChrome? {
+        draggingID == nil ? hoverChrome.first(where: \.isActive) : nil
     }
 
     private var floatCenter: CGPoint {
@@ -227,9 +233,6 @@ struct GaugeClusterView: View {
         .onChange(of: draggingID) { id in
             // Mouse passthrough only — do NOT close add rail / resize island here.
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
-            if id != nil {
-                elevatedChrome = nil
-            }
         }
         .onChange(of: showAdd) { can in
             if !can { onAddRailExpandedChange?(false) }
@@ -317,8 +320,8 @@ struct GaugeClusterView: View {
         // Implicit animations on the whole GeometryReader during drag = layout hang.
         // Neighbors still slide via `offset` without wrapping the reader.
         .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
-            guard draggingID == nil else { return }
-            elevatedChrome = list.first(where: \.isActive)
+            // Hover only flips on enter/exit; storing mid-drag is cheap and keeps it current.
+            hoverChrome = list
         }
     }
 
@@ -598,7 +601,6 @@ struct GaugeClusterView: View {
             liftOrigin = start
             dragTranslation = .zero
             magnetizedToTrash = false
-            elevatedChrome = nil
         }
     }
 
