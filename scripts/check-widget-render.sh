@@ -12,6 +12,7 @@ import SwiftUI
     @Published var widgets: [WidgetViewModel]
     @Published var expected: [WidgetViewModel]
     @Published var visible = true
+    var committed: [AccountID] = []
     init() {
         func widget(_ title: String, _ percent: Int) -> WidgetViewModel {
             WidgetViewModel(id: UUID(), title: title, vendorID: "test", tint: .codex,
@@ -41,7 +42,7 @@ struct Probe: View {
     private var content: some View {
         VStack(spacing: 0) {
             if samples.visible {
-                GaugeClusterView(widgets: samples.widgets)
+                GaugeClusterView(widgets: samples.widgets, onOrderCommitted: { samples.committed = $0 })
                     .frame(width: 324, height: 120)
             } else {
                 Color.clear.frame(width: 324, height: 120)
@@ -165,8 +166,49 @@ struct Probe: View {
         samples.visible = false
         settle(0.05)
         guard !dragging else { print("FAIL: teardown retained mouse capture"); exit(1) }
-        window.orderOut(nil)
         print("PASS: native drag retains concurrent changes; account removal and teardown release mouse capture")
+
+        // Auto-scroll: park the dragged widget at a viewport edge; the row must scroll
+        // under it so a single drag can reach slots that start off-screen.
+        for title in ["H", "I"] {
+            var added = replacement
+            added.id = UUID()
+            added.title = title
+            samples.widgets.append(added)
+        }
+        samples.visible = true
+        settle(0.3)
+        let before = samples.widgets.map(\.id)
+        precondition(before.count == 7)
+        mouse(.leftMouseDown, x: 50)
+        mouse(.leftMouseDragged, x: 65)
+        mouse(.leftMouseDragged, x: 80)
+        guard dragging else { print("FAIL: auto-scroll drag did not begin"); exit(1) }
+        mouse(.leftMouseDragged, x: 310)
+        settle(1.6)
+        mouse(.leftMouseUp, x: 310)
+        settle(0.1)
+        guard !dragging else { print("FAIL: auto-scroll drop retained mouse capture"); exit(1) }
+        guard samples.committed == Array(before.dropFirst()) + [before[0]] else {
+            print("FAIL: right-edge hold did not scroll to the last slot; got \(samples.committed.map { id in samples.widgets.first { $0.id == id }?.title ?? "?" })")
+            exit(1)
+        }
+        // Row is now scrolled to the end; the moved widget sits in the last visible cell.
+        mouse(.leftMouseDown, x: 272)
+        mouse(.leftMouseDragged, x: 260)
+        mouse(.leftMouseDragged, x: 245)
+        guard dragging else { print("FAIL: left auto-scroll drag did not begin"); exit(1) }
+        mouse(.leftMouseDragged, x: 10)
+        settle(1.6)
+        mouse(.leftMouseUp, x: 10)
+        settle(0.1)
+        guard !dragging else { print("FAIL: left auto-scroll drop retained mouse capture"); exit(1) }
+        guard samples.committed == before else {
+            print("FAIL: left-edge hold did not scroll back to the first slot; got \(samples.committed.map { id in samples.widgets.first { $0.id == id }?.title ?? "?" })")
+            exit(1)
+        }
+        window.orderOut(nil)
+        print("PASS: holding a dragged widget at either viewport edge auto-scrolls the row")
     }
 }
 SWIFT

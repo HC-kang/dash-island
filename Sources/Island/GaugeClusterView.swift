@@ -14,6 +14,8 @@ struct GaugeClusterView: View {
 
     /// Grows island black body when the add rail is revealed.
     var onAddRailExpandedChange: ((Bool) -> Void)?
+    /// New order after a drop (also fires for demo/local-only reorders).
+    var onOrderCommitted: (([AccountID]) -> Void)?
 
     /// Frozen for the whole gesture.
     @State private var baseOrder: [AccountID] = []
@@ -34,6 +36,10 @@ struct GaugeClusterView: View {
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
     @State private var viewportWidth: CGFloat = 0
+    @State private var scrollProxy: ScrollViewProxy?
+    /// -1 / 0 / +1: which viewport edge the dragged widget is parked against.
+    @State private var autoScrollEdge = 0
+    @State private var autoScrollTask: Task<Void, Never>?
 
     private static let maxSlots = IslandModel.maxItems
     private static let maxVisible = IslandModel.maxVisibleSlots
@@ -52,6 +58,9 @@ struct GaugeClusterView: View {
     private static let edgeFadeWidth: CGFloat = 22
     /// Ignore tiny pointer jitter so click / context menu still work; past this, reorder.
     private static let dragMinDistance: CGFloat = 6
+    /// Holding a dragged widget this close to a viewport edge scrolls the row one cell per step.
+    private static let autoScrollZone: CGFloat = 30
+    private static let autoScrollStepNs: UInt64 = 300_000_000
 
     private var slotCount: Int {
         // Switching between centered/scrolling rows unmounts the active gesture.
@@ -381,16 +390,19 @@ struct GaugeClusterView: View {
         Color.clear
             .frame(width: availableWidth, height: Self.cellH)
             .overlay(alignment: .topLeading) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: Self.gap) {
-                        slotCells
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: Self.gap) {
+                            slotCells
+                        }
+                        .padding(.horizontal, 2)
+                        .background(rowGeometryProbe)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .padding(.horizontal, 2)
-                    .background(rowGeometryProbe)
-                    .fixedSize(horizontal: true, vertical: false)
+                    // Do not .disabled mid-drag — toggling ScrollView rebuilds layout and hung the UI.
+                    .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
+                    .onAppear { scrollProxy = proxy }
                 }
-                // Do not .disabled mid-drag — toggling ScrollView rebuilds layout and hung the UI.
-                .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
             }
             .overlay {
                 scrollEdgeFades(availableWidth: availableWidth)
@@ -414,8 +426,8 @@ struct GaugeClusterView: View {
                 )
         }
         .onPreferenceChange(SlotRowFrameKey.self) { rect in
-            // Freeze mid-drag — scroll/center probes during gesture hung the UI.
-            guard draggingID == nil else { return }
+            // Stays live mid-drag: auto-scroll moves the row under a still pointer and
+            // the drop slot must follow. Only changes on real movement (no storm).
             guard rect.width > 1 else { return }
             if abs(rect.minX - rowOriginX) > 0.5 {
                 rowOriginX = rect.minX
@@ -619,6 +631,46 @@ struct GaugeClusterView: View {
         } else if let slot = slotIndexAt(localX: finger.x), gapSlot != slot {
             gapSlot = slot
         }
+        updateAutoScroll(fingerX: finger.x)
+    }
+
+    /// Park the dragged widget at a viewport edge to scroll the row one cell per step.
+    private func updateAutoScroll(fingerX: CGFloat) {
+        var edge = 0
+        let overflow = IslandClusterLayout.needsScroll(
+            contentWidth: Double(contentRowWidth),
+            availableWidth: Double(viewportWidth)
+        )
+        if overflow, !magnetizedToTrash, viewportWidth > 1 {
+            if fingerX < Self.autoScrollZone { edge = -1 }
+            else if fingerX > viewportWidth - Self.autoScrollZone { edge = 1 }
+        }
+        guard edge != autoScrollEdge else { return }
+        autoScrollEdge = edge
+        autoScrollTask?.cancel()
+        autoScrollTask = nil
+        guard edge != 0 else { return }
+        autoScrollTask = Task { @MainActor in
+            while !Task.isCancelled, draggingID != nil {
+                stepAutoScroll(edge)
+                try? await Task.sleep(nanoseconds: Self.autoScrollStepNs)
+                guard !Task.isCancelled, draggingID != nil else { return }
+                // Row moved under a still pointer: refresh the drop preview.
+                let fingerX = liftOrigin.x + dragTranslation.width
+                if let slot = slotIndexAt(localX: fingerX), gapSlot != slot { gapSlot = slot }
+            }
+        }
+    }
+
+    private func stepAutoScroll(_ edge: Int) {
+        let stride = Self.cell + Self.gap
+        let first = max(0, Int((-rowOriginX / stride).rounded()))
+        let visible = max(1, Int((viewportWidth + Self.gap) / stride))
+        let target = edge < 0 ? first - 1 : first + visible
+        guard baseOrder.indices.contains(target) else { return }
+        withAnimation(.easeOut(duration: 0.22)) {
+            scrollProxy?.scrollTo(baseOrder[target], anchor: edge < 0 ? .leading : .trailing)
+        }
     }
 
     private func endDrag(id: AccountID, drag: DragGesture.Value) {
@@ -641,6 +693,9 @@ struct GaugeClusterView: View {
     }
 
     private func cancelDrag() {
+        autoScrollTask?.cancel()
+        autoScrollTask = nil
+        autoScrollEdge = 0
         draggingID = nil
         homeSlot = nil
         dragTranslation = .zero
@@ -702,12 +757,14 @@ struct GaugeClusterView: View {
         // Never skip persist for real accounts even if DEMO env is set.
         if DemoWidgets.isForced && !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
             baseOrder = next
+            onOrderCommitted?(next)
             return
         }
 
         do {
             try AccountStore.shared.applyOrder(next)
             baseOrder = AccountStore.shared.accounts.map(\.id)
+            onOrderCommitted?(baseOrder)
         } catch {
             syncFromWidgets()
         }

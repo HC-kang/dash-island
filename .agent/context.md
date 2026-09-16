@@ -492,3 +492,10 @@ Fixes:
 - Broad pass over Island views after the reorder fix found one more stale path: `elevatedChrome` was cleared at drag start and only rewritten by `onPreferenceChange`. SwiftUI `onHover` does not fire during a mouse-down drag, so the dropped widget stays "hovered" under the pointer, the preference never changes, and its usage tip never returns until leave + re-enter. Now the cluster stores the raw hover list always and derives the active chrome (`nil` while dragging). Rule: never cache a value that is only refreshed by a change callback if a gesture can suppress that callback.
 - Left as-is (cosmetic, not stale-state): LiveDot bump uses `asyncAfter`, so two bumps inside 140ms cut the second short; GaugeRingView applies value changes during the 80ms pre-reveal window without the reveal sweep.
 - Verified: build, 172 Swift checks, native render/drag check. Hover-after-drop itself is not covered by the native script (posted NSEvents do not generate tracking-area enter/exit), so it was fixed by reasoning and confirmed in the running app only by the user.
+
+## Drag auto-scroll at viewport edges (2026-09-16)
+
+- User: dragging to the edge should scroll the row; previously required drop + re-drag. Implemented with `ScrollViewReader` (macOS 13 target, no `scrollPosition`): hold within 30pt of either band edge steps one cell every 300ms via `scrollTo(id, anchor:)`; after each step the drop preview is recomputed from the still pointer. Gate is real overflow (`IslandClusterLayout.needsScroll` against `viewportWidth`), not `slotCount > maxVisible`, because the test band is narrower than five cells.
+- `rowOriginX` is now live during a drag (old freeze comment predates the current gesture; only changes on real row movement). Native check with 7 fake widgets in a 324pt band did not hang.
+- `onOrderCommitted` callback on GaugeClusterView exists so the native script can observe a demo/local-only reorder; it also fires after a persisted reorder.
+- Verified: native render/drag check (right-edge hold lands at last slot, left-edge hold returns to first), 172 Swift checks, build. App restarted (PID 16126).
