@@ -444,6 +444,11 @@ enum ClaudeAdapterSuite {
                 fetchedAt: Date()
             )
             let lastGoodURL = CredentialStore.lastGoodUsageURL(inDirectory: dir)
+            // Placeholder (vendor reported no windows) must never be written as last-good.
+            var placeholder = good
+            placeholder.primary.reported = false
+            try assertTrue(!UsageOrchestrator.saveLastGood(placeholder, to: lastGoodURL))
+            try assertTrue(!FileManager.default.fileExists(atPath: lastGoodURL.path))
             try assertTrue(UsageOrchestrator.saveLastGood(good, to: lastGoodURL))
             try assertTrue(FileManager.default.fileExists(atPath: lastGoodURL.path))
 

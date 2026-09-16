@@ -36,7 +36,7 @@ final class IslandModel: ObservableObject {
     /// Trailing when add chevron is visible (root pad + AddRail outer pad).
     static let contentPadTrailingWithAdd: CGFloat = 4 + 6
     /// Hard cap on stored accounts (scroll when more than `maxVisibleSlots`).
-    static let maxItems: Int = 8
+    static let maxItems: Int = AccountStore.maxAccounts
     /// How many gauges fit in the island body at once; extra accounts scroll horizontally.
     static let maxVisibleSlots: Int = 5
     static let addChevronWidth: CGFloat = AddRail.chevronWidth
@@ -83,13 +83,12 @@ final class IslandModel: ObservableObject {
         case .expanded:
             return CGSize(
                 width: expandedContentWidth,
-                height: blackHeight + Self.tooltipHitPad
+                height: blackHeight + 20
             )
         }
     }
 
-    /// Extra height under the expanded body so tip-down hover cards stay interactive.
-    /// Long Claude auth copy needs ~160–200pt; keep headroom past the caret.
+    /// Drawing space only. Tooltips must not enlarge the mouse retention area.
     static let tooltipHitPad: CGFloat = 200
 
     func setState(_ new: State) {

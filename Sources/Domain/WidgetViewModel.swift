@@ -107,6 +107,7 @@ enum AccountHealth: Equatable, Sendable {
 
 /// Presentation-ready account widget state. Views render only this model.
 struct WidgetViewModel: Identifiable, Equatable, Sendable {
+    var usageSnapshot: UsageSnapshot? = nil
     var id: AccountID
     var title: String
     /// Vendor key for logo badge (`claude` / `codex` / `grok`).

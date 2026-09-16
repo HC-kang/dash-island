@@ -391,7 +391,7 @@ final class UsageOrchestrator: ObservableObject {
     }
 
     nonisolated static func encodeLastGood(_ snapshot: UsageSnapshot) -> Data? {
-        guard snapshot.error == nil else { return nil }
+        guard snapshot.error == nil, snapshot.primary.isReported else { return nil }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         return try? encoder.encode(snapshot)
@@ -597,6 +597,12 @@ final class UsageOrchestrator: ObservableObject {
         rateLimitStreak[accountID] = nil
         lastSuccessAt[accountID] = now
         lastNotice[accountID] = snapshot.notice
+        // Placeholder sample (vendor reported no windows): never replace real rings,
+        // never persist it, never push its fake 0% into the burn smoother.
+        guard snapshot.primary.isReported else {
+            if lastGood[accountID] == nil { lastGood[accountID] = snapshot }
+            return
+        }
         lastGood[accountID] = snapshot
         persistLastGood(accountID: accountID, snapshot: snapshot)
         pushBurn(accountID: accountID, snapshot: snapshot)
@@ -712,7 +718,7 @@ final class UsageOrchestrator: ObservableObject {
         // lastGood is error-free only; errors live in lastError.
         let err = lastError[account.id]
         // No good sample → skeleton (not fake 0%), even when a soft error caption shows.
-        let awaiting = snap == nil
+        let awaiting = snap == nil || snap?.primary.isReported == false
         let notice = lastNotice[account.id] ?? snap?.notice
         let burnSource = burnSourceByAccount[account.id] ?? .none
         let service = VendorStatusStore.shared.snapshot(for: account.vendorID)
@@ -736,6 +742,7 @@ final class UsageOrchestrator: ObservableObject {
         let retryAt = cool.flatMap { $0 > Date() ? $0 : nil }
 
         return WidgetViewModel(
+            usageSnapshot: snap,
             id: account.id,
             title: account.label,
             vendorID: account.vendorID,

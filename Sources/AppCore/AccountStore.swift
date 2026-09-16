@@ -14,8 +14,8 @@ enum AccountStoreError: Error, Equatable {
 @MainActor
 final class AccountStore: ObservableObject {
     static let shared = AccountStore()
-    /// Keep in lockstep with `IslandModel.maxItems` (8; viewport scrolls past 5).
-    static let maxAccounts = 8
+    /// Registration limit; the island uses this same cap and scrolls past 5 slots.
+    static let maxAccounts = 20
 
     @Published private(set) var accounts: [Account] = []
 
@@ -94,8 +94,7 @@ final class AccountStore: ObservableObject {
         }
         var copy = account
         copy.sortIndex = accounts.count
-        accounts.append(copy)
-        try persist()
+        try persist(accounts + [copy])
     }
 
     /// Create metadata from an adapter `beginAdd` result. Account `id` matches folder UUID when possible.
@@ -114,15 +113,17 @@ final class AccountStore: ObservableObject {
             createdAt: Date(),
             lastAuthenticatedAt: Date()
         )
-        accounts.append(account)
-        try persist()
+        try persist(accounts + [account])
         return account
     }
 
     /// Remove metadata row and credential folder.
     func remove(id: AccountID) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
-        let removed = accounts.remove(at: index)
+        var next = accounts
+        let removed = next.remove(at: index)
+        // A failed metadata save must not remove the account or its credentials.
+        try persist(next)
         let dir = CredentialStore.directoryURL(for: removed.credentialRef)
         switch removed.vendorID {
         case "claude":
@@ -137,15 +138,13 @@ final class AccountStore: ObservableObject {
             break
         }
         try? CredentialStore.removeDirectory(for: removed.credentialRef)
-        reindex()
-        // Explicit empty is allowed (user removed the last account).
-        try persistence.save(accounts, allowEmptyOverwrite: true)
     }
 
     func rename(id: AccountID, label: String) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
-        accounts[index].label = label
-        try persist()
+        var next = accounts
+        next[index].label = label
+        try persist(next)
     }
 
     /// Move `id` so it ends at `toIndex` in the final array (0-based).
@@ -156,9 +155,7 @@ final class AccountStore: ObservableObject {
         var list = accounts
         let item = list.remove(at: from)
         list.insert(item, at: target)
-        accounts = list
-        reindex()
-        try persist()
+        try persist(list)
     }
 
     /// Replace order with an explicit id list (drag commit). Unknown ids ignored.
@@ -166,37 +163,30 @@ final class AccountStore: ObservableObject {
         let map = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
         var next: [Account] = []
         next.reserveCapacity(accounts.count)
-        for id in ids {
-            if let account = map[id] { next.append(account) }
-        }
-        // Append any that were missing from ids (safety — never drop rows).
-        for account in accounts where !ids.contains(account.id) {
-            next.append(account)
+        var seen = Set<AccountID>()
+        // Missing IDs append in their existing order; repeated/stale IDs never
+        // duplicate rows (which would crash later unique-key dictionaries).
+        for id in ids + accounts.map(\.id) {
+            if seen.insert(id).inserted, let account = map[id] { next.append(account) }
         }
         let before = accounts.map(\.id)
         let after = next.map(\.id)
         guard after != before else { return }
-        accounts = next
-        reindex()
-        try persist()
-        accounts = accounts
+        try persist(next)
     }
 
     /// After adapter `reauthenticate`, stamp auth time and optionally replace credential ref.
     func markAuthenticated(id: AccountID, credentialRef: CredentialRef? = nil) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
-        accounts[index].lastAuthenticatedAt = Date()
+        var next = accounts
+        next[index].lastAuthenticatedAt = Date()
         if let credentialRef {
-            accounts[index].credentialRef = credentialRef
+            next[index].credentialRef = credentialRef
         }
-        try persist()
+        try persist(next)
     }
 
     // MARK: - Private
-
-    private func reindex() {
-        reindex(&accounts)
-    }
 
     private func reindex(_ list: inout [Account]) {
         for i in list.indices {
@@ -204,8 +194,12 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    private func persist() throws {
-        try persistence.save(accounts, allowEmptyOverwrite: accounts.isEmpty)
+    private func persist(_ proposed: [Account]) throws {
+        var next = proposed
+        reindex(&next)
+        try persistence.save(next, allowEmptyOverwrite: next.isEmpty)
+        // Publish one complete, saved state, never intermediate sort indices.
+        accounts = next
     }
 
     /// Folders under `accounts/` that hold valid vendor creds but are missing from the list.

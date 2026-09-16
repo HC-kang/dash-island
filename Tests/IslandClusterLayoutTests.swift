@@ -10,7 +10,7 @@ enum IslandClusterLayoutSuite {
             try assertTrue(!IslandClusterLayout.needsHorizontalScroll(slotCount: 3, maxVisible: 5))
         }
         f += check("viewport slot count caps at maxVisible") {
-            try assertEqual(IslandClusterLayout.viewportSlotCount(slotCount: 8, maxVisible: 5), 5)
+            try assertEqual(IslandClusterLayout.viewportSlotCount(slotCount: 20, maxVisible: 5), 5)
             try assertEqual(IslandClusterLayout.viewportSlotCount(slotCount: 3, maxVisible: 5), 3)
         }
         f += check("hang tip starts below cell height (would be clipped by ScrollView)") {

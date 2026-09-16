@@ -18,6 +18,7 @@ final class IslandWindowController {
     private var targetDisplayObserver: NSObjectProtocol?
     /// While true, the full window receives mouse events so drags aren't killed.
     private var dragActive = false
+    private var pointerInside = false
     /// Follow-cursor hysteresis: candidate screen + pending switch task.
     private var followCandidateStableID: String?
     private var followCandidateTask: Task<Void, Never>?
@@ -62,7 +63,7 @@ final class IslandWindowController {
         window.ignoresMouseEvents = true
         window.alphaValue = 1
 
-        let host = NSHostingView(rootView: IslandRootView(model: model))
+        let host = IslandHostingView(rootView: IslandRootView(model: model))
         host.autoresizingMask = [.width, .height]
         host.wantsLayer = true
         host.layer?.masksToBounds = false
@@ -385,7 +386,14 @@ final class IslandWindowController {
             width: hitSize.width,
             height: hitSize.height
         ).insetBy(dx: -1, dy: -1)
-        window.ignoresMouseEvents = !hit.contains(mouse)
+        let inside = hit.contains(mouse)
+        // SwiftUI can miss mouseExited once the transparent window starts passing
+        // events through. Use the same screen rect for both hover and passthrough.
+        if inside != pointerInside {
+            pointerInside = inside
+            NotificationCenter.default.post(name: .dashIslandPointerInsideChanged, object: inside)
+        }
+        window.ignoresMouseEvents = !inside
     }
 
     // MARK: - Follow cursor display
@@ -437,4 +445,10 @@ final class IslandWindowController {
             // `setFollowLive` posts target-display-changed → refresh + animate.
         }
     }
+}
+
+private final class IslandHostingView: NSHostingView<IslandRootView> {
+    // Opening details makes another window key. Keep the next widget click
+    // actionable instead of consuming it only to activate the island.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

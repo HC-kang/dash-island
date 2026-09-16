@@ -40,6 +40,9 @@ enum UsageWindowKind: String, Codable, Equatable, Sendable {
 }
 
 struct WindowUsage: Codable, Equatable, Sendable {
+    /// nil preserves older saved snapshots. Missing readings are never a real zero.
+    var reported: Bool? = nil
+    var isReported: Bool { reported != false }
     /// Always normalized to 0...1 (used fraction of the window).
     var usedFraction: Double
     var resetAt: Date?
@@ -92,6 +95,9 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var error: UsageError?
     /// Soft non-fatal notice (e.g. token expiring soon).
     var notice: String? = nil
+
+    /// Codex reset credits, nil when the separate endpoint is unavailable.
+    var resetCreditsAvailable: Int? = nil
 
     /// Window used for burn / needle.
     ///

@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// Slot grid (min 3). Skeleton + widget share the same cell (no dual layout).
-/// Drag: long-press then move; neighbors **offset** to open a gap (drop preview).
-/// Widgets keep stable cell identity so gestures/menus stay alive. Trash magnet deletes.
+/// Drag: move past the threshold; neighbors offset to open a drop preview.
+/// Widgets retain account identity across reorders. Trash magnet deletes.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -14,9 +14,12 @@ struct GaugeClusterView: View {
 
     /// Grows island black body when the add rail is revealed.
     var onAddRailExpandedChange: ((Bool) -> Void)?
+    /// New order after a drop (also fires for demo/local-only reorders).
+    var onOrderCommitted: (([AccountID]) -> Void)?
 
     /// Frozen for the whole gesture.
     @State private var baseOrder: [AccountID] = []
+    @State private var pendingOrder: [AccountID]?
     @State private var draggingID: AccountID?
     @State private var homeSlot: Int?
     @State private var liftOrigin: CGPoint = .zero
@@ -27,14 +30,16 @@ struct GaugeClusterView: View {
     @State private var clusterSize: CGSize = .zero
     /// Live width of the drag overlay (slot band). Used for trash centering.
     @State private var bandWidth: CGFloat = 0
-    /// Active hover chrome (usage / caption / status) — tips drawn outside ScrollView.
-    @State private var elevatedChrome: WidgetHoverChrome?
-    /// Half-height of the floating tip for correct `position` anchoring.
-    @State private var floatingTipHalfHeight: CGFloat = 28
+    /// Latest hover chrome from every cell (usage / caption / status).
+    @State private var hoverChrome: [WidgetHoverChrome] = []
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
     @State private var viewportWidth: CGFloat = 0
+    @State private var scrollProxy: ScrollViewProxy?
+    /// -1 / 0 / +1: which viewport edge the dragged widget is parked against.
+    @State private var autoScrollEdge = 0
+    @State private var autoScrollTask: Task<Void, Never>?
 
     private static let maxSlots = IslandModel.maxItems
     private static let maxVisible = IslandModel.maxVisibleSlots
@@ -53,9 +58,13 @@ struct GaugeClusterView: View {
     private static let edgeFadeWidth: CGFloat = 22
     /// Ignore tiny pointer jitter so click / context menu still work; past this, reorder.
     private static let dragMinDistance: CGFloat = 6
+    /// Holding a dragged widget this close to a viewport edge scrolls the row one cell per step.
+    private static let autoScrollZone: CGFloat = 30
+    private static let autoScrollStepNs: UInt64 = 300_000_000
 
     private var slotCount: Int {
-        let filled = max(baseOrder.count, widgets.count)
+        // Switching between centered/scrolling rows unmounts the active gesture.
+        let filled = draggingID == nil ? max(baseOrder.count, widgets.count) : baseOrder.count
         return max(Self.minSlots, min(Self.maxSlots, filled))
     }
 
@@ -102,6 +111,12 @@ struct GaugeClusterView: View {
     private var trashCenterLocal: CGPoint {
         let w = bandWidth > 1 ? bandWidth : (clusterSize.width > 1 ? clusterSize.width : 400)
         return CGPoint(x: w * 0.5, y: Self.cellH + Self.trashZoneH * 0.42)
+    }
+
+    /// Active hover chrome — derived so a drop restores tips without a fresh hover
+    /// event (the dragged widget stays hovered under the pointer; no preference change).
+    private var elevatedChrome: WidgetHoverChrome? {
+        draggingID == nil ? hoverChrome.first(where: \.isActive) : nil
     }
 
     private var floatCenter: CGPoint {
@@ -217,18 +232,25 @@ struct GaugeClusterView: View {
         }
         .onAppear { syncFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
-            guard draggingID == nil else { return }
-            baseOrder = ids
+            if let draggingID {
+                pendingOrder = ids
+                if !ids.contains(draggingID) { cancelDrag() }
+            } else {
+                baseOrder = ids
+            }
         }
         .onChange(of: draggingID) { id in
             // Mouse passthrough only — do NOT close add rail / resize island here.
             NotificationCenter.default.post(name: .dashIslandDragActive, object: id != nil)
-            if id != nil {
-                elevatedChrome = nil
-            }
         }
         .onChange(of: showAdd) { can in
             if !can { onAddRailExpandedChange?(false) }
+        }
+        .onDisappear {
+            if draggingID != nil {
+                cancelDrag()
+                NotificationCenter.default.post(name: .dashIslandDragActive, object: false)
+            }
         }
     }
 
@@ -263,6 +285,18 @@ struct GaugeClusterView: View {
 
     // MARK: - Slots
 
+    @ViewBuilder
+    private var slotCells: some View {
+        // Index identity transfers @State (rings, hover, reveal tasks) to another
+        // account after a drop. Keep each account's view mounted when it moves.
+        ForEach(Array(baseOrder.prefix(slotCount).enumerated()), id: \.element) { index, _ in
+            slotCell(index: index)
+        }
+        ForEach(min(baseOrder.count, slotCount)..<slotCount, id: \.self) { index in
+            slotCell(index: index)
+        }
+    }
+
     private var slotRow: some View {
         // Layout size comes only from the parent band (GeometryReader proposal).
         // Scroll content ideal width must never enlarge this.
@@ -295,8 +329,8 @@ struct GaugeClusterView: View {
         // Implicit animations on the whole GeometryReader during drag = layout hang.
         // Neighbors still slide via `offset` without wrapping the reader.
         .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
-            guard draggingID == nil else { return }
-            elevatedChrome = list.first(where: \.isActive)
+            // Hover only flips on enter/exit; storing mid-drag is cheap and keeps it current.
+            hoverChrome = list
         }
     }
 
@@ -324,19 +358,11 @@ struct GaugeClusterView: View {
                 }
             }
             .fixedSize()
-            .background(
-                GeometryReader { geo in
-                    Color.clear.preference(key: FloatingTipSizeKey.self, value: geo.size)
-                }
-            )
-            .position(x: center.x, y: tipTop + floatingTipHalfHeight)
+            // Anchor the top edge directly; measured half-heights lag when cards change.
+            .frame(width: 0, height: 0, alignment: .top)
+            .position(x: center.x, y: tipTop)
             .allowsHitTesting(false)
             .transition(.opacity)
-            .onPreferenceChange(FloatingTipSizeKey.self) { size in
-                if size.height > 1 {
-                    floatingTipHalfHeight = size.height / 2
-                }
-            }
         }
     }
 
@@ -347,9 +373,7 @@ struct GaugeClusterView: View {
             .frame(width: availableWidth, height: Self.cellH)
             .overlay {
                 HStack(spacing: Self.gap) {
-                    ForEach(0..<slotCount, id: \.self) { index in
-                        slotCell(index: index)
-                    }
+                    slotCells
                 }
                 .background(rowGeometryProbe)
                 .fixedSize(horizontal: true, vertical: false)
@@ -366,18 +390,19 @@ struct GaugeClusterView: View {
         Color.clear
             .frame(width: availableWidth, height: Self.cellH)
             .overlay(alignment: .topLeading) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: Self.gap) {
-                        ForEach(0..<slotCount, id: \.self) { index in
-                            slotCell(index: index)
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: Self.gap) {
+                            slotCells
                         }
+                        .padding(.horizontal, 2)
+                        .background(rowGeometryProbe)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .padding(.horizontal, 2)
-                    .background(rowGeometryProbe)
-                    .fixedSize(horizontal: true, vertical: false)
+                    // Do not .disabled mid-drag — toggling ScrollView rebuilds layout and hung the UI.
+                    .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
+                    .onAppear { scrollProxy = proxy }
                 }
-                // Do not .disabled mid-drag — toggling ScrollView rebuilds layout and hung the UI.
-                .frame(width: availableWidth, height: Self.cellH, alignment: .leading)
             }
             .overlay {
                 scrollEdgeFades(availableWidth: availableWidth)
@@ -401,8 +426,8 @@ struct GaugeClusterView: View {
                 )
         }
         .onPreferenceChange(SlotRowFrameKey.self) { rect in
-            // Freeze mid-drag — scroll/center probes during gesture hung the UI.
-            guard draggingID == nil else { return }
+            // Stays live mid-drag: auto-scroll moves the row under a still pointer and
+            // the drop slot must follow. Only changes on real movement (no storm).
             guard rect.width > 1 else { return }
             if abs(rect.minX - rowOriginX) > 0.5 {
                 rowOriginX = rect.minX
@@ -588,7 +613,6 @@ struct GaugeClusterView: View {
             liftOrigin = start
             dragTranslation = .zero
             magnetizedToTrash = false
-            elevatedChrome = nil
         }
     }
 
@@ -607,6 +631,46 @@ struct GaugeClusterView: View {
         } else if let slot = slotIndexAt(localX: finger.x), gapSlot != slot {
             gapSlot = slot
         }
+        updateAutoScroll(fingerX: finger.x)
+    }
+
+    /// Park the dragged widget at a viewport edge to scroll the row one cell per step.
+    private func updateAutoScroll(fingerX: CGFloat) {
+        var edge = 0
+        let overflow = IslandClusterLayout.needsScroll(
+            contentWidth: Double(contentRowWidth),
+            availableWidth: Double(viewportWidth)
+        )
+        if overflow, !magnetizedToTrash, viewportWidth > 1 {
+            if fingerX < Self.autoScrollZone { edge = -1 }
+            else if fingerX > viewportWidth - Self.autoScrollZone { edge = 1 }
+        }
+        guard edge != autoScrollEdge else { return }
+        autoScrollEdge = edge
+        autoScrollTask?.cancel()
+        autoScrollTask = nil
+        guard edge != 0 else { return }
+        autoScrollTask = Task { @MainActor in
+            while !Task.isCancelled, draggingID != nil {
+                stepAutoScroll(edge)
+                try? await Task.sleep(nanoseconds: Self.autoScrollStepNs)
+                guard !Task.isCancelled, draggingID != nil else { return }
+                // Row moved under a still pointer: refresh the drop preview.
+                let fingerX = liftOrigin.x + dragTranslation.width
+                if let slot = slotIndexAt(localX: fingerX), gapSlot != slot { gapSlot = slot }
+            }
+        }
+    }
+
+    private func stepAutoScroll(_ edge: Int) {
+        let stride = Self.cell + Self.gap
+        let first = max(0, Int((-rowOriginX / stride).rounded()))
+        let visible = max(1, Int((viewportWidth + Self.gap) / stride))
+        let target = edge < 0 ? first - 1 : first + visible
+        guard baseOrder.indices.contains(target) else { return }
+        withAnimation(.easeOut(duration: 0.22)) {
+            scrollProxy?.scrollTo(baseOrder[target], anchor: edge < 0 ? .leading : .trailing)
+        }
     }
 
     private func endDrag(id: AccountID, drag: DragGesture.Value) {
@@ -616,25 +680,31 @@ struct GaugeClusterView: View {
         )
         let remove = magnetizedToTrash || distanceToTrash(finger) <= Self.trashMagnetEnter
         let dropSlot = remove ? nil : (gapSlot ?? slotIndexAt(localX: finger.x))
-        let from = homeSlot ?? baseOrder.firstIndex(of: id)
-
-        cancelDrag()
-
-        if remove {
-            confirmRemove(id: id)
-            return
-        }
-        if let to = dropSlot, let from {
-            commitMove(id: id, from: from, to: to)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            cancelDrag()
+            if remove {
+                confirmRemove(id: id)
+            } else if let to = dropSlot {
+                commitMove(id: id, to: to)
+            }
         }
     }
 
     private func cancelDrag() {
+        autoScrollTask?.cancel()
+        autoScrollTask = nil
+        autoScrollEdge = 0
         draggingID = nil
         homeSlot = nil
         dragTranslation = .zero
         gapSlot = nil
         magnetizedToTrash = false
+        if let pendingOrder {
+            baseOrder = pendingOrder
+            self.pendingOrder = nil
+        }
     }
 
     private func updateTrashMagnet(finger: CGPoint) {
@@ -678,27 +748,23 @@ struct GaugeClusterView: View {
         return min(index, maxFilled)
     }
 
-    private func commitMove(id: AccountID, from: Int, to: Int) {
-        guard from != to else { return }
+    private func commitMove(id: AccountID, to: Int) {
         var next = baseOrder.isEmpty ? widgets.map(\.id) : baseOrder
-        guard let fromIdx = next.firstIndex(of: id) else { return }
+        guard let fromIdx = next.firstIndex(of: id), fromIdx != to else { return }
         let item = next.remove(at: fromIdx)
-        let dest: Int
-        if to > fromIdx {
-            dest = min(to, next.count)
-        } else {
-            dest = min(max(0, to), next.count)
-        }
+        let dest = min(max(0, to), next.count)
         next.insert(item, at: dest)
-        baseOrder = next
-
         // Never skip persist for real accounts even if DEMO env is set.
         if DemoWidgets.isForced && !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
+            baseOrder = next
+            onOrderCommitted?(next)
             return
         }
 
         do {
             try AccountStore.shared.applyOrder(next)
+            baseOrder = AccountStore.shared.accounts.map(\.id)
+            onOrderCommitted?(baseOrder)
         } catch {
             syncFromWidgets()
         }
@@ -766,10 +832,6 @@ private struct SlotRowFrameKey: PreferenceKey {
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
-private struct FloatingTipSizeKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
-}
 
 extension Notification.Name {
     static let dashIslandDragActive = Notification.Name("dashIslandDragActive")
