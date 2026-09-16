@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 enum AccountsPersistenceSuite {
     static func run() -> Int {
@@ -168,9 +169,15 @@ enum AccountsPersistenceSuite {
                 try store.add(Account(id: idA, vendorID: "fake", label: "A", credentialRef: idA.uuidString, sortIndex: 0, createdAt: Date(), lastAuthenticatedAt: nil))
                 try store.add(Account(id: idB, vendorID: "fake", label: "B", credentialRef: idB.uuidString, sortIndex: 1, createdAt: Date(), lastAuthenticatedAt: nil))
                 try store.add(Account(id: idC, vendorID: "fake", label: "C", credentialRef: idC.uuidString, sortIndex: 2, createdAt: Date(), lastAuthenticatedAt: nil))
-                try store.applyOrder([idC, idA, idB])
+                var publications: [[Account]] = []
+                let subscription = store.$accounts.dropFirst().sink { publications.append($0) }
+                defer { subscription.cancel() }
+                // Repeated and stale drag IDs must not duplicate or lose accounts.
+                try store.applyOrder([idC, idC, UUID(), idA])
                 try assertEqual(store.accounts.map(\.id), [idC, idA, idB])
                 try assertEqual(store.accounts.map(\.sortIndex), [0, 1, 2])
+                try assertEqual(publications.count, 1)
+                try assertEqual(publications[0], store.accounts)
             }
 
             try runOnMain {
@@ -180,6 +187,43 @@ enum AccountsPersistenceSuite {
             }
         }
 
+        failures += check("failed account saves leave published state unchanged") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let file = dir.appendingPathComponent("accounts.json")
+            let persistence = AccountsPersistence(fileURL: file)
+            try runOnMain {
+                let store = AccountStore(persistence: persistence)
+                for label in ["A", "B"] {
+                    let id = UUID()
+                    try store.add(Account(id: id, vendorID: "fake", label: label, credentialRef: id.uuidString,
+                        sortIndex: 0, createdAt: Date(), lastAuthenticatedAt: nil))
+                }
+                let original = store.accounts
+                // A directory at the destination makes atomic file writes fail.
+                try FileManager.default.removeItem(at: file)
+                try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+                var publications = 0
+                let subscription = store.$accounts.dropFirst().sink { _ in publications += 1 }
+                defer { subscription.cancel() }
+                let mutations: [() throws -> Void] = [
+                    { try store.rename(id: original[0].id, label: "Changed") },
+                    { try store.move(id: original[0].id, toIndex: 1) },
+                    { try store.applyOrder(original.reversed().map(\.id)) },
+                    { try store.markAuthenticated(id: original[0].id, credentialRef: "changed") },
+                    { try store.remove(id: original[0].id) },
+                    { try store.add(Account(id: UUID(), vendorID: "fake", label: "New", credentialRef: "new",
+                        sortIndex: 0, createdAt: Date(), lastAuthenticatedAt: nil)) }
+                ]
+                for mutation in mutations {
+                    var failed = false
+                    do { try mutation() } catch { failed = true }
+                    try assertTrue(failed, "save must report its failure")
+                    try assertEqual(store.accounts, original)
+                }
+                try assertEqual(publications, 0)
+            }
+        }
         return failures
     }
 

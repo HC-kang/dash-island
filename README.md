@@ -125,6 +125,8 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 ```bash
 ./scripts/run-tests.sh
+# Native rendering + drag regression (briefly opens an isolated fake-widget window).
+bash scripts/check-widget-render.sh
 ```
 
 ### Version

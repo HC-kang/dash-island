@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// Slot grid (min 3). Skeleton + widget share the same cell (no dual layout).
-/// Drag: long-press then move; neighbors **offset** to open a gap (drop preview).
-/// Widgets keep stable cell identity so gestures/menus stay alive. Trash magnet deletes.
+/// Drag: move past the threshold; neighbors offset to open a drop preview.
+/// Widgets retain account identity across reorders. Trash magnet deletes.
 struct GaugeClusterView: View {
     let widgets: [WidgetViewModel]
     var accountCount: Int = 0
@@ -17,6 +17,7 @@ struct GaugeClusterView: View {
 
     /// Frozen for the whole gesture.
     @State private var baseOrder: [AccountID] = []
+    @State private var pendingOrder: [AccountID]?
     @State private var draggingID: AccountID?
     @State private var homeSlot: Int?
     @State private var liftOrigin: CGPoint = .zero
@@ -53,7 +54,8 @@ struct GaugeClusterView: View {
     private static let dragMinDistance: CGFloat = 6
 
     private var slotCount: Int {
-        let filled = max(baseOrder.count, widgets.count)
+        // Switching between centered/scrolling rows unmounts the active gesture.
+        let filled = draggingID == nil ? max(baseOrder.count, widgets.count) : baseOrder.count
         return max(Self.minSlots, min(Self.maxSlots, filled))
     }
 
@@ -215,8 +217,12 @@ struct GaugeClusterView: View {
         }
         .onAppear { syncFromWidgets() }
         .onChange(of: widgets.map(\.id)) { ids in
-            guard draggingID == nil else { return }
-            baseOrder = ids
+            if let draggingID {
+                pendingOrder = ids
+                if !ids.contains(draggingID) { cancelDrag() }
+            } else {
+                baseOrder = ids
+            }
         }
         .onChange(of: draggingID) { id in
             // Mouse passthrough only — do NOT close add rail / resize island here.
@@ -227,6 +233,12 @@ struct GaugeClusterView: View {
         }
         .onChange(of: showAdd) { can in
             if !can { onAddRailExpandedChange?(false) }
+        }
+        .onDisappear {
+            if draggingID != nil {
+                cancelDrag()
+                NotificationCenter.default.post(name: .dashIslandDragActive, object: false)
+            }
         }
     }
 
@@ -260,6 +272,18 @@ struct GaugeClusterView: View {
     }
 
     // MARK: - Slots
+
+    @ViewBuilder
+    private var slotCells: some View {
+        // Index identity transfers @State (rings, hover, reveal tasks) to another
+        // account after a drop. Keep each account's view mounted when it moves.
+        ForEach(Array(baseOrder.prefix(slotCount).enumerated()), id: \.element) { index, _ in
+            slotCell(index: index)
+        }
+        ForEach(min(baseOrder.count, slotCount)..<slotCount, id: \.self) { index in
+            slotCell(index: index)
+        }
+    }
 
     private var slotRow: some View {
         // Layout size comes only from the parent band (GeometryReader proposal).
@@ -337,9 +361,7 @@ struct GaugeClusterView: View {
             .frame(width: availableWidth, height: Self.cellH)
             .overlay {
                 HStack(spacing: Self.gap) {
-                    ForEach(0..<slotCount, id: \.self) { index in
-                        slotCell(index: index)
-                    }
+                    slotCells
                 }
                 .background(rowGeometryProbe)
                 .fixedSize(horizontal: true, vertical: false)
@@ -358,9 +380,7 @@ struct GaugeClusterView: View {
             .overlay(alignment: .topLeading) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Self.gap) {
-                        ForEach(0..<slotCount, id: \.self) { index in
-                            slotCell(index: index)
-                        }
+                        slotCells
                     }
                     .padding(.horizontal, 2)
                     .background(rowGeometryProbe)
@@ -606,16 +626,15 @@ struct GaugeClusterView: View {
         )
         let remove = magnetizedToTrash || distanceToTrash(finger) <= Self.trashMagnetEnter
         let dropSlot = remove ? nil : (gapSlot ?? slotIndexAt(localX: finger.x))
-        let from = homeSlot ?? baseOrder.firstIndex(of: id)
-
-        cancelDrag()
-
-        if remove {
-            confirmRemove(id: id)
-            return
-        }
-        if let to = dropSlot, let from {
-            commitMove(id: id, from: from, to: to)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            cancelDrag()
+            if remove {
+                confirmRemove(id: id)
+            } else if let to = dropSlot {
+                commitMove(id: id, to: to)
+            }
         }
     }
 
@@ -625,6 +644,10 @@ struct GaugeClusterView: View {
         dragTranslation = .zero
         gapSlot = nil
         magnetizedToTrash = false
+        if let pendingOrder {
+            baseOrder = pendingOrder
+            self.pendingOrder = nil
+        }
     }
 
     private func updateTrashMagnet(finger: CGPoint) {
@@ -668,27 +691,21 @@ struct GaugeClusterView: View {
         return min(index, maxFilled)
     }
 
-    private func commitMove(id: AccountID, from: Int, to: Int) {
-        guard from != to else { return }
+    private func commitMove(id: AccountID, to: Int) {
         var next = baseOrder.isEmpty ? widgets.map(\.id) : baseOrder
-        guard let fromIdx = next.firstIndex(of: id) else { return }
+        guard let fromIdx = next.firstIndex(of: id), fromIdx != to else { return }
         let item = next.remove(at: fromIdx)
-        let dest: Int
-        if to > fromIdx {
-            dest = min(to, next.count)
-        } else {
-            dest = min(max(0, to), next.count)
-        }
+        let dest = min(max(0, to), next.count)
         next.insert(item, at: dest)
-        baseOrder = next
-
         // Never skip persist for real accounts even if DEMO env is set.
         if DemoWidgets.isForced && !AccountStore.shared.accounts.contains(where: { $0.id == id }) {
+            baseOrder = next
             return
         }
 
         do {
             try AccountStore.shared.applyOrder(next)
+            baseOrder = AccountStore.shared.accounts.map(\.id)
         } catch {
             syncFromWidgets()
         }

@@ -28,7 +28,6 @@ struct GaugeRingView: View {
     @State private var drawnHasSecondary: Bool = false
     @State private var drawnHasTertiary: Bool = false
     @State private var drawnBurn: Double = 0
-    @State private var drawnPercent: Int = 0
     @State private var didAppear = false
     @State private var revealTask: Task<Void, Never>?
 
@@ -75,7 +74,7 @@ struct GaugeRingView: View {
                 }
 
                 VStack(spacing: 1) {
-                    Text("\(drawnPercent)")
+                    Text("\(centerPercent)")
                         .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(white: 0.96))
                         .tracking(-0.4)
@@ -101,6 +100,12 @@ struct GaugeRingView: View {
             // Next expand starts from rest again.
             drawnBurn = 0
         }
+        .onChange(of: didAppear) { appeared in
+            guard appeared else { return }
+            // Read the current view inputs, not values captured before the delay.
+            applyRingTargets(animated: true)
+            withAnimation(Self.needleReveal) { drawnBurn = burnRatio }
+        }
         .onChange(of: primaryFraction) { _ in applyRingTargets(animated: didAppear) }
         .onChange(of: secondaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
         .onChange(of: tertiaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
@@ -110,7 +115,6 @@ struct GaugeRingView: View {
                 drawnBurn = burnRatio
             }
         }
-        .onChange(of: centerPercent) { _ in applyRingTargets(animated: didAppear) }
     }
 
     /// Compact → expanded: rings settle, needle slowly rises from rest so motion is visible.
@@ -123,7 +127,6 @@ struct GaugeRingView: View {
         drawnTertiary = 0
         drawnHasSecondary = secondaryFraction != nil
         drawnHasTertiary = tertiaryFraction != nil
-        drawnPercent = 0
         didAppear = false
 
         // Brief beat after expand chrome, then animate in.
@@ -131,17 +134,6 @@ struct GaugeRingView: View {
             try? await Task.sleep(nanoseconds: 80_000_000)
             guard !Task.isCancelled else { return }
 
-            withAnimation(Self.ringSettle) {
-                drawnPrimary = primaryFraction
-                drawnSecondary = secondaryFraction ?? 0
-                drawnTertiary = tertiaryFraction ?? 0
-                drawnHasSecondary = secondaryFraction != nil
-                drawnHasTertiary = tertiaryFraction != nil
-                drawnPercent = centerPercent
-            }
-            withAnimation(Self.needleReveal) {
-                drawnBurn = burnRatio
-            }
             didAppear = true
         }
     }
@@ -153,7 +145,6 @@ struct GaugeRingView: View {
             drawnTertiary = tertiaryFraction ?? 0
             drawnHasSecondary = secondaryFraction != nil
             drawnHasTertiary = tertiaryFraction != nil
-            drawnPercent = centerPercent
         }
         if animated {
             withAnimation(Self.ringSettle, update)
