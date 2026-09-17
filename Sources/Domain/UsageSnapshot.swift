@@ -95,6 +95,8 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var error: UsageError?
     /// Soft non-fatal notice (e.g. token expiring soon).
     var notice: String? = nil
+    /// Soft failure with a known retry time (token host 429 / our own refresh spacing).
+    var retryAt: Date? = nil
 
     /// Codex reset credits, nil when the separate endpoint is unavailable.
     var resetCreditsAvailable: Int? = nil

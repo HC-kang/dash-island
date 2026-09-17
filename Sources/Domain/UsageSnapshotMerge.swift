@@ -50,6 +50,9 @@ enum UsageSnapshotMerge {
             if lower.contains("token quiet") || lower.contains("rate") {
                 return "stale · token host quiet (last-good rings)"
             }
+            if lower.contains("refresh pending") {
+                return "stale · refresh scheduled (last-good rings)"
+            }
             return "stale · temporary (last-good rings)"
         case .authRequired:
             return "reconnect this account"

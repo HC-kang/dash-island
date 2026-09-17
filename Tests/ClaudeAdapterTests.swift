@@ -850,6 +850,43 @@ enum ClaudeAdapterSuite {
                 ClaudeAdapter.reauthStep(for: .skipped),
                 ClaudeAdapter.ReauthStep.needBrowser
             )
+            try assertEqual(
+                ClaudeAdapter.reauthStep(for: .deferred(Date())),
+                ClaudeAdapter.ReauthStep.keepExisting
+            )
+        }
+        return failures
+    }
+
+    /// Refresh spacing is per account; only a token-host 429 quiets everyone.
+    static func runGate() async -> Int {
+        var failures = 0
+        let suite = "DashIsland.tests.refreshGate.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = ClaudeRefreshGate(defaults: defaults)
+        let now = Date()
+        let a = await gate.reserveAttempt(key: "a", gap: 900, now: now)
+        let b = await gate.reserveAttempt(key: "b", gap: 900, now: now)
+        let aAgain = await gate.reserveAttempt(key: "a", gap: 900, now: now.addingTimeInterval(60))
+        failures += check("refresh gate spaces each account without starving the others") {
+            try assertTrue(a == nil && b == nil, "first attempt per account reserves immediately")
+            try assertEqual(aAgain, now.addingTimeInterval(900))
+        }
+        await gate.noteRateLimited(until: now.addingTimeInterval(600), now: now)
+        let c = await gate.reserveAttempt(key: "c", gap: 900, now: now)
+        let reloaded = ClaudeRefreshGate(defaults: defaults)
+        let bLater = await reloaded.reserveAttempt(key: "b", gap: 900, now: now.addingTimeInterval(700))
+        let bOpen = await reloaded.reserveAttempt(key: "b", gap: 900, now: now.addingTimeInterval(901))
+        failures += check("token host 429 quiets every account; gate state survives relaunch") {
+            try assertEqual(c, now.addingTimeInterval(600))
+            try assertEqual(bLater, now.addingTimeInterval(900))
+            try assertTrue(bOpen == nil, "account may refresh once its own gap elapsed")
+        }
+        failures += check("pending refresh is soft with no red caption; only a dead refresh path demands reconnect") {
+            try assertEqual(UsageSnapshotMerge.failureKind(.unavailable("refresh pending")), .soft)
+            try assertTrue(UsageOrchestrator.caption(for: .unavailable("refresh pending"), vendorID: "claude") == nil)
+            try assertEqual(UsageOrchestrator.caption(for: .authRequired, vendorID: "claude"), "reconnect account")
         }
         return failures
     }

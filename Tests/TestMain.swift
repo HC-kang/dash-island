@@ -11,6 +11,7 @@ struct TestMain {
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += ClaudeAdapterSuite.run()
+        failures += await ClaudeAdapterSuite.runGate()
         failures += CodexAdapterSuite.run()
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
