@@ -568,8 +568,11 @@ final class UsageOrchestrator: ObservableObject {
                 // Stop overnight 401 loops; user reauth / manual refresh clears this.
                 cooldownUntil[accountID] = now.addingTimeInterval(Self.authFailureCooldown)
             case .unavailable where kind == .soft:
-                // Soft token-quiet: short extra spacing so we do not thrash oauth/token.
-                if cooldownUntil[accountID] == nil {
+                // Retry exactly when the token gate opens; otherwise short spacing
+                // so we do not thrash oauth/token.
+                if let retryAt = snapshot.retryAt {
+                    cooldownUntil[accountID] = retryAt
+                } else if cooldownUntil[accountID] == nil {
                     cooldownUntil[accountID] = now.addingTimeInterval(30 * 60)
                 }
             default:
@@ -642,14 +645,14 @@ final class UsageOrchestrator: ObservableObject {
                 } else if case .rateLimited = err {
                     outcome = .failure("cooling down")
                 } else if let err {
-                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "failed")
+                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "waiting to retry")
                 } else {
                     outcome = .failure("cooling down")
                 }
             } else if attempt == nil {
                 outcome = .never
             } else if let err {
-                outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "failed")
+                outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "waiting to retry")
             } else {
                 outcome = .success
             }
@@ -818,6 +821,8 @@ final class UsageOrchestrator: ObservableObject {
             if lower.contains("setup-token") || lower.contains("user:profile") {
                 return "need browser login"
             }
+            // Self-scheduled retry: rings stay, no red line. Notice/tooltip carry the age.
+            if lower.contains("refresh pending") { return nil }
             if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
                 return "token quiet"
             }

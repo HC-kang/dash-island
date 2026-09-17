@@ -258,7 +258,7 @@ struct ClaudeAdapter: VendorAdapter {
         switch outcome {
         case .success, .adopted:
             return .finished
-        case .rateLimited, .unavailable:
+        case .rateLimited, .deferred, .unavailable:
             return .keepExisting
         case .rejected, .skipped:
             return .needBrowser
@@ -350,7 +350,7 @@ struct ClaudeAdapter: VendorAdapter {
                 creds = next
             case .rejected:
                 return Self.errorSnapshot(.authRequired, fetchedAt: now)
-            case .rateLimited, .skipped, .unavailable:
+            case .rateLimited, .deferred, .skipped, .unavailable:
                 break
             }
         }
@@ -394,25 +394,19 @@ struct ClaudeAdapter: VendorAdapter {
                 plan: refreshed.subscriptionType,
                 fetchedAt: Date()
             )
-        case .rateLimited:
+        case .rateLimited(let retryAt):
             // Token-host 429 is not a usage-quota 429. Do not feed the
             // orchestrator’s 2h/4h/6h streak — that painted “retry in 4h”
-            // on 20h-stale rings. Probe the current access; it may still work.
-            if let file = readCredentialsFile(configDir: configDir),
-               !file.accessToken.isEmpty
-            {
-                let live = await probeUsage(
-                    token: file.accessToken,
-                    plan: file.subscriptionType,
-                    fetchedAt: Date()
-                )
-                if live.error == nil { return live }
-                if case .rateLimited = live.error { return live }
-            }
-            NSLog("DashIsland: Claude refresh quiet ref=%@", String(ref.prefix(8)))
-            return errorSnapshot(
-                .unavailable("token quiet — oauth rate limited"),
-                fetchedAt: Date()
+            // on 20h-stale rings.
+            return await probeCurrentAccessOrQuiet(
+                configDir: configDir, ref: ref,
+                message: "token quiet — oauth rate limited", retryAt: retryAt
+            )
+        case .deferred(let until):
+            // Our own spacing, nothing is wrong: no red caption, retry when it opens.
+            return await probeCurrentAccessOrQuiet(
+                configDir: configDir, ref: ref,
+                message: "refresh pending", retryAt: until
             )
         case .rejected:
             NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
@@ -427,14 +421,37 @@ struct ClaudeAdapter: VendorAdapter {
             }
             return fallback
         case .skipped:
+            // No refresh token (or unreadable file): nothing left to recover with
+            // internally. Only this case earns the reconnect warning.
             if fallback.error != nil {
-                return errorSnapshot(
-                    .unavailable("token quiet — no refresh token. Reauthenticate this account"),
-                    fetchedAt: Date()
-                )
+                NSLog("DashIsland: Claude refresh impossible ref=%@", String(ref.prefix(8)))
+                return errorSnapshot(.authRequired, fetchedAt: Date())
             }
             return fallback
         }
+    }
+
+    /// The current access token may still work; otherwise a soft, ring-keeping
+    /// error whose `retryAt` tells the orchestrator exactly when to try again.
+    private static func probeCurrentAccessOrQuiet(
+        configDir: URL,
+        ref: CredentialRef,
+        message: String,
+        retryAt: Date?
+    ) async -> UsageSnapshot {
+        if let file = readCredentialsFile(configDir: configDir), !file.accessToken.isEmpty {
+            let live = await probeUsage(
+                token: file.accessToken,
+                plan: file.subscriptionType,
+                fetchedAt: Date()
+            )
+            if live.error == nil { return live }
+            if case .rateLimited = live.error { return live }
+        }
+        NSLog("DashIsland: Claude refresh quiet ref=%@ %@", String(ref.prefix(8)), message)
+        var quiet = errorSnapshot(.unavailable(message), fetchedAt: Date())
+        quiet.retryAt = retryAt
+        return quiet
     }
 
     /// Unused on the poll path (Keychain spam). Kept for tests / last-resort.
@@ -982,7 +999,10 @@ struct ClaudeAdapter: VendorAdapter {
         /// Managed file already has a newer access token (CLI rotated it).
         case adopted(ClaudeCreds)
         case skipped
+        /// Token host returned 429 (shared quiet window).
         case rateLimited(Date?)
+        /// Our own per-account spacing; retry at the date, nothing is wrong yet.
+        case deferred(Date)
         case rejected
         case unavailable(String)
     }
@@ -1020,8 +1040,9 @@ struct ClaudeAdapter: VendorAdapter {
 
         // Atomic reserve: check + book the gap so two accounts cannot double-POST.
         // User-initiated Reauthenticate passes `force` to try once anyway.
-        if !force, let waitUntil = await refreshGate.reserveAttempt(gap: globalRefreshMinGap) {
-            return .rateLimited(waitUntil)
+        let gateKey = configDir.path
+        if !force, let waitUntil = await refreshGate.reserveAttempt(key: gateKey, gap: globalRefreshMinGap) {
+            return .deferred(waitUntil)
         }
 
         // Fresh read after waiting — another poll may have healed the file.
@@ -1086,11 +1107,11 @@ struct ClaudeAdapter: VendorAdapter {
                         guard let updated = applyRefreshedToken(existingJSON: data, responseJSON: respData),
                               let next = parseCredentialsJSON(updated)
                         else {
-                            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                            await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
                             return .unavailable("token refresh parse failed")
                         }
                         try? updated.write(to: path, options: .atomic)
-                        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                        await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
                         NSLog(
                             "DashIsland: Claude refresh ok host=%@ type=%@",
                             tokenURL.host ?? "",
@@ -1108,7 +1129,7 @@ struct ClaudeAdapter: VendorAdapter {
                     case 400, 401, 403:
                         let errBody = String(data: respData, encoding: .utf8) ?? ""
                         if isFatalOAuthRefreshError(status: http.statusCode, body: errBody) {
-                            await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+                            await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
                             NSLog(
                                 "DashIsland: Claude refresh rejected HTTP %d %@ %@",
                                 http.statusCode,
@@ -1155,7 +1176,7 @@ struct ClaudeAdapter: VendorAdapter {
             await refreshGate.noteRateLimited(until: retry)
             return .rateLimited(retry)
         }
-        await refreshGate.noteAttempt(gap: globalRefreshMinGap)
+        await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
         if lastStatus > 0 {
             return .unavailable("token refresh HTTP \(lastStatus)")
         }
@@ -1601,54 +1622,49 @@ struct ClaudeAdapter: VendorAdapter {
 
 // MARK: - Process-wide Claude OAuth refresh gate
 
-/// Prevents multi-account polls from stampeding oauth/token.
-/// Quiet window survives app restart via UserDefaults.
-private actor ClaudeRefreshGate {
-    private static let defaultsKey = "DashIsland.ClaudeRefreshNextAllowedAt"
+/// Spaces oauth/token POSTs **per account** so one account's refresh never
+/// starves another; a token-host 429 quiets every account. Survives restart.
+actor ClaudeRefreshGate {
+    private static let serverKey = "DashIsland.ClaudeRefreshNextAllowedAt"
+    private static let accountsKey = "DashIsland.ClaudeRefreshNextAllowedAtByAccount"
     private let defaults: UserDefaults
-    private var nextAllowedAt: Date
+    private var serverQuietUntil: Date
+    private var nextAllowedAt: [String: Date]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let stored = defaults.double(forKey: Self.defaultsKey)
-        let parsed = stored > 0
-            ? Date(timeIntervalSince1970: stored)
-            : Date.distantPast
-        // Drop leftover 3h quiet from older builds so this launch can fetch.
-        if parsed.timeIntervalSinceNow > 20 * 60 {
-            self.nextAllowedAt = .distantPast
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            self.nextAllowedAt = parsed
-        }
+        let stored = defaults.double(forKey: Self.serverKey)
+        let parsed = stored > 0 ? Date(timeIntervalSince1970: stored) : Date.distantPast
+        // Drop leftover long quiets from older builds so this launch can fetch.
+        serverQuietUntil = parsed.timeIntervalSinceNow > 20 * 60 ? .distantPast : parsed
+        let perAccount = defaults.dictionary(forKey: Self.accountsKey) as? [String: Double] ?? [:]
+        nextAllowedAt = perAccount.mapValues { Date(timeIntervalSince1970: $0) }
+            .filter { $0.value.timeIntervalSinceNow <= 20 * 60 }
     }
 
-    /// Atomically reserve one attempt. `nil` = reserved now; else wait until date.
-    func reserveAttempt(gap: TimeInterval, now: Date = Date()) -> Date? {
-        if now < nextAllowedAt { return nextAllowedAt }
-        nextAllowedAt = max(nextAllowedAt, now.addingTimeInterval(gap))
+    /// Atomically reserve one attempt for `key`. `nil` = reserved now; else wait until date.
+    func reserveAttempt(key: String, gap: TimeInterval, now: Date = Date()) -> Date? {
+        if now < serverQuietUntil { return serverQuietUntil }
+        if let next = nextAllowedAt[key], now < next { return next }
+        nextAllowedAt[key] = now.addingTimeInterval(gap)
         persist()
         return nil
     }
 
-    /// Legacy name kept for any external callers.
-    func blockIfCooling(now: Date = Date()) -> Date? {
-        if now < nextAllowedAt { return nextAllowedAt }
-        return nil
-    }
-
-    func noteAttempt(gap: TimeInterval, now: Date = Date()) {
-        nextAllowedAt = max(nextAllowedAt, now.addingTimeInterval(gap))
+    func noteAttempt(key: String, gap: TimeInterval, now: Date = Date()) {
+        nextAllowedAt[key] = max(nextAllowedAt[key] ?? .distantPast, now.addingTimeInterval(gap))
         persist()
     }
 
+    /// Token host said 429: applies to every account.
     func noteRateLimited(until: Date, now: Date = Date()) {
         let cap = now.addingTimeInterval(15 * 60)
-        nextAllowedAt = max(nextAllowedAt, min(until, cap))
+        serverQuietUntil = max(serverQuietUntil, min(until, cap))
         persist()
     }
 
     private func persist() {
-        defaults.set(nextAllowedAt.timeIntervalSince1970, forKey: Self.defaultsKey)
+        defaults.set(serverQuietUntil.timeIntervalSince1970, forKey: Self.serverKey)
+        defaults.set(nextAllowedAt.mapValues(\.timeIntervalSince1970), forKey: Self.accountsKey)
     }
 }
