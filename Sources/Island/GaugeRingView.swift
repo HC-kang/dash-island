@@ -51,6 +51,13 @@ struct GaugeRingView: View {
     }
 
     var body: some View {
+        // Read ring state in `body`: state touched only inside the Canvas closure
+        // does not invalidate the view, so rings stayed blank (5h at 0%).
+        let rings = DrawnRings(
+            primary: drawnPrimary,
+            secondary: drawnHasSecondary ? drawnSecondary : nil,
+            tertiary: drawnHasTertiary ? drawnTertiary : nil
+        )
         // Timeline: rest barely alive at 15fps; hot+ at 30fps. Never strobe.
         TimelineView(.animation(minimumInterval: timelineInterval, paused: !didAppear)) { timeline in
             ZStack {
@@ -64,7 +71,7 @@ struct GaugeRingView: View {
                     drawSpeedTrack(context: context, center: c, scale: scale)
                     drawEnergyTrail(context: context, center: c, scale: scale)
                     drawTicks(context: context, center: c, scale: scale)
-                    drawUsageRings(context: context, center: c, scale: scale)
+                    drawUsageRings(context: context, center: c, scale: scale, rings: rings)
                     drawNeedle(
                         context: context,
                         center: c,
@@ -103,12 +110,15 @@ struct GaugeRingView: View {
         .onChange(of: didAppear) { appeared in
             guard appeared else { return }
             // Read the current view inputs, not values captured before the delay.
-            applyRingTargets(animated: true)
+            applyRingTargets(currentTargets, animated: true)
             withAnimation(Self.needleReveal) { drawnBurn = burnRatio }
         }
-        .onChange(of: primaryFraction) { _ in applyRingTargets(animated: didAppear) }
-        .onChange(of: secondaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
-        .onChange(of: tertiaryFraction ?? -1) { _ in applyRingTargets(animated: didAppear) }
+        // Use the delivered value — this closure captures the previous inputs.
+        .onChange(of: DrawnRings(
+            primary: primaryFraction,
+            secondary: secondaryFraction,
+            tertiary: tertiaryFraction
+        )) { applyRingTargets($0, animated: didAppear) }
         .onChange(of: burnRatio) { _ in
             guard didAppear else { return }
             withAnimation(Self.needleLive) {
@@ -138,13 +148,23 @@ struct GaugeRingView: View {
         }
     }
 
-    private func applyRingTargets(animated: Bool) {
+    private struct DrawnRings: Equatable {
+        var primary: Double
+        var secondary: Double?
+        var tertiary: Double?
+    }
+
+    private var currentTargets: DrawnRings {
+        DrawnRings(primary: primaryFraction, secondary: secondaryFraction, tertiary: tertiaryFraction)
+    }
+
+    private func applyRingTargets(_ target: DrawnRings, animated: Bool) {
         let update = {
-            drawnPrimary = primaryFraction
-            drawnSecondary = secondaryFraction ?? 0
-            drawnTertiary = tertiaryFraction ?? 0
-            drawnHasSecondary = secondaryFraction != nil
-            drawnHasTertiary = tertiaryFraction != nil
+            drawnPrimary = target.primary
+            drawnSecondary = target.secondary ?? 0
+            drawnTertiary = target.tertiary ?? 0
+            drawnHasSecondary = target.secondary != nil
+            drawnHasTertiary = target.tertiary != nil
         }
         if animated {
             withAnimation(Self.ringSettle, update)
@@ -314,10 +334,15 @@ struct GaugeRingView: View {
         }
     }
 
-    private func drawUsageRings(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
+    private func drawUsageRings(
+        context: GraphicsContext,
+        center: CGPoint,
+        scale: CGFloat,
+        rings: DrawnRings
+    ) {
         // Triple-ring geometry: outer brand · mid steel · inner amber (scoped).
         // Slightly tighter stroke when tertiary is present so the core stays readable.
-        let triple = drawnHasTertiary
+        let triple = (rings.tertiary != nil)
         let stroke: CGFloat = (triple ? 4.6 : 5.5) * scale
         let outerR: CGFloat = (triple ? 32 : 31) * scale
         let midR: CGFloat = (triple ? 26.5 : 25) * scale
@@ -327,17 +352,17 @@ struct GaugeRingView: View {
         // Track underlays (tertiary uses amber ghost so 0% Fable/Spark still reads).
         strokeRing(context: context, center: center, radius: outerR, fraction: 1,
                    color: Color.white.opacity(0.07), lineWidth: stroke)
-        if drawnHasSecondary {
+        if (rings.secondary != nil) {
             strokeRing(context: context, center: center, radius: midR, fraction: 1,
                        color: Color.white.opacity(0.045), lineWidth: stroke)
         }
-        if drawnHasTertiary {
+        if (rings.tertiary != nil) {
             strokeRing(context: context, center: center, radius: coreR, fraction: 1,
                        color: amber.opacity(0.22), lineWidth: stroke)
         }
 
         // Outer brand (primary — 5h / main window).
-        let p = clamped(drawnPrimary)
+        let p = clamped(rings.primary)
         if p > 0.0005 {
             var ctx = context
             ctx.addFilter(.shadow(
@@ -351,8 +376,8 @@ struct GaugeRingView: View {
         }
 
         // Mid cool steel (secondary — weekly).
-        if drawnHasSecondary {
-            let s = clamped(drawnSecondary)
+        if (rings.secondary != nil) {
+            let s = clamped((rings.secondary ?? 0))
             if s > 0.0005 {
                 strokeRing(context: context, center: center, radius: midR, fraction: s,
                            color: steel, lineWidth: stroke)
@@ -361,10 +386,10 @@ struct GaugeRingView: View {
 
         // Inner amber (tertiary — Fable / Codex Spark / scoped model).
         // Always paint at least a hairline so 0–1% usage still registers.
-        if drawnHasTertiary {
-            let t = max(clamped(drawnTertiary), 0.015)
+        if (rings.tertiary != nil) {
+            let t = max(clamped((rings.tertiary ?? 0)), 0.015)
             strokeRing(context: context, center: center, radius: coreR, fraction: t,
-                       color: amber.opacity(drawnTertiary < 0.02 ? 0.55 : 1), lineWidth: stroke)
+                       color: amber.opacity((rings.tertiary ?? 0) < 0.02 ? 0.55 : 1), lineWidth: stroke)
         }
     }
 
