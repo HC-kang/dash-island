@@ -4,6 +4,29 @@ enum ClaudeAdapterSuite {
     static func run() -> Int {
         print("ClaudeAdapterSuite")
         var failures = 0
+        failures += check("host log fallback only for the account logged in on host") {
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("di-activity-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: tmp) }
+            func home(_ name: String, uuid: String) throws -> URL {
+                let dir = tmp.appendingPathComponent(name)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                try Data(#"{"oauthAccount":{"accountUuid":"\#(uuid)","organizationUuid":"org"}}"#.utf8)
+                    .write(to: dir.appendingPathComponent(".claude.json"))
+                return dir
+            }
+            let now = Date()
+            let host = try home("host", uuid: "a")
+            let projects = host.appendingPathComponent(".claude/projects/p")
+            try fm.createDirectory(at: projects, withIntermediateDirectories: true)
+            let stamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-30))
+            try Data(#"{"type":"assistant","timestamp":"\#(stamp)","message":{"usage":{"output_tokens":1000}}}"#.utf8)
+                .write(to: projects.appendingPathComponent("s.jsonl"))
+            let same = try home("same", uuid: "a")
+            let other = try home("other", uuid: "b")
+            try assertEqual(ClaudeActivity.recentWeightedTokens(now: now, configDir: same, hostHome: host), 1000)
+            try assertEqual(ClaudeActivity.recentWeightedTokens(now: now, configDir: other, hostHome: host), 0)
+        }
         failures += check("parse utilization percent → usedFraction") {
             let json = """
             {
