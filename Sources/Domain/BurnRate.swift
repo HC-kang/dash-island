@@ -138,6 +138,8 @@ struct BurnRate: Equatable, Sendable {
     /// much recent activity for the short needle (poll gap would otherwise
     /// dilute a real 2-minute burn into a 15-minute average).
     static let quantBurstCap: TimeInterval = 5 * 60
+    /// Resolution of %-only vendors (whole percent).
+    static let quantTick = 0.01
 
     static func ewmaAlpha(dt: TimeInterval, tau: TimeInterval = defaultTau) -> Double {
         guard dt > 0, tau > 0 else { return 1 }
@@ -218,7 +220,12 @@ struct BurnSmoother: Equatable, Sendable {
         if let r = rInst, r > 0, !sample.hasAbsoluteCounters, wallDt > BurnRate.quantBurstCap {
             let shortDt = BurnRate.quantBurstCap
             let scale = wallDt / shortDt
-            rInst = min(3, r * scale)
+            // Only the last integer tick is ambiguous in time — compress that one
+            // into the burst window; the rest of the jump is spread over the gap.
+            // (Scaling the whole jump read a steady 15m cruise as 3× redline.)
+            let du = BurnRate.deltaUsedFraction(from: baseline, to: sample)
+            let tickShare = min(1, BurnRate.quantTick / du)
+            rInst = min(3, r * (1 + (scale - 1) * tickShare))
             applyInstant(rInst, at: sample.at, shortDt: shortDt, longDt: wallDt, tau: tau)
         } else {
             applyInstant(rInst, at: sample.at, shortDt: wallDt, longDt: wallDt, tau: tau)

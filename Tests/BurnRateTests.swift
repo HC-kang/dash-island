@@ -277,6 +277,22 @@ enum BurnRateSuite {
             try assertTrue(r.ratio > 0.3, "quant burst should still move short needle, got \(r.ratio)")
         }
 
+        failures += check("steady cruise over 15m polls reads near cruise, not redline") {
+            var s = BurnSmoother()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            var r = BurnRate(ratio: 0, sampleCount: 0)
+            // 5h cruise = 5% per 15 min, integer-% API.
+            for i in 0...3 {
+                r = s.push(BurnSample(
+                    usedFraction: 0.10 + 0.05 * Double(i),
+                    at: t0.addingTimeInterval(Double(i) * 15 * 60),
+                    resetAt: nil,
+                    kind: .fiveHour
+                ))
+            }
+            try assertTrue(r.ratio > 0.9 && r.ratio < 1.6, "cruise should read ~1, got \(r.ratio)")
+        }
+
         failures += check("BurnSmoother resets on large absolute drop") {
             var sm = BurnSmoother()
             let t0 = Date(timeIntervalSince1970: 1_700_000_000)

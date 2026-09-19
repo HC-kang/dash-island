@@ -5,7 +5,7 @@ import Foundation
 ///
 /// Prefers **managed account** project trees under `CLAUDE_CONFIG_DIR` when the
 /// island account owns that folder; falls back to host-wide `~/.claude/projects`
-/// (shared signal) so a normal CLI login still moves the needle.
+/// only for the account that matches the host login (`~/.claude.json`).
 ///
 /// Does **not** touch Keychain or network.
 enum ClaudeActivity {
@@ -42,7 +42,8 @@ enum ClaudeActivity {
     static func recentWeightedTokens(
         window: TimeInterval = defaultWindow,
         now: Date = Date(),
-        configDir: URL? = nil
+        configDir: URL? = nil,
+        hostHome: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Int {
         if let configDir {
             let scoped = recentWeightedTokens(
@@ -51,9 +52,13 @@ enum ClaudeActivity {
                 roots: projectRoots(for: configDir)
             )
             if scoped > 0 { return scoped }
+            // Host logs belong to the host login only — never lift every account's needle.
+            guard let id = AccountUsageReader.identity(provider: "claude", home: configDir),
+                  id == AccountUsageReader.identity(provider: "claude", home: hostHome)
+            else { return 0 }
         }
         // Host-wide fallback (user's normal `claude` without CLAUDE_CONFIG_DIR).
-        return recentWeightedTokens(window: window, now: now, roots: hostProjectRoots())
+        return recentWeightedTokens(window: window, now: now, roots: hostProjectRoots(home: hostHome))
     }
 
     // MARK: - Internals
@@ -96,8 +101,7 @@ enum ClaudeActivity {
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    static func hostProjectRoots() -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    static func hostProjectRoots(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
         return [
             home.appendingPathComponent(".claude/projects", isDirectory: true),
             home.appendingPathComponent(".config/claude/projects", isDirectory: true),

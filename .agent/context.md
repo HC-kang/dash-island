@@ -514,3 +514,25 @@ Fixes:
 - No refresh token / unreadable managed file after a usage 401 now returns `.authRequired` (red "reconnect account"), not a soft "token quiet" string that failureKind classified hard but caption() rendered as token quiet.
 - Trade-off: N accounts expiring together now POST together (previously serialized 15 minutes apart). Acceptable for a handful of accounts; the shared 429 quiet is the backstop.
 - Tests: ClaudeRefreshGate made internal for `runGate()` (per-account spacing, shared 429 quiet, relaunch persistence, caption mapping). 237 Swift checks and build pass.
+
+## Claude needles identical across accounts (2026-09-19)
+
+- Root cause: `ClaudeActivity.recentWeightedTokens` fell back to host `~/.claude/projects` for every account with no recent scoped logs → all Claude accounts got the same live ratio each 60s tick.
+- Fix: host fallback only when the managed `.claude.json` identity (`AccountUsageReader.identity`) equals `~/.claude.json`. Others get API signal only.
+- Codex/Grok/Agy needles are API-only per account (`pushBurn`); no shared source.
+- Pattern: never assign a machine-wide signal to an account without an identity match.
+
+## Quantized burst inflation (2026-09-19)
+
+- Bug: `BurnSmoother.push` scaled the whole %-only jump by `wallDt/5m` → steady 5h cruise over 15m polls (+5%) read 3.0 redline.
+- Fix: inflate only one integer tick (`quantTick` 0.01): `r * (1 + (scale-1) * min(1, tick/du))`. +1%/15m policy unchanged (~0.57); cruise reads ~1.3. Monotonic in du.
+- Decision: needle base = API Δ (all vendors); Claude local logs = fast assist only for identity-matched account. Do not shorten Claude polling (5 accounts, 429 → 2h cooldown).
+- Background poll is fixed 15m (`backgroundPollSeconds`); context Task 5 "5/15/30 user interval" note is stale.
+
+## Rings blank when 5h = 0% (2026-09-19)
+
+- Symptom: Claude accounts with 5h 0% showed empty weekly/Fable rings although `lastGood` had 79% / 100%.
+- Root cause 1: `GaugeRingView` read `drawn*` ring @State only inside the Canvas closure → state change did not invalidate the view. Fix: read them in `body` and pass `DrawnRings` into `drawUsageRings`.
+- Root cause 2: old-style `onChange(of:) { _ in }` closures captured the previous inputs → late data applied stale values. Fix: one `onChange` over `DrawnRings`, use the delivered value.
+- Why a non-zero primary masked it is not understood; do not rely on it.
+- Check: `scripts/check-ring-zero-primary.sh` (fails without fix). Pattern: SwiftUI state used by Canvas must be read in `body`.
