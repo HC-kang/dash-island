@@ -24,6 +24,8 @@ struct IslandRootView: View {
     private let bodyOutset: CGFloat = 1.0
     /// Match add-rail dwell philosophy — intentional expand, not mouse graze.
     private let expandRefreshDwellNs: UInt64 = 400_000_000
+    /// Re-ask while the island stays open. `expandInterval` is the real gate.
+    private let expandRefreshRepeatNs: UInt64 = 60_000_000_000
     /// Expanded shell tuck-away before window shrinks to compact.
     private let collapseShellNs: UInt64 = 200_000_000
 
@@ -340,13 +342,20 @@ struct IslandRootView: View {
         }
     }
 
-    /// After expand settles, ask orchestrator for a lazy refresh (debounced + minPoll).
+    /// While expanded, keep asking the orchestrator for a lazy refresh.
+    ///
+    /// This used to fire once per compact→expanded transition, so watching the
+    /// island for twenty minutes produced exactly one refresh. The orchestrator
+    /// still debounces every call by `expandInterval`, so the extra ticks cost
+    /// nothing when nothing is due. Collapse cancels the task.
     private func scheduleExpandRefresh() {
         expandRefreshTask?.cancel()
         expandRefreshTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: expandRefreshDwellNs)
-            guard !Task.isCancelled, model.state == .expanded else { return }
-            orchestrator.onIslandExpanded()
+            while !Task.isCancelled, model.state == .expanded {
+                orchestrator.onIslandExpanded()
+                try? await Task.sleep(nanoseconds: expandRefreshRepeatNs)
+            }
         }
     }
 }

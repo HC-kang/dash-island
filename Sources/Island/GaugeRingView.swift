@@ -11,6 +11,9 @@ import SwiftUI
 /// No strobe, bounce, or rainbow — continuous energy only.
 struct GaugeRingView: View {
     var primaryFraction: Double
+    /// Estimated end of the primary ring between API samples. Drawn as a faint,
+    /// hollow extension so an estimate never reads as a vendor measurement.
+    var projectedPrimaryFraction: Double? = nil
     var secondaryFraction: Double?
     /// Optional third concentric ring (Fable / Codex model limit).
     var tertiaryFraction: Double? = nil
@@ -23,6 +26,8 @@ struct GaugeRingView: View {
 
     /// Drawn values (spring toward targets).
     @State private var drawnPrimary: Double = 0
+    @State private var drawnProjected: Double = 0
+    @State private var drawnHasProjected: Bool = false
     @State private var drawnSecondary: Double = 0
     @State private var drawnTertiary: Double = 0
     @State private var drawnHasSecondary: Bool = false
@@ -55,6 +60,7 @@ struct GaugeRingView: View {
         // does not invalidate the view, so rings stayed blank (5h at 0%).
         let rings = DrawnRings(
             primary: drawnPrimary,
+            projected: drawnHasProjected ? drawnProjected : nil,
             secondary: drawnHasSecondary ? drawnSecondary : nil,
             tertiary: drawnHasTertiary ? drawnTertiary : nil
         )
@@ -116,6 +122,7 @@ struct GaugeRingView: View {
         // Use the delivered value — this closure captures the previous inputs.
         .onChange(of: DrawnRings(
             primary: primaryFraction,
+            projected: projectedPrimaryFraction,
             secondary: secondaryFraction,
             tertiary: tertiaryFraction
         )) { applyRingTargets($0, animated: didAppear) }
@@ -133,8 +140,10 @@ struct GaugeRingView: View {
         // Always mount at rest — if we snap to target, expand feels static.
         drawnBurn = 0
         drawnPrimary = 0
+        drawnProjected = 0
         drawnSecondary = 0
         drawnTertiary = 0
+        drawnHasProjected = projectedPrimaryFraction != nil
         drawnHasSecondary = secondaryFraction != nil
         drawnHasTertiary = tertiaryFraction != nil
         didAppear = false
@@ -150,19 +159,27 @@ struct GaugeRingView: View {
 
     private struct DrawnRings: Equatable {
         var primary: Double
+        var projected: Double?
         var secondary: Double?
         var tertiary: Double?
     }
 
     private var currentTargets: DrawnRings {
-        DrawnRings(primary: primaryFraction, secondary: secondaryFraction, tertiary: tertiaryFraction)
+        DrawnRings(
+            primary: primaryFraction,
+            projected: projectedPrimaryFraction,
+            secondary: secondaryFraction,
+            tertiary: tertiaryFraction
+        )
     }
 
     private func applyRingTargets(_ target: DrawnRings, animated: Bool) {
         let update = {
             drawnPrimary = target.primary
+            drawnProjected = target.projected ?? 0
             drawnSecondary = target.secondary ?? 0
             drawnTertiary = target.tertiary ?? 0
+            drawnHasProjected = target.projected != nil
             drawnHasSecondary = target.secondary != nil
             drawnHasTertiary = target.tertiary != nil
         }
@@ -375,6 +392,18 @@ struct GaugeRingView: View {
                        color: brand, lineWidth: stroke)
         }
 
+        // Estimated extension (local captured calls, not a vendor reading).
+        // Half opacity and a thinner stroke keep it visibly subordinate to the
+        // measured arc. Works in either direction so Remaining mode reads right.
+        if let projected = rings.projected {
+            let q = clamped(projected)
+            if abs(q - p) > 0.0005 {
+                strokeArc(context: context, center: center, radius: outerR,
+                          from: min(p, q), to: max(p, q),
+                          color: brand.opacity(0.34), lineWidth: stroke * 0.62)
+            }
+        }
+
         // Mid cool steel (secondary — weekly).
         if (rings.secondary != nil) {
             let s = clamped((rings.secondary ?? 0))
@@ -480,6 +509,34 @@ struct GaugeRingView: View {
     /// Back-compat for tests / call sites that still pass burn into the old helper.
     static func needleJitterDegrees(burn: Double, at date: Date, phaseOffset: TimeInterval = 0) -> Double {
         BurnMotion.needleJitterDegrees(ratio: burn, at: date, phaseOffset: phaseOffset)
+    }
+
+    /// Partial arc between two fractions of the same ring (12 o'clock origin).
+    private func strokeArc(
+        context: GraphicsContext,
+        center: CGPoint,
+        radius: CGFloat,
+        from: Double,
+        to: Double,
+        color: Color,
+        lineWidth: CGFloat
+    ) {
+        let a = clamped(from)
+        let b = clamped(to)
+        guard b > a else { return }
+        var path = Path()
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: Angle.degrees(-90 + 360 * a),
+            endAngle: Angle.degrees(-90 + 360 * b),
+            clockwise: false
+        )
+        context.stroke(
+            path,
+            with: .color(color),
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+        )
     }
 
     private func strokeRing(

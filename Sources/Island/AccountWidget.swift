@@ -34,6 +34,7 @@ struct AccountWidget: View {
                 ZStack {
                     GaugeRingView(
                         primaryFraction: model.primaryFraction,
+                        projectedPrimaryFraction: model.projectedPrimaryFraction,
                         secondaryFraction: model.secondaryFraction,
                         tertiaryFraction: model.tertiaryFraction,
                         centerPercent: model.centerPercent,

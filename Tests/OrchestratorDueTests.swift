@@ -184,8 +184,22 @@ enum OrchestratorDueSuite {
             )
         }
 
-        failures += check("background poll fixed at 15m") {
+        failures += check("idle 15m, busy 1m, and a busy account still clears its floor") {
             try assertEqual(UsageOrchestrator.backgroundPollSeconds, 15 * 60, accuracy: 0)
+            try assertEqual(UsageOrchestrator.activePollSeconds, 60, accuracy: 0)
+            // The vendor floor is the hard limit; the active interval never beats it.
+            let grokFloor = TimeInterval(VendorRegistry.adapter(for: "grok")?.minPollSeconds ?? 0)
+            try assertEqual(
+                max(UsageOrchestrator.activePollSeconds, grokFloor),
+                300,
+                accuracy: 0
+            )
+            let claudeFloor = TimeInterval(VendorRegistry.adapter(for: "claude")?.minPollSeconds ?? 0)
+            try assertEqual(
+                max(UsageOrchestrator.activePollSeconds, claudeFloor),
+                60,
+                accuracy: 0
+            )
         }
 
         failures += check("expand interval floors at 120s and respects minPoll") {
@@ -194,7 +208,7 @@ enum OrchestratorDueSuite {
             try assertEqual(UsageOrchestrator.expandInterval(minPoll: 120), 120, accuracy: 0)
         }
 
-        failures += check("budget caption mentions 15m background") {
+        failures += check("budget caption states the busy worst case and the idle rate") {
             let a = Account(
                 id: UUID(),
                 vendorID: "claude",
@@ -205,7 +219,9 @@ enum OrchestratorDueSuite {
                 lastAuthenticatedAt: nil
             )
             let cap = UsageOrchestrator.estimateBudgetCaption(accounts: [a])
-            try assertTrue(cap.contains("15m"), "got \(cap)")
+            try assertTrue(cap.contains("15m idle"), "got \(cap)")
+            // One Claude account at the 60s floor is 60 calls/h at worst.
+            try assertTrue(cap.contains("≤60"), "got \(cap)")
         }
 
         failures += check("AccountHealth: ok / warn / error mapping") {
@@ -268,24 +284,39 @@ enum OrchestratorDueSuite {
             try assertTrue(snap.summary.contains("All Systems Operational"))
         }
 
-        failures += check("rateLimitWait local backoff caps at 6h; vendor Retry-After may exceed") {
+        failures += check("rateLimitWait doubles from 15m; vendor Retry-After honoured") {
             let now = Date(timeIntervalSince1970: 1_700_000_000)
-            // streak 1 → 2h local
+            // First 429 costs 15m, not the old 2h blackout.
             try assertEqual(
                 UsageOrchestrator.rateLimitWait(streak: 1, retryAfter: nil, now: now),
-                2 * 3600,
+                15 * 60,
                 accuracy: 0.001
             )
-            // streak 3 → 6h local cap
+            // Repeats double: 30m, 1h, 2h, 4h.
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(streak: 2, retryAfter: nil, now: now),
+                30 * 60,
+                accuracy: 0.001
+            )
             try assertEqual(
                 UsageOrchestrator.rateLimitWait(streak: 3, retryAfter: nil, now: now),
-                6 * 3600,
+                3600,
                 accuracy: 0.001
             )
-            // streak 10 still 6h (local cap)
             try assertEqual(
                 UsageOrchestrator.rateLimitWait(streak: 10, retryAfter: nil, now: now),
-                6 * 3600,
+                4 * 3600,
+                accuracy: 0.001
+            )
+            // A first 429 that names its own window is taken at face value, even
+            // when that is shorter than the local floor.
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(
+                    streak: 1,
+                    retryAfter: now.addingTimeInterval(90),
+                    now: now
+                ),
+                90,
                 accuracy: 0.001
             )
             // Vendor Retry-After of 8h is authoritative and may exceed the 6h local cap.
@@ -294,6 +325,139 @@ enum OrchestratorDueSuite {
                 UsageOrchestrator.rateLimitWait(streak: 1, retryAfter: eightHours, now: now),
                 8 * 3600,
                 accuracy: 0.001
+            )
+            // Once we are in a streak the local backoff still wins over a short ask.
+            try assertEqual(
+                UsageOrchestrator.rateLimitWait(
+                    streak: 4,
+                    retryAfter: now.addingTimeInterval(60),
+                    now: now
+                ),
+                2 * 3600,
+                accuracy: 0.001
+            )
+        }
+
+        failures += check("cadence follows activity, not the clock") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            let fast = UsageOrchestrator.activePollSeconds
+            let slow = UsageOrchestrator.backgroundPollSeconds
+
+            // Nothing known, nothing moving → idle.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: nil, lastPrimaryDelta: nil,
+                    windowResetAt: nil, now: now
+                ),
+                slow, accuracy: 0
+            )
+            // Captured calls since the last sample → busy.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0.02, lastPrimaryDelta: 0,
+                    windowResetAt: nil, now: now
+                ),
+                fast, accuracy: 0
+            )
+            // No telemetry at all, but the API jumped → still busy.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0.02,
+                    windowResetAt: nil, now: now
+                ),
+                fast, accuracy: 0
+            )
+            // A sub-threshold step is noise, not activity.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0.001,
+                    windowResetAt: nil, now: now
+                ),
+                slow, accuracy: 0
+            )
+            // Just after a rollover we look again, so a full ring does not linger.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: now.addingTimeInterval(-30), now: now
+                ),
+                fast, accuracy: 0
+            )
+            // Well past the rollover, an idle account is idle again.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: now.addingTimeInterval(-UsageOrchestrator.postResetGrace - 60),
+                    now: now
+                ),
+                slow, accuracy: 0
+            )
+            // A rollover still ahead of us changes nothing.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: now.addingTimeInterval(600), now: now
+                ),
+                slow, accuracy: 0
+            )
+        }
+
+        failures += check("scheduler ticks far below the poll interval") {
+            // A tick equal to the interval skipped every other slot, because the
+            // lastFetch stamp lands after the HTTP round trip.
+            // Must beat the *shortest* interval, not just the idle one.
+            try assertTrue(
+                UsageOrchestrator.schedulerTickSeconds < UsageOrchestrator.activePollSeconds
+            )
+            try assertTrue(
+                UsageOrchestrator.schedulerTickSeconds < UsageOrchestrator.backgroundPollSeconds
+            )
+            let tick = UsageOrchestrator.schedulerTickSeconds
+            let interval = UsageOrchestrator.activePollSeconds
+            let minPoll: TimeInterval = 60
+            // Walk real ticks: a 0.4s fetch must not push the account a whole slot.
+            var lastFetch = Date(timeIntervalSince1970: 1_700_000_000)
+            var fired = 0
+            for step in 1...Int(interval * 2 / tick) {
+                let now = lastFetch.addingTimeInterval(tick * Double(step))
+                if UsageOrchestrator.isDue(
+                    lastFetch: lastFetch,
+                    now: now,
+                    userInterval: interval,
+                    minPoll: minPoll
+                ) {
+                    fired += 1
+                    lastFetch = now.addingTimeInterval(0.4)
+                    break
+                }
+            }
+            try assertEqual(fired, 1)
+        }
+
+        failures += check("freshness line shows age and marks an estimate") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try assertEqual(
+                UsageOrchestrator.formatFreshnessLine(
+                    lastSuccessAt: now.addingTimeInterval(-180),
+                    projectedUsedFraction: nil,
+                    now: now
+                ),
+                "checked 3m ago"
+            )
+            try assertEqual(
+                UsageOrchestrator.formatFreshnessLine(
+                    lastSuccessAt: now.addingTimeInterval(-60),
+                    projectedUsedFraction: 0.86,
+                    now: now
+                ),
+                "checked 1m ago · ≈86% est. from local calls"
+            )
+            try assertTrue(
+                UsageOrchestrator.formatFreshnessLine(
+                    lastSuccessAt: nil,
+                    projectedUsedFraction: 0.5,
+                    now: now
+                ) == nil
             )
         }
 

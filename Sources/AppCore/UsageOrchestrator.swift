@@ -17,16 +17,35 @@ final class UsageOrchestrator: ObservableObject {
         preferences: .shared
     )
 
-    /// Fixed background cadence (Orca-aligned, Claude-friendly).
+    /// Background cadence for an account that is **not** burning. A quiet account's
+    /// percentage does not move, so asking more often buys nothing and only spends
+    /// request budget we want available for the accounts that are moving.
     nonisolated static let backgroundPollSeconds: TimeInterval = 15 * 60
+    /// Background cadence for an account with captured activity since its last
+    /// sample, or one that just jumped. Five-hour utilization can climb tens of
+    /// percent in minutes, so a flat 15m is useless exactly when it matters.
+    /// The vendor's own `minPollSeconds` is still the hard floor.
+    nonisolated static let activePollSeconds: TimeInterval = 60
+    /// Primary-window movement that counts as "this account is burning" even when
+    /// no telemetry reached the collector (web use, or a process that predates it).
+    nonisolated static let activeDeltaThreshold = 0.01
+    /// Poll again soon after a window rolls over, so a full ring does not sit at
+    /// 100% for a whole idle interval after it has actually reset.
+    nonisolated static let postResetGrace: TimeInterval = 120
+    /// Scheduler tick. Deliberately shorter than the shortest poll interval —
+    /// `isDue` enforces the real per-account spacing. A tick equal to the interval
+    /// aliased to ~2×: `lastFetchAt` is stamped *after* the HTTP round trip, so the
+    /// next tick was always a few hundred ms early and skipped the account.
+    nonisolated static let schedulerTickSeconds: TimeInterval = 20
     /// Expand/lazy floor — never more often than this even if minPoll is lower.
     nonisolated static let expandDebounceFloor: TimeInterval = 120
     /// Max concurrent vendor HTTP fetches (multi-account spike control).
     nonisolated static let maxFetchConcurrency = 2
-    /// Default HTTP 429 / OAuth-refresh throttle when the vendor omits Retry-After.
-    /// Prefer a long quiet window over thrashing Anthropic/OpenAI token endpoints —
-    /// short cooldowns just re-429 and keep the chip red all day.
-    nonisolated static let rateLimitCooldown: TimeInterval = 2 * 60 * 60
+    /// First local quiet window after a 429 when the vendor omits Retry-After.
+    /// Was 2h, which turned a single usage 429 into a 2h blackout and forced the
+    /// whole product to poll slowly. The streak below is the multiplicative half
+    /// of the backoff; a success clears it (`apply`), which is the additive half.
+    nonisolated static let rateLimitCooldown: TimeInterval = 15 * 60
     /// Cap for *local* streak backoff (2h/4h/6h). Vendor Retry-After may exceed this.
     nonisolated static let rateLimitCooldownMax: TimeInterval = 6 * 60 * 60
     /// After auth failure, back off so we do not 401-spam overnight.
@@ -72,6 +91,13 @@ final class UsageOrchestrator: ObservableObject {
     private var rateLimitStreak: [AccountID: Int] = [:]
     /// Soft notices (token expiring soon).
     private var lastNotice: [AccountID: String] = [:]
+    /// Between-poll ring extension learned from captured local spend.
+    private var projectionByAccount: [AccountID: UsageProjection] = [:]
+    /// Cached collector identity per account (file read, not per tick).
+    private var projectionIdentity: [AccountID: String] = [:]
+    /// Primary-window movement between the last two API samples. Keeps a burning
+    /// account fast even when the collector never saw its calls.
+    private var lastPrimaryDelta: [AccountID: Double] = [:]
 
     private var timer: Timer?
     /// Local-only Claude needle tick (no network).
@@ -251,9 +277,13 @@ final class UsageOrchestrator: ObservableObject {
         retryAfter: Date?,
         now: Date
     ) -> TimeInterval {
-        let backoff = rateLimitCooldown * Double(min(streak, 3))
-        let local = min(rateLimitCooldownMax, max(rateLimitCooldown, backoff))
         let vendor = retryAfter.map { $0.timeIntervalSince(now) } ?? 0
+        // First 429 with an explicit Retry-After: the vendor knows its own window.
+        if streak <= 1, vendor > 0 { return max(60, vendor) }
+        // Repeats double: 15m, 30m, 1h, 2h, 4h — capped locally, never below the
+        // vendor's own ask.
+        let steps = max(0, min(streak, 5) - 1)
+        let local = min(rateLimitCooldownMax, rateLimitCooldown * pow(2, Double(steps)))
         return max(60, max(local, vendor))
     }
 
@@ -261,7 +291,7 @@ final class UsageOrchestrator: ObservableObject {
 
     private func rescheduleTimer() {
         timer?.invalidate()
-        let seconds = Self.backgroundPollSeconds
+        let seconds = Self.schedulerTickSeconds
         let t = Timer(timeInterval: max(1, seconds), repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.pollDueAccounts(mode: .background)
@@ -276,6 +306,7 @@ final class UsageOrchestrator: ObservableObject {
         let t = Timer(timeInterval: Self.localBurnSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.sampleLocalBurnActivity()
+                await self?.refreshProjections()
             }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -368,6 +399,9 @@ final class UsageOrchestrator: ObservableObject {
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
         rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
+        projectionByAccount = projectionByAccount.filter { live.contains($0.key) }
+        projectionIdentity = projectionIdentity.filter { live.contains($0.key) }
+        lastPrimaryDelta = lastPrimaryDelta.filter { live.contains($0.key) }
     }
 
     /// Reload error-free rings from disk so restart + soft quiet keeps gauges.
@@ -467,7 +501,7 @@ final class UsageOrchestrator: ObservableObject {
             case .background:
                 interval = inactive
                     ? max(Self.backgroundPollSeconds, Self.inactivePollFloor)
-                    : Self.backgroundPollSeconds
+                    : backgroundInterval(for: account, now: now)
             case .expand:
                 // Expand is lazy refresh — still respect rate-limit quiet windows
                 // (do not let hover thrash OAuth token endpoints).
@@ -606,9 +640,146 @@ final class UsageOrchestrator: ObservableObject {
             if lastGood[accountID] == nil { lastGood[accountID] = snapshot }
             return
         }
+        if let previous = lastGood[accountID],
+           previous.primary.resetAt == snapshot.primary.resetAt
+        {
+            lastPrimaryDelta[accountID] = max(
+                0,
+                snapshot.primary.usedFraction - previous.primary.usedFraction
+            )
+        } else {
+            lastPrimaryDelta[accountID] = 0
+        }
         lastGood[accountID] = snapshot
         persistLastGood(accountID: accountID, snapshot: snapshot)
         pushBurn(accountID: accountID, snapshot: snapshot)
+        anchorProjection(accountID: accountID, snapshot: snapshot, now: now)
+    }
+
+    /// Background spacing for one account: fast while it burns or just after its
+    /// window rolls over, slow while it sits still.
+    ///
+    /// Two independent activity signals, because neither alone is complete —
+    /// captured calls are accurate but blind to web use and to processes that
+    /// predate telemetry, while the last API step is always available but one
+    /// sample behind.
+    nonisolated static func backgroundInterval(
+        spentSinceAnchor: Double?,
+        lastPrimaryDelta: Double?,
+        windowResetAt: Date?,
+        now: Date
+    ) -> TimeInterval {
+        if let windowResetAt, now >= windowResetAt,
+           now.timeIntervalSince(windowResetAt) <= postResetGrace
+        {
+            return activePollSeconds
+        }
+        if let spentSinceAnchor, spentSinceAnchor > 0 { return activePollSeconds }
+        if let lastPrimaryDelta, lastPrimaryDelta >= activeDeltaThreshold { return activePollSeconds }
+        return backgroundPollSeconds
+    }
+
+    private func backgroundInterval(for account: Account, now: Date) -> TimeInterval {
+        Self.backgroundInterval(
+            spentSinceAnchor: projectionByAccount[account.id]?.spentSinceAnchor,
+            lastPrimaryDelta: lastPrimaryDelta[account.id],
+            windowResetAt: lastGood[account.id]?.primary.resetAt,
+            now: now
+        )
+    }
+
+    // MARK: - Between-poll projection
+
+    /// Vendors whose completed calls the collector records per account identity.
+    /// Grok and Antigravity have folder scopes only — never project from those.
+    nonisolated static let projectableVendors: Set<VendorID> = ["claude", "codex"]
+
+    /// A fresh API sample is the truth. Re-anchor on it and drop whatever we drew.
+    private func anchorProjection(accountID: AccountID, snapshot: UsageSnapshot, now: Date) {
+        guard let account = accountStore.accounts.first(where: { $0.id == accountID }),
+              Self.projectableVendors.contains(account.vendorID)
+        else { return }
+        var projection = projectionByAccount[accountID] ?? UsageProjection()
+        projection.anchor(
+            fraction: snapshot.primary.usedFraction,
+            resetAt: snapshot.primary.resetAt,
+            at: now
+        )
+        projectionByAccount[accountID] = projection
+    }
+
+    /// Fit any pending rate, then extend each ring by the spend captured since its
+    /// anchor. All SQLite work happens off the main actor.
+    private func refreshProjections() async {
+        guard !systemAsleep else { return }
+        let targets = accountStore.accounts.filter {
+            Self.projectableVendors.contains($0.vendorID) && projectionByAccount[$0.id] != nil
+        }
+        guard !targets.isEmpty else { return }
+
+        let now = Date()
+        var queries: [(id: AccountID, provider: VendorID, identity: String, learnFrom: Date?, anchorAt: Date)] = []
+        for account in targets {
+            guard let projection = projectionByAccount[account.id] else { continue }
+            let identity: String
+            if let cached = projectionIdentity[account.id] {
+                identity = cached
+            } else if let resolved = AccountUsageReader.identity(
+                provider: account.vendorID,
+                home: CredentialStore.directoryURL(for: account.credentialRef)
+            ) {
+                projectionIdentity[account.id] = resolved
+                identity = resolved
+            } else {
+                continue
+            }
+            queries.append((
+                id: account.id,
+                provider: account.vendorID,
+                identity: identity,
+                learnFrom: projection.pendingPreviousAt,
+                anchorAt: projection.anchorAt
+            ))
+        }
+        guard !queries.isEmpty else { return }
+
+        let reads = await Task.detached(priority: .utility) { () -> [AccountID: (learn: Double?, since: Double?)] in
+            var out: [AccountID: (learn: Double?, since: Double?)] = [:]
+            for query in queries {
+                let learn = query.learnFrom.flatMap {
+                    AccountUsageReader.capturedDollars(
+                        provider: query.provider,
+                        identity: query.identity,
+                        from: $0,
+                        to: query.anchorAt
+                    )
+                }
+                let since = AccountUsageReader.capturedDollars(
+                    provider: query.provider,
+                    identity: query.identity,
+                    from: query.anchorAt,
+                    to: now
+                )
+                out[query.id] = (learn: learn, since: since)
+            }
+            return out
+        }.value
+
+        var changed = false
+        for (id, read) in reads {
+            guard var projection = projectionByAccount[id] else { continue }
+            if let learn = read.learn { projection.learn(dollarsBetween: learn) }
+            let before = projection.projected
+            let wasBurning = projection.spentSinceAnchor > 0
+            projection.spentSinceAnchor = read.since ?? 0
+            if !wasBurning, projection.spentSinceAnchor > 0 { changed = true }
+            projection.projected = read.since.flatMap {
+                projection.projectedFraction(spentSinceAnchor: $0, now: now)
+            }
+            projectionByAccount[id] = projection
+            if abs((projection.projected ?? 0) - (before ?? 0)) > 1e-6 { changed = true }
+        }
+        if changed { rebuildWidgets() }
     }
 
     // MARK: - View models
@@ -632,7 +803,6 @@ final class UsageOrchestrator: ObservableObject {
 
     private func rebuildFetchStatuses() {
         let now = Date()
-        let bg = Self.backgroundPollSeconds
         fetchStatuses = accountStore.accounts.map { account in
             let attempt = lastFetchAt[account.id]
             let success = lastSuccessAt[account.id]
@@ -660,7 +830,7 @@ final class UsageOrchestrator: ObservableObject {
             let minPoll = TimeInterval(
                 VendorRegistry.adapter(for: account.vendorID)?.minPollSeconds ?? 300
             )
-            let interval = max(bg, minPoll)
+            let interval = max(backgroundInterval(for: account, now: now), minPoll)
             let nextDue: Date?
             if let cool, cool > now {
                 nextDue = cool
@@ -684,19 +854,19 @@ final class UsageOrchestrator: ObservableObject {
         budgetCaption = Self.estimateBudgetCaption(accounts: accountStore.accounts)
     }
 
-    /// Rough upper bound for **background** traffic only (expand is extra, on demand).
+    /// Rough **worst case** for background traffic: every account burning at once.
+    /// Idle accounts cost a fifteenth of this, and expand is extra, on demand.
     nonisolated static func estimateBudgetCaption(accounts: [Account]) -> String {
         guard !accounts.isEmpty else { return "" }
         var perHour = 0.0
-        let bg = backgroundPollSeconds
         for account in accounts {
             let minPoll = Double(VendorRegistry.adapter(for: account.vendorID)?.minPollSeconds ?? 300)
-            let interval = max(bg, minPoll)
+            let interval = max(activePollSeconds, minPoll)
             let weight = account.vendorID == "grok" ? 1.15 : 1.0
             perHour += weight * (3600.0 / interval)
         }
         let n = Int(perHour.rounded(.up))
-        return "~\(n) API calls/h bg · 15m · expand refreshes stale · \(accounts.count) acct"
+        return "≤\(n) API calls/h all busy · 1m busy / 15m idle · \(accounts.count) acct"
     }
 
     private func makeViewModel(
@@ -743,6 +913,9 @@ final class UsageOrchestrator: ObservableObject {
         let successAt = lastSuccessAt[account.id]
         let cool = cooldownUntil[account.id]
         let retryAt = cool.flatMap { $0 > Date() ? $0 : nil }
+        // Only extend a ring we actually have. A skeleton must stay a skeleton.
+        let projectedUsed = awaiting ? nil : projectionByAccount[account.id]?.projected
+        let projected = projectedUsed.map { Self.displayFraction(used: $0, mode: mode) }
 
         return WidgetViewModel(
             usageSnapshot: snap,
@@ -771,7 +944,9 @@ final class UsageOrchestrator: ObservableObject {
             retryAt: retryAt,
             isAwaitingFirstSample: awaiting,
             health: healthPair.health,
-            healthTooltip: healthPair.tooltip
+            healthTooltip: healthPair.tooltip,
+            projectedPrimaryFraction: projected,
+            projectedUsedFraction: projectedUsed
         )
     }
 
@@ -942,6 +1117,21 @@ final class UsageOrchestrator: ObservableObject {
         if days > 0 { return "\(days)d" }
         if hours > 0 { return "\(hours)h" }
         return "\(mins)m"
+    }
+
+    /// Freshness line for a healthy widget. Without this a 14-minute-old ring and
+    /// a one-second-old ring look identical, which is what made the numbers feel
+    /// wrong long before the poll interval was the suspect.
+    nonisolated static func formatFreshnessLine(
+        lastSuccessAt: Date?,
+        projectedUsedFraction: Double?,
+        now: Date = Date()
+    ) -> String? {
+        guard let lastSuccessAt else { return nil }
+        let age = formatAgeAgo(since: lastSuccessAt, now: now)
+        guard let projectedUsedFraction else { return "checked \(age)" }
+        let percent = Int((min(1, max(0, projectedUsedFraction)) * 100).rounded())
+        return "checked \(age) · ≈\(percent)% est. from local calls"
     }
 
     /// Timing lines for error tips: checked / retry / last ok.

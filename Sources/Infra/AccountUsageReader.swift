@@ -36,6 +36,50 @@ enum AccountUsageReader {
         return .init(events: result.accounts[identity] ?? [], notice: result.notice)
     }
 
+    /// Captured spend for one identity in a half-open range, or nil when the
+    /// database is missing or unreadable. Kept as a single indexed SUM because the
+    /// between-poll projection calls it on every scheduler tick — never reuse the
+    /// 30-day event read for that.
+    ///
+    /// Rows the collector stored without a price are skipped, so this is a lower
+    /// bound. The projection depends on that being a lower bound, not an estimate.
+    static func capturedDollars(
+        provider: String,
+        identity: String,
+        from: Date,
+        to: Date,
+        directory: URL = directory
+    ) -> Double? {
+        guard to > from else { return 0 }
+        let file = directory.appendingPathComponent("account-usage.sqlite")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        var pointer: OpaquePointer?
+        guard sqlite3_open_v2(file.path, &pointer, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+              let db = pointer else {
+            if let pointer { sqlite3_close(pointer) }
+            return nil
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 500)
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT SUM(dollars) FROM usage_events
+        WHERE provider=? AND identity=? AND timestamp>? AND timestamp<=? AND dollars IS NOT NULL
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return nil }
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, provider, -1, transient)
+        sqlite3_bind_text(statement, 2, identity, -1, transient)
+        sqlite3_bind_double(statement, 3, from.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 4, to.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        if sqlite3_column_type(statement, 0) == SQLITE_NULL { return 0 }
+        let total = sqlite3_column_double(statement, 0)
+        guard total.isFinite, total >= 0 else { return nil }
+        return total
+    }
+
     // Read all identities in one SQLite snapshot so account and total views agree.
     static func readAccounts(provider: String, directory: URL = directory,
                              now: Date = Date()) -> (accounts: [String: [LocalUsageEvent]], notice: String?) {
