@@ -62,8 +62,15 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 struct ClaudeAdapter: VendorAdapter {
     let id: VendorID = "claude"
     let displayName = "Claude"
-    /// Claude is heavy on OAuth refresh 429s — poll less often than Codex/Grok.
-    let minPollSeconds = 1_800
+    /// Usage floor for the `oauth/usage` **GET only**.
+    ///
+    /// This was 1_800 to protect `oauth/token` from multi-account 429 storms, but
+    /// a poll almost never touches that endpoint: the access token lives ~8h and
+    /// `fetchUsage` only refreshes when `shouldProactiveRefresh` says so. Refresh
+    /// spacing already has its own gates (`ClaudeRefreshNextAllowedAtByAccount`
+    /// plus the shared `globalRefresh429Quiet`). Tying the GET to them left rings
+    /// ~37m stale, so the two concerns are separated here.
+    let minPollSeconds = 60
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"

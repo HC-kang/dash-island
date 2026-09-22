@@ -151,6 +151,11 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     var health: AccountHealth = .ok
     /// Hover text for the status light.
     var healthTooltip: String = "ok"
+    /// Estimated primary ring end between API samples, after display-mode mapping.
+    /// Drawn as a faint extension, never as the centre number — it is a hint built
+    /// from locally captured calls, not a vendor reading. Nil when we cannot build
+    /// one, which is the normal state right after a poll.
+    var projectedPrimaryFraction: Double? = nil
 
     /// Flat strings for accessibility / demos.
     var hoverLines: [String] {

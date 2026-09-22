@@ -38,6 +38,16 @@ enum AccountHoverTips {
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(Color(white: 0.90))
                 }
+                if let freshness = UsageOrchestrator.formatFreshnessLine(
+                    lastSuccessAt: model.lastSuccessAt,
+                    projectedFraction: model.projectedPrimaryFraction,
+                    now: context.date
+                ) {
+                    Text(freshness)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                        .padding(.top, 2)
+                }
                 Text("Click for details")
                     .font(.system(size: 9))
                     .foregroundStyle(Color.white.opacity(0.45))

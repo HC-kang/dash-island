@@ -10,6 +10,7 @@ struct TestMain {
         failures += IslandClusterLayoutSuite.run()
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
+        failures += UsageProjectionSuite.run()
         failures += ClaudeAdapterSuite.run()
         failures += await ClaudeAdapterSuite.runGate()
         failures += CodexAdapterSuite.run()

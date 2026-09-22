@@ -536,3 +536,24 @@ Fixes:
 - Root cause 2: old-style `onChange(of:) { _ in }` closures captured the previous inputs → late data applied stale values. Fix: one `onChange` over `DrawnRings`, use the delivered value.
 - Why a non-zero primary masked it is not understood; do not rely on it.
 - Check: `scripts/check-ring-zero-primary.sh` (fails without fix). Pattern: SwiftUI state used by Canvas must be read in `body`.
+
+## Usage was 30m stale, not real-time (2026-09-22)
+
+- User report: ring read 80%, a reauth made it 100%. The value never changed — reauth calls `refresh(accountID:)`, which clears `lastFetchAt` + `cooldownUntil` and forces a poll. That was the first fresh read in half an hour.
+- Measured twice on the live app: 13:40:15 → 14:17:57 (37m42s) and 14:17:57 → 14:49:45 (31m48s) between successful Claude reads. A direct `oauth/usage` GET with the same stored token returned 200 during that window, and every access token was valid until 18:16. Nothing failed; the app simply did not ask.
+- Dominant cause: `ClaudeAdapter.minPollSeconds = 1_800`. `isDue` uses `max(userInterval, minPoll)`, so the 15m background setting was dead and expand refresh (`max(120, minPoll)`) was also 30m. The constant's own comment says it existed to protect `oauth/token` from 429 storms — but a poll only touches that endpoint when `shouldProactiveRefresh` fires, and the access token lives ~8h. Refresh spacing already has its own gates (`ClaudeRefreshNextAllowedAtByAccount`, `globalRefresh429Quiet`). The GET was throttled for a problem it does not cause.
+- Secondary cause: the scheduler `Timer` period equalled `backgroundPollSeconds`. `lastFetchAt` is stamped *after* the HTTP round trip, so the next tick was always a few hundred ms early and skipped. Rule: a scheduler tick must be well below the interval it schedules.
+- Third: expand refresh fired once per compact→expanded transition. Watching the island for twenty minutes produced one refresh.
+- Fourth: a healthy widget showed no age at all. `captionSlot` renders only for error/notice, so a 1s-old ring and a 30m-old ring looked identical. That is why the number "felt" wrong long before the interval was suspected.
+
+Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSeconds` 60; expand re-asks every 60s while open; `rateLimitWait` starts at 15m and doubles (was a flat 2h, so one usage 429 cost a 2h blackout) while a first 429's `Retry-After` is taken at face value; freshness line in the usage tip.
+
+## Between-poll projection from captured calls (2026-09-22)
+
+- `Sources/Domain/UsageProjection.swift` — learns primary-window fraction per captured dollar from two consecutive API samples of the same window, then extends the ring by locally captured spend until the next sample. Cost, not tokens: utilization is model- and cache-weighted, and the collector already prices each call.
+- Guards, all deliberate: every API sample re-anchors and drops the drawing; a projection is never persisted to last-good and never feeds burn; it only adds; `maxProjectedGain` 0.25 bounds a bad fit; `minLearnableDelta` 0.02 refuses to divide by one quantum of integer-% noise; window reset clears the rate; pairs older than 2h are not fitted.
+- `AccountUsageReader.capturedDollars(provider:identity:from:to:)` — single SUM, served by the `(provider, identity, event_id)` primary-key index. 15k rows total, a few hundred per identity; no extra index needed.
+- Only `claude` and `codex` project. Grok and Antigravity have folder scopes, not per-account identities — never project from those.
+- Known under-counts, all in the same direction (the projection lags, it cannot overshoot): processes started before telemetry was installed, claude.ai web/mobile use, rows stored without a price. Live check found 0 null-price rows in 6h of Claude data.
+- The estimate is drawn as a faint thin arc past the measured one and labelled in the tip. Never the centre number. Reason: an estimate presented as a reading costs more trust than a stale number does.
+- Pre-existing flake fixed on the way: `ClaudeRefreshGate` dates round-trip through UserDefaults as doubles, so exact `Date` equality in `runGate` failed about one run in three. Compare with tolerance.

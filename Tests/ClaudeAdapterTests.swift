@@ -323,7 +323,9 @@ enum ClaudeAdapterSuite {
         failures += check("registry includes claude") {
             try assertTrue(VendorRegistry.adapter(for: "claude") != nil)
             try assertEqual(VendorRegistry.adapter(for: "claude")?.displayName, "Claude")
-            try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 1_800)
+            // Usage GET floor only. Refresh spacing has its own gates, so tying the
+            // GET to them (the old 1_800) just left rings ~30m stale.
+            try assertEqual(VendorRegistry.adapter(for: "claude")?.minPollSeconds, 60)
         }
         failures += check("hours-dead access still may refresh when refresh_token present") {
             // Was a hard 45m cut — left accounts permanently quiet after 429 windows.
@@ -894,7 +896,13 @@ enum ClaudeAdapterSuite {
         let aAgain = await gate.reserveAttempt(key: "a", gap: 900, now: now.addingTimeInterval(60))
         failures += check("refresh gate spaces each account without starving the others") {
             try assertTrue(a == nil && b == nil, "first attempt per account reserves immediately")
-            try assertEqual(aAgain, now.addingTimeInterval(900))
+            // Gate dates round-trip through UserDefaults as doubles — compare with
+            // tolerance, not identity, or this check flakes about once in three runs.
+            try assertEqual(
+                aAgain?.timeIntervalSince1970 ?? 0,
+                now.addingTimeInterval(900).timeIntervalSince1970,
+                accuracy: 0.001
+            )
         }
         await gate.noteRateLimited(until: now.addingTimeInterval(600), now: now)
         let c = await gate.reserveAttempt(key: "c", gap: 900, now: now)
@@ -902,8 +910,16 @@ enum ClaudeAdapterSuite {
         let bLater = await reloaded.reserveAttempt(key: "b", gap: 900, now: now.addingTimeInterval(700))
         let bOpen = await reloaded.reserveAttempt(key: "b", gap: 900, now: now.addingTimeInterval(901))
         failures += check("token host 429 quiets every account; gate state survives relaunch") {
-            try assertEqual(c, now.addingTimeInterval(600))
-            try assertEqual(bLater, now.addingTimeInterval(900))
+            try assertEqual(
+                c?.timeIntervalSince1970 ?? 0,
+                now.addingTimeInterval(600).timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            try assertEqual(
+                bLater?.timeIntervalSince1970 ?? 0,
+                now.addingTimeInterval(900).timeIntervalSince1970,
+                accuracy: 0.001
+            )
             try assertTrue(bOpen == nil, "account may refresh once its own gap elapsed")
         }
         failures += check("pending refresh is soft with no red caption; only a dead refresh path demands reconnect") {
