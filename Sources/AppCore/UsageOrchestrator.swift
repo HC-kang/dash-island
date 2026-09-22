@@ -46,7 +46,7 @@ final class UsageOrchestrator: ObservableObject {
     /// whole product to poll slowly. The streak below is the multiplicative half
     /// of the backoff; a success clears it (`apply`), which is the additive half.
     nonisolated static let rateLimitCooldown: TimeInterval = 15 * 60
-    /// Cap for *local* streak backoff (2h/4h/6h). Vendor Retry-After may exceed this.
+    /// Cap for *local* streak backoff (15m/30m/1h/2h/4h). Retry-After may exceed it.
     nonisolated static let rateLimitCooldownMax: TimeInterval = 6 * 60 * 60
     /// After auth failure, back off so we do not 401-spam overnight.
     nonisolated static let authFailureCooldown: TimeInterval = 30 * 60
@@ -499,9 +499,7 @@ final class UsageOrchestrator: ObservableObject {
             let interval: TimeInterval
             switch mode {
             case .background:
-                interval = inactive
-                    ? max(Self.backgroundPollSeconds, Self.inactivePollFloor)
-                    : backgroundInterval(for: account, now: now)
+                interval = backgroundInterval(for: account, now: now, screenLocked: inactive)
             case .expand:
                 // Expand is lazy refresh — still respect rate-limit quiet windows
                 // (do not let hover thrash OAuth token endpoints).
@@ -667,6 +665,7 @@ final class UsageOrchestrator: ObservableObject {
         spentSinceAnchor: Double?,
         lastPrimaryDelta: Double?,
         windowResetAt: Date?,
+        screenLocked: Bool,
         now: Date
     ) -> TimeInterval {
         if let windowResetAt, now >= windowResetAt,
@@ -674,16 +673,22 @@ final class UsageOrchestrator: ObservableObject {
         {
             return activePollSeconds
         }
+        // A locked screen does not stop an agent from burning tokens, and this
+        // user's longest runs happen while they are away from the Mac. The
+        // inactive floor is for accounts that are genuinely doing nothing.
         if let spentSinceAnchor, spentSinceAnchor > 0 { return activePollSeconds }
         if let lastPrimaryDelta, lastPrimaryDelta >= activeDeltaThreshold { return activePollSeconds }
-        return backgroundPollSeconds
+        return screenLocked
+            ? max(backgroundPollSeconds, inactivePollFloor)
+            : backgroundPollSeconds
     }
 
-    private func backgroundInterval(for account: Account, now: Date) -> TimeInterval {
+    private func backgroundInterval(for account: Account, now: Date, screenLocked: Bool = false) -> TimeInterval {
         Self.backgroundInterval(
             spentSinceAnchor: projectionByAccount[account.id]?.spentSinceAnchor,
             lastPrimaryDelta: lastPrimaryDelta[account.id],
             windowResetAt: lastGood[account.id]?.primary.resetAt,
+            screenLocked: screenLocked,
             now: now
         )
     }
@@ -770,9 +775,7 @@ final class UsageOrchestrator: ObservableObject {
             guard var projection = projectionByAccount[id] else { continue }
             if let learn = read.learn { projection.learn(dollarsBetween: learn) }
             let before = projection.projected
-            let wasBurning = projection.spentSinceAnchor > 0
             projection.spentSinceAnchor = read.since ?? 0
-            if !wasBurning, projection.spentSinceAnchor > 0 { changed = true }
             projection.projected = read.since.flatMap {
                 projection.projectedFraction(spentSinceAnchor: $0, now: now)
             }
@@ -914,8 +917,8 @@ final class UsageOrchestrator: ObservableObject {
         let cool = cooldownUntil[account.id]
         let retryAt = cool.flatMap { $0 > Date() ? $0 : nil }
         // Only extend a ring we actually have. A skeleton must stay a skeleton.
-        let projectedUsed = awaiting ? nil : projectionByAccount[account.id]?.projected
-        let projected = projectedUsed.map { Self.displayFraction(used: $0, mode: mode) }
+        let projected = (awaiting ? nil : projectionByAccount[account.id]?.projected)
+            .map { Self.displayFraction(used: $0, mode: mode) }
 
         return WidgetViewModel(
             usageSnapshot: snap,
@@ -945,8 +948,7 @@ final class UsageOrchestrator: ObservableObject {
             isAwaitingFirstSample: awaiting,
             health: healthPair.health,
             healthTooltip: healthPair.tooltip,
-            projectedPrimaryFraction: projected,
-            projectedUsedFraction: projectedUsed
+            projectedPrimaryFraction: projected
         )
     }
 
@@ -1122,15 +1124,17 @@ final class UsageOrchestrator: ObservableObject {
     /// Freshness line for a healthy widget. Without this a 14-minute-old ring and
     /// a one-second-old ring look identical, which is what made the numbers feel
     /// wrong long before the poll interval was the suspect.
+    /// `projectedFraction` is already display-mode mapped, so this line agrees with
+    /// the usage rows above it instead of quietly reporting Used inside Remaining.
     nonisolated static func formatFreshnessLine(
         lastSuccessAt: Date?,
-        projectedUsedFraction: Double?,
+        projectedFraction: Double?,
         now: Date = Date()
     ) -> String? {
         guard let lastSuccessAt else { return nil }
         let age = formatAgeAgo(since: lastSuccessAt, now: now)
-        guard let projectedUsedFraction else { return "checked \(age)" }
-        let percent = Int((min(1, max(0, projectedUsedFraction)) * 100).rounded())
+        guard let projectedFraction else { return "checked \(age)" }
+        let percent = Int((min(1, max(0, projectedFraction)) * 100).rounded())
         return "checked \(age) · ≈\(percent)% est. from local calls"
     }
 

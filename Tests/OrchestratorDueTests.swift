@@ -347,7 +347,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: nil, lastPrimaryDelta: nil,
-                    windowResetAt: nil, now: now
+                    windowResetAt: nil, screenLocked: false, now: now
                 ),
                 slow, accuracy: 0
             )
@@ -355,7 +355,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0.02, lastPrimaryDelta: 0,
-                    windowResetAt: nil, now: now
+                    windowResetAt: nil, screenLocked: false, now: now
                 ),
                 fast, accuracy: 0
             )
@@ -363,7 +363,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0, lastPrimaryDelta: 0.02,
-                    windowResetAt: nil, now: now
+                    windowResetAt: nil, screenLocked: false, now: now
                 ),
                 fast, accuracy: 0
             )
@@ -371,7 +371,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0, lastPrimaryDelta: 0.001,
-                    windowResetAt: nil, now: now
+                    windowResetAt: nil, screenLocked: false, now: now
                 ),
                 slow, accuracy: 0
             )
@@ -379,7 +379,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0, lastPrimaryDelta: 0,
-                    windowResetAt: now.addingTimeInterval(-30), now: now
+                    windowResetAt: now.addingTimeInterval(-30), screenLocked: false, now: now
                 ),
                 fast, accuracy: 0
             )
@@ -388,7 +388,7 @@ enum OrchestratorDueSuite {
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0, lastPrimaryDelta: 0,
                     windowResetAt: now.addingTimeInterval(-UsageOrchestrator.postResetGrace - 60),
-                    now: now
+                    screenLocked: false, now: now
                 ),
                 slow, accuracy: 0
             )
@@ -396,9 +396,25 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.backgroundInterval(
                     spentSinceAnchor: 0, lastPrimaryDelta: 0,
-                    windowResetAt: now.addingTimeInterval(600), now: now
+                    windowResetAt: now.addingTimeInterval(600), screenLocked: false, now: now
                 ),
                 slow, accuracy: 0
+            )
+            // A locked screen slows an idle account further …
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: nil, screenLocked: true, now: now
+                ),
+                max(slow, UsageOrchestrator.inactivePollFloor), accuracy: 0
+            )
+            // … but never a burning one. Long agent runs happen while away.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0.05, lastPrimaryDelta: 0,
+                    windowResetAt: nil, screenLocked: true, now: now
+                ),
+                fast, accuracy: 0
             )
         }
 
@@ -439,7 +455,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.formatFreshnessLine(
                     lastSuccessAt: now.addingTimeInterval(-180),
-                    projectedUsedFraction: nil,
+                    projectedFraction: nil,
                     now: now
                 ),
                 "checked 3m ago"
@@ -447,7 +463,7 @@ enum OrchestratorDueSuite {
             try assertEqual(
                 UsageOrchestrator.formatFreshnessLine(
                     lastSuccessAt: now.addingTimeInterval(-60),
-                    projectedUsedFraction: 0.86,
+                    projectedFraction: 0.86,
                     now: now
                 ),
                 "checked 1m ago · ≈86% est. from local calls"
@@ -455,7 +471,7 @@ enum OrchestratorDueSuite {
             try assertTrue(
                 UsageOrchestrator.formatFreshnessLine(
                     lastSuccessAt: nil,
-                    projectedUsedFraction: 0.5,
+                    projectedFraction: 0.5,
                     now: now
                 ) == nil
             )

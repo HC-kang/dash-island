@@ -156,8 +156,6 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     /// from locally captured calls, not a vendor reading. Nil when we cannot build
     /// one, which is the normal state right after a poll.
     var projectedPrimaryFraction: Double? = nil
-    /// Raw estimated used fraction (never flipped by Remaining mode).
-    var projectedUsedFraction: Double? = nil
 
     /// Flat strings for accessibility / demos.
     var hoverLines: [String] {

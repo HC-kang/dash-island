@@ -40,7 +40,7 @@ enum AccountHoverTips {
                 }
                 if let freshness = UsageOrchestrator.formatFreshnessLine(
                     lastSuccessAt: model.lastSuccessAt,
-                    projectedUsedFraction: model.projectedUsedFraction,
+                    projectedFraction: model.projectedPrimaryFraction,
                     now: context.date
                 ) {
                     Text(freshness)

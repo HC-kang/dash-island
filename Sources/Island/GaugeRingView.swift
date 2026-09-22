@@ -392,15 +392,19 @@ struct GaugeRingView: View {
                        color: brand, lineWidth: stroke)
         }
 
-        // Estimated extension (local captured calls, not a vendor reading).
-        // Half opacity and a thinner stroke keep it visibly subordinate to the
-        // measured arc. Works in either direction so Remaining mode reads right.
+        // Estimated segment (local captured calls, not a vendor reading). A thinner,
+        // translucent stroke keeps it visibly subordinate to the measured arc.
+        // Used mode grows the ring, so the estimate is a faint extension past it.
+        // Remaining mode shrinks it, so the same faint brand over an already solid
+        // brand arc would be invisible — paint that direction as erosion instead.
         if let projected = rings.projected {
             let q = clamped(projected)
             if abs(q - p) > 0.0005 {
+                let eroding = q < p
                 strokeArc(context: context, center: center, radius: outerR,
                           from: min(p, q), to: max(p, q),
-                          color: brand.opacity(0.34), lineWidth: stroke * 0.62)
+                          color: eroding ? Color.black.opacity(0.42) : brand.opacity(0.34),
+                          lineWidth: stroke * 0.62)
             }
         }
 
