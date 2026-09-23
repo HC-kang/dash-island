@@ -415,6 +415,37 @@ final class IslandWindowController {
         Log.window.info(
             "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
         )
+        refreshCompactPresence(on: screen)
+    }
+
+    /// Non-notch display in a full-screen space: the handle would float over the
+    /// app's content, so hide it (and its hit area) until the space changes back.
+    /// Notch displays keep the pill — full-screen content sits below the notch there.
+    private func refreshCompactPresence(on screen: NSScreen?) {
+        guard !model.notch.hasNotch, let screen else {
+            model.setCompactHidden(false)
+            return
+        }
+        let own = NSRunningApplication.current.processIdentifier
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        // Bounds and layer only — never window names.
+        let bounds: [CGRect] = windows.compactMap { info in
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowOwnerPID as String] as? pid_t) != own,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary
+            else { return nil }
+            return CGRect(dictionaryRepresentation: dict as CFDictionary)
+        }
+        let hidden = IslandGeometry.hasFullScreenWindow(
+            screenFrame: screen.frame,
+            primaryScreenHeight: NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY,
+            windowBounds: bounds
+        )
+        if hidden != model.compactHidden {
+            Log.window.debug("compact hidden=\(hidden) reason=fullscreen")
+        }
+        model.setCompactHidden(hidden)
     }
 
     /// Pin the fixed canvas window to the physical notch center.

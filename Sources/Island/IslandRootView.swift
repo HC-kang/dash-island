@@ -65,8 +65,9 @@ struct IslandRootView: View {
             // Must not participate in expand/collapse animations — otherwise the
             // notch fill rides the size spring and looks like it bobs vertically.
             compactNotchBase
+                .opacity(model.compactHidden ? 0 : 1)
                 .allowsHitTesting(!showExpandedShell)
-                .accessibilityHidden(showExpandedShell)
+                .accessibilityHidden(showExpandedShell || model.compactHidden)
                 .transaction { $0.animation = nil }
 
             if showExpandedShell {
@@ -171,11 +172,12 @@ struct IslandRootView: View {
     /// Physical-notch cover only. Geometry from `notch` alone — never tracks
     /// expanded panel height, so hover in/out must not move it vertically.
     private var compactNotchBase: some View {
-        let nw = model.notch.width
-        let nh = model.notch.height
-        let bodyW = nw + bodyOutset * 2
-        let bodyH = nh + bodyOutset
-        let radius = cornerRadius(forHeight: bodyH)
+        let notch = model.notch
+        // No notch: a thin top-edge handle, so the menu bar center stays clickable.
+        let handle = IslandGeometry.handleSize
+        let bodyW = notch.hasNotch ? notch.width + bodyOutset * 2 : handle.width
+        let bodyH = notch.hasNotch ? notch.height + bodyOutset : handle.height
+        let radius = notch.hasNotch ? cornerRadius(forHeight: bodyH) : bodyH / 2
 
         return ZStack {
             IslandShape(bottomRadius: radius)
@@ -190,7 +192,7 @@ struct IslandRootView: View {
                 frameInterval: MotionPolicy.rimFrameInterval(
                     motion,
                     expanded: false,
-                    fetching: orchestrator.loading && !showExpandedShell
+                    fetching: orchestrator.loading && !showExpandedShell && !model.compactHidden
                 )
             )
         }

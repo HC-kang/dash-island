@@ -42,7 +42,7 @@ struct NotchInfo: Equatable {
         }
 
         let safeTop = screen.safeAreaInsets.top
-        let visualHeight = menuBarHeight(
+        let visualHeight = IslandGeometry.menuBarHeight(
             safeTop: safeTop,
             visibleFrameDelta: screen.frame.maxY - screen.visibleFrame.maxY,
             statusBarThickness: NSStatusBar.system.thickness
@@ -100,18 +100,5 @@ struct NotchInfo: Equatable {
     /// Window origin X so the window is centered on `anchoredCenterX`.
     func windowOriginX(windowWidth: CGFloat) -> CGFloat {
         anchoredCenterX - windowWidth / 2
-    }
-
-    static func menuBarHeight(
-        safeTop: CGFloat,
-        visibleFrameDelta: CGFloat,
-        statusBarThickness: CGFloat
-    ) -> CGFloat {
-        let fromVisibleFrame = visibleFrameDelta - 1
-        if fromVisibleFrame > 0 {
-            return safeTop > 0 ? min(fromVisibleFrame, safeTop) : fromVisibleFrame
-        }
-        if safeTop > 0 { return safeTop }
-        return statusBarThickness > 0 ? statusBarThickness : 24
     }
 }

@@ -11,9 +11,9 @@ struct AddRail: View {
     @State private var openTask: Task<Void, Never>?
     @State private var closeTask: Task<Void, Never>?
 
-    static let chevronWidth: CGFloat = 16
+    static let chevronWidth: CGFloat = IslandGeometry.addChevronWidth
     /// ~⅓ of a 100pt slot — narrow dashed chassis for the add pocket.
-    static let railWidth: CGFloat = 36
+    static let railWidth: CGFloat = IslandGeometry.addRailWidth
     static var totalExpandedWidth: CGFloat { chevronWidth + railWidth }
 
     private static let dwellNanos: UInt64 = 500_000_000
