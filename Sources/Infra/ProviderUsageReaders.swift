@@ -4,15 +4,16 @@ import Foundation
 import SQLite3
 
 enum GrokUsageReader {
-    static func read(_ file: URL) throws -> LocalUsageReader.Result {
+    /// `start > 0` resumes an append-only log after lines already read.
+    static func read(_ file: URL, from start: Int = 0) throws -> LocalUsageReader.Result {
         var events: [String: LocalUsageEvent] = [:]
         var incomplete = false
-        try UsageLogLines.streamLines(at: file) { data in
+        let readThrough = try UsageLogLines.streamLines(at: file, from: start, includeTail: start == 0) { data in
             let parsed = parse(data)
             for event in parsed { events[event.id] = event }
             if parsed.isEmpty, data.range(of: Data("modelUsage".utf8)) != nil { incomplete = true }
         }
-        return LocalUsageReader.Result(events: Array(events.values), incomplete: incomplete)
+        return LocalUsageReader.Result(events: Array(events.values), incomplete: incomplete, readThrough: readThrough)
     }
 
     static func parse(_ data: Data) -> [LocalUsageEvent] {

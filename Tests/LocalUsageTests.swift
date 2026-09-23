@@ -62,6 +62,18 @@ enum LocalUsageSuite {
             try UsageLogLines.streamLines(at: file, maxLineBytes: 100) { rows.append(String(decoding: $0, as: UTF8.self)) }
             try assertEqual(rows, ["valid"])
         }
+        failures += check("line streaming resumes at an offset and can leave an unfinished tail") {
+            let file = root.appendingPathComponent("resume.jsonl")
+            try Data("one\ntwo\nthr".utf8).write(to: file)
+            var rows: [String] = []
+            let end = try UsageLogLines.streamLines(at: file, from: 4, includeTail: false) {
+                rows.append(String(decoding: $0, as: UTF8.self))
+            }
+            try assertEqual(rows, ["two"])
+            try assertEqual(end, 8)
+            let full = try UsageLogLines.streamLines(at: file) { _ in }
+            try assertEqual(full, 8)
+        }
         failures += check("fork transcript history is not charged to the new session") {
             let fork = root.appendingPathComponent("fork.jsonl")
             let newer = ISO8601DateFormatter().string(from: now.addingTimeInterval(-30))
@@ -232,6 +244,77 @@ enum LocalUsageSuite {
             try assertEqual(grokSaved.events.count, 1)
             try assertEqual(grokRetained.events.count, 1)
         }
+        let growingDir = root.appendingPathComponent("growing")
+        try? FileManager.default.createDirectory(at: growingDir, withIntermediateDirectories: true)
+        let growing = growingDir.appendingPathComponent("updates.jsonl")
+        let growArchiveURL = root.appendingPathComponent("grow-archive")
+        let growArchive = LocalUsageArchive(directory: growArchiveURL)
+        func grokPrompt(_ id: String) -> String { grokLine.replacingOccurrences(of: "\"prompt\"", with: "\"\(id)\"") + "\n" }
+        func inode(_ url: URL) -> Int? {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber]) as? Int
+        }
+        try? Data(grokPrompt("p1").utf8).write(to: growing)
+        let growFirst = await growArchive.refresh(provider: "grok", roots: [growingDir], scope: "grow", now: now)
+        let savedGrow = growArchiveURL.appendingPathComponent("grow.json")
+        let inodeAfterFirst = inode(savedGrow)
+        let growIdle = await growArchive.refresh(provider: "grok", roots: [growingDir], scope: "grow", now: now)
+        let inodeAfterIdle = inode(savedGrow)
+        // Damage the already-read first line in place (same inode, same length), then append.
+        let firstLength = grokPrompt("p1").utf8.count
+        if let handle = try? FileHandle(forWritingTo: growing) {
+            try? handle.write(contentsOf: Data(("{\"modelUsage\"" + String(repeating: "x", count: firstLength - 14) + "\n").utf8))
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(grokPrompt("p2").utf8))
+            try? handle.close()
+        }
+        let growAppended = await growArchive.refresh(provider: "grok", roots: [growingDir], scope: "grow", now: now)
+        // A replaced log (new inode, smaller) is read from the start again.
+        try? FileManager.default.removeItem(at: growing)
+        try? Data(grokPrompt("p3").utf8).write(to: growing)
+        let growReplaced = await growArchive.refresh(provider: "grok", roots: [growingDir], scope: "grow", now: now)
+        failures += check("archive reads only appended lines of a growing log") {
+            try assertEqual(growFirst.events.count, 1)
+            try assertEqual(growIdle.events.count, 1)
+            try assertEqual(Set(growAppended.events.map(\.id)), ["grok:p1:grok-test", "grok:p2:grok-test"])
+            try assertTrue(growAppended.notice == nil, "re-read the old first line: \(growAppended.notice ?? "")")
+            try assertEqual(growReplaced.events.count, 3)
+        }
+        // A line written during a refresh can carry a timestamp after that refresh's `now`.
+        let lateDir = root.appendingPathComponent("late")
+        try? FileManager.default.createDirectory(at: lateDir, withIntermediateDirectories: true)
+        let lateLine = grokPrompt("late").replacingOccurrences(
+            of: timestamp, with: ISO8601DateFormatter().string(from: now.addingTimeInterval(30)))
+        try? Data(lateLine.utf8).write(to: lateDir.appendingPathComponent("updates.jsonl"))
+        let lateEarly = await growArchive.refresh(provider: "grok", roots: [lateDir], scope: "late", now: now)
+        let lateAfter = await growArchive.refresh(provider: "grok", roots: [lateDir], scope: "late",
+                                                  now: now.addingTimeInterval(60))
+        failures += check("a line newer than the refresh is read again later, not skipped for good") {
+            try assertEqual(lateEarly.events.count, 0)
+            try assertEqual(lateAfter.events.map(\.id), ["grok:late:grok-test"])
+        }
+        failures += check("an unchanged refresh does not rewrite the archive") {
+            try assertTrue(inodeAfterFirst != nil)
+            try assertEqual(inodeAfterIdle, inodeAfterFirst)
+        }
+        var aged = LocalUsageArchive.Archive(events: [
+            "old": LocalUsageEvent(id: "old", date: now.addingTimeInterval(-100 * 86_400), model: "m",
+                                   tokens: UsageTokens(input: 1, output: 1)),
+            "recent": LocalUsageEvent(id: "recent", date: now.addingTimeInterval(-10 * 86_400), model: "m",
+                                      tokens: UsageTokens(input: 1, output: 1))])
+        aged.files["/gone/updates.jsonl"] = .init(modified: now, size: 1)
+        aged.incompleteFiles = ["/gone/updates.jsonl"]
+        try? JSONEncoder().encode(aged).write(to: growArchiveURL.appendingPathComponent("aged.json"))
+        let prunedSnapshot = await LocalUsageArchive(directory: growArchiveURL)
+            .refresh(provider: "grok", roots: [], scope: "aged", now: now)
+        let prunedFile = try? JSONDecoder().decode(LocalUsageArchive.Archive.self,
+            from: Data(contentsOf: growArchiveURL.appendingPathComponent("aged.json")))
+        failures += check("archive keeps 90 days of events and forgets vanished files") {
+            try assertEqual(prunedSnapshot.events.map(\.id), ["recent"])
+            try assertTrue(prunedSnapshot.notice == nil, "got \(prunedSnapshot.notice ?? "")")
+            try assertEqual(prunedFile?.events.keys.sorted(), ["recent"])
+            try assertEqual(prunedFile?.files.isEmpty, true)
+        }
+
         failures += check("live account telemetry joins provider identity and excludes other accounts") {
             let directory = root.appendingPathComponent("tracking")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
