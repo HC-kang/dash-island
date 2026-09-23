@@ -77,7 +77,7 @@ struct ClaudeAdapter: VendorAdapter {
     /// Access-token skew (Orca uses 5m). Refresh *before* usage 401 so the
     /// ~27-day refresh_token is rotated instead of dying unused.
     private static let expiryBuffer: TimeInterval = 5 * 60
-    /// Rotate while the refresh token still has this much life (certilife:
+    /// Rotate while the refresh token still has this much life (reference client:
     /// last-minute refresh 400-kills the family at ~27–30 days).
     private static let refreshRotateBuffer: TimeInterval = 24 * 60 * 60
     /// Fallback when `refreshTokenExpiresAt` is missing: don't POST a blob
@@ -95,7 +95,7 @@ struct ClaudeAdapter: VendorAdapter {
     private static let betaHeader = "oauth-2025-04-20"
     private static let keychainServiceBase = "Claude Code-credentials"
     /// Token hosts (Claude Code has moved between these; try both).
-    /// console first: certilife’s working issuer; platform often 429s first.
+    /// console first: the reference client's working issuer; platform often 429s first.
     private static let oauthTokenURLs: [URL] = [
         URL(string: "https://console.anthropic.com/v1/oauth/token")!,
         URL(string: "https://platform.claude.com/v1/oauth/token")!,
@@ -346,7 +346,7 @@ struct ClaudeAdapter: VendorAdapter {
         }
 
         // --- Short-lived CLI OAuth (managed file only) ---
-        // Orca: refresh 5m before access expiry. certilife: rotate the
+        // Orca: refresh 5m before access expiry. reference client: rotate the
         // refresh_token a day before *it* dies (~27d), not after usage 401.
         if Self.shouldProactiveRefresh(creds, now: now) {
             switch await Self.refreshManagedCredentialsDetailed(configDir: dir) {
@@ -953,7 +953,7 @@ struct ClaudeAdapter: VendorAdapter {
         return now < exp.addingTimeInterval(maxStaleForRefresh)
     }
 
-    /// Orca 5m access skew, plus certilife 24h-before-refresh-expiry.
+    /// Orca 5m access skew, plus reference client 24h-before-refresh-expiry.
     static func shouldProactiveRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         guard canAttemptRefresh(creds, now: now) else { return false }
         if shouldRefresh(creds, now: now) { return true }

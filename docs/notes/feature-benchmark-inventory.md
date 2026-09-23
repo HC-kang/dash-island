@@ -6,8 +6,8 @@
 
 | Product | Path | Role for us |
 |---------|------|-------------|
-| **CodexIsland** | `/Users/ford/projects/personal/codex-island` | Notch-native usage HUD, Sparkle/shipping, cost/history, alerts |
-| **Orca** | `/Users/ford/projects/personal/orca` | Multi-account managed auth, multi-provider rate-limits service, status-bar usage, poll/backoff discipline |
+| **CodexIsland** | `~/projects/personal/codex-island` | Notch-native usage HUD, Sparkle/shipping, cost/history, alerts |
+| **Orca** | `~/projects/personal/orca` | Multi-account managed auth, multi-provider rate-limits service, status-bar usage, poll/backoff discipline |
 | **CodexBar** (via Orca docs) | cited in `orca/docs/claude-usage-tracking-codexbar-parity.md` | Source planner / OAuth→CLI fallback / credential hygiene |
 | **Dash Island** | this repo | Multi-account multi-vendor notch gauges + burn needle |
 

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-19-multi-vendor-usage-island-design.md`
 
-**Reference (read-only):** `/Users/ford/projects/personal/codex-island`, `/Users/ford/projects/personal/orca`
+**Reference (read-only):** `~/projects/personal/codex-island`, `~/projects/personal/orca`
 
 **Principles:** simplicity → practicality → elegance (ponytail: fewest files that work).
 

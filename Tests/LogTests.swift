@@ -107,8 +107,8 @@ enum LogSuite {
             try assertEqual(Log.redact("abcdefghij"), "abcdef…")
             try assertEqual(Log.redact("abc"), "…")
             try assertEqual(Log.redact("abcdef"), "…")
-            let id = UUID(uuidString: "9C11FBE9-0000-0000-0000-000000000000")!
-            try assertEqual(id.short, "9C11FBE9")
+            let id = UUID(uuidString: "ABCDEF12-0000-0000-0000-000000000000")!
+            try assertEqual(id.short, "ABCDEF12")
         }
 
         return failures
