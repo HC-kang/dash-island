@@ -127,6 +127,26 @@ enum GrokAdapterSuite {
             try assertEqual(snap.error, UsageError.parse("parse error"))
         }
 
+        failures += check("huge monthly money values never trap") {
+            let config: [String: Any] = ["monthlyLimit": ["val": 1e21], "used": ["val": "1e20"]]
+            let window = GrokAdapter.mapMonthlyUsage(config)
+            try assertEqual(window?.usedFraction ?? -1, 0.1, accuracy: 0.0001)
+            try assertTrue(window?.usedTokens == nil)
+            try assertTrue(GrokAdapter.numberValue("inf") == nil)
+        }
+
+        failures += check("monthly cache key is the account, never a token prefix") {
+            // JWTs share their first 16 characters across accounts.
+            var a = GrokAdapter.GrokSession(accessToken: "eyJhbGciOiJSUzI1NiJ9.aaa", userId: nil, email: nil, teamId: nil, expiresAt: nil)
+            var b = a
+            b.accessToken = "eyJhbGciOiJSUzI1NiJ9.bbb"
+            a.filePath = URL(fileURLWithPath: "/tmp/acct-a/auth.json")
+            b.filePath = URL(fileURLWithPath: "/tmp/acct-b/auth.json")
+            try assertTrue(GrokAdapter.monthlyCacheKey(a) != GrokAdapter.monthlyCacheKey(b))
+            a.userId = "user-1"
+            try assertEqual(GrokAdapter.monthlyCacheKey(a), "user-1")
+        }
+
         failures += check("clamp creditUsagePercent above 100") {
             let json = #"{ "config": { "creditUsagePercent": 150 } }"#
             let snap = GrokAdapter.parseCreditsResponse(data: Data(json.utf8))

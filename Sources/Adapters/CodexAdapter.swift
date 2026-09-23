@@ -572,12 +572,7 @@ struct CodexAdapter: VendorAdapter {
     }
 
     private static func jsonInt64(_ value: Any?) -> Int64? {
-        if let i = value as? Int64 { return max(0, i) }
-        if let i = value as? Int { return max(0, Int64(i)) }
-        if let d = value as? Double, d.isFinite { return max(0, Int64(d.rounded())) }
-        if let n = value as? NSNumber { return max(0, n.int64Value) }
-        if let s = value as? String, let d = Double(s) { return max(0, Int64(d.rounded())) }
-        return nil
+        JSONNumber.int64(value)
     }
 
     static func parseResetAt(_ value: Any?) -> Date? {

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - Errors
 
@@ -502,8 +503,20 @@ struct GrokAdapter: VendorAdapter {
     /// Weekly alone drives rings + burn; monthly is a secondary ring only.
     nonisolated static let monthlyFetchMinInterval: TimeInterval = 15 * 60
 
-    /// Best-effort thrift cache (races only waste an occasional extra fetch).
-    nonisolated(unsafe) private static var monthlyCache: [String: (at: Date, window: WindowUsage?)] = [:]
+    private struct MonthlyEntry: Sendable {
+        let at: Date
+        let window: WindowUsage?
+    }
+
+    /// Thrift cache, one entry per account. Two accounts fetch in parallel,
+    /// and an unlocked Dictionary written from both is undefined behavior.
+    private static let monthlyCache = OSAllocatedUnfairLock(initialState: [String: MonthlyEntry]())
+
+    /// The account: user id, else its managed file. Never a token prefix —
+    /// JWTs share their first characters, so accounts would swap months.
+    static func monthlyCacheKey(_ session: GrokSession) -> String {
+        session.userId ?? session.filePath?.path ?? session.accessToken
+    }
 
     static func probeUsage(session: GrokSession, fetchedAt: Date) async -> UsageSnapshot {
         let creditsResult = await fetchBilling(url: creditsURL, session: session)
@@ -520,7 +533,7 @@ struct GrokAdapter: VendorAdapter {
                 )
             }
             let plan = config["subscriptionTier"] as? String
-            let cacheKey = session.userId ?? String(session.accessToken.prefix(16))
+            let cacheKey = monthlyCacheKey(session)
 
             if let weekly = mapWeeklyCredits(config) {
                 // Live Grok credits are **weekly**, not 5h. Monthly is optional
@@ -563,7 +576,7 @@ struct GrokAdapter: VendorAdapter {
         cacheKey: String,
         now: Date
     ) async -> WindowUsage? {
-        let cached = monthlyCache[cacheKey]
+        let cached = monthlyCache.withLock { $0[cacheKey] }
         if let cached, now.timeIntervalSince(cached.at) < monthlyFetchMinInterval {
             return cached.window
         }
@@ -577,12 +590,12 @@ struct GrokAdapter: VendorAdapter {
         } else {
             window = cached?.window
         }
-        monthlyCache[cacheKey] = (now, window)
+        storeMonthlyCache(key: cacheKey, window: window, at: now)
         return window
     }
 
     private static func storeMonthlyCache(key: String, window: WindowUsage?, at: Date) {
-        monthlyCache[key] = (at, window)
+        monthlyCache.withLock { $0[key] = MonthlyEntry(at: at, window: window) }
     }
 
     private enum BillingFetch {
@@ -767,8 +780,8 @@ struct GrokAdapter: VendorAdapter {
         return WindowUsage(
             usedFraction: fraction,
             resetAt: periodEndDate(config),
-            usedTokens: Int64(used.rounded()),
-            limitTokens: Int64(limit.rounded()),
+            usedTokens: JSONNumber.int64(used),
+            limitTokens: JSONNumber.int64(limit),
             kind: .monthly
         )
     }
@@ -797,11 +810,7 @@ struct GrokAdapter: VendorAdapter {
     }
 
     static func numberValue(_ value: Any?) -> Double? {
-        if let d = value as? Double { return d }
-        if let i = value as? Int { return Double(i) }
-        if let i = value as? Int64 { return Double(i) }
-        if let s = value as? String, let d = Double(s) { return d }
-        return nil
+        JSONNumber.double(value)
     }
 
     static func timestampsMatch(_ left: Any?, _ right: Any?) -> Bool {

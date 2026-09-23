@@ -149,6 +149,11 @@ enum CodexAdapterSuite {
             let snap = CodexAdapter.parseUsageResponse(data: Data("not-json".utf8))
             try assertEqual(snap.error, UsageError.parse("parse error"))
         }
+        failures += check("huge token counters never trap") {
+            let window = CodexAdapter.parseWindow(["used_percent": 20, "used_tokens": 1e20, "limit_tokens": "inf"])
+            try assertEqual(window?.usedFraction ?? -1, 0.20, accuracy: 0.0001)
+            try assertTrue(window?.usedTokens == nil)
+        }
         failures += check("clamp used_percent above 100") {
             let json = #"{ "rate_limit": { "primary_window": { "used_percent": 150 } } }"#
             let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))

@@ -87,6 +87,19 @@ enum ClaudeAdapterSuite {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("not-json".utf8), plan: nil)
             try assertEqual(snap.error, UsageError.parse("parse error"))
         }
+        failures += check("huge or non-finite numbers never trap") {
+            try assertTrue(ClaudeAdapter.jsonInt64(1e20) == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64(-1e20) == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64("inf") == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64("nan") == nil)
+            try assertEqual(ClaudeAdapter.jsonInt64(42.6), 43)
+            try assertEqual(ClaudeAdapter.jsonInt64("-5"), 0)
+            try assertTrue(ClaudeAdapter.jsonNumber("inf") == nil)
+            let json = #"{"five_hour":{"used_tokens":1e20,"limit_tokens":"inf","utilization":10}}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.10, accuracy: 0.0001)
+            try assertTrue(snap.primary.usedTokens == nil)
+        }
         failures += check("clamp utilization above 100") {
             let json = #"{ "five_hour": { "utilization": 150 } }"#
             let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)

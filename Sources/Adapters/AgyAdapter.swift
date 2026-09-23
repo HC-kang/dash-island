@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Security
 
 enum AgyAdapterError: Error, Equatable, LocalizedError {
@@ -677,7 +678,7 @@ struct AgyAdapter: VendorAdapter {
                 )
                 switch result {
                 case .success:
-                    cachedOAuthClient = (id, secret)
+                    oauthCache.withLock { $0.working = OAuthClient(id: id, secret: secret) }
                     return result
                 case .invalidGrant:
                     last = .invalidGrant
@@ -867,32 +868,48 @@ struct AgyAdapter: VendorAdapter {
         return trimmed.isEmpty ? modelId : trimmed
     }
 
-    private static var cachedOAuthClient: (id: String, secret: String)?
+    private struct OAuthClient: Sendable {
+        let id: String
+        let secret: String
+    }
+
+    private struct BinaryOAuth: Sendable {
+        let ids: [String]
+        let secrets: [String]
+    }
+
+    private struct OAuthCache: Sendable {
+        /// The pair Google last accepted.
+        var working: OAuthClient?
+        /// Everything embedded in the `agy` binary (read once).
+        var binary: BinaryOAuth?
+    }
+
+    /// Parallel polls refresh from several accounts at once: keep it locked.
+    private static let oauthCache = OSAllocatedUnfairLock(initialState: OAuthCache())
 
     /// Installed-app OAuth clients embedded in `agy`. The binary has more than
     /// one googleusercontent id; the first hit is often the wrong one.
     static func oauthClientIDsFromAgyBinary() -> [String] {
-        if let cachedOAuthClient { return [cachedOAuthClient.id] }
+        if let working = oauthCache.withLock({ $0.working }) { return [working.id] }
         return loadBinaryOAuth().ids
     }
 
     static func oauthSecretsFromAgyBinary() -> [String] {
-        if let cachedOAuthClient { return [cachedOAuthClient.secret] }
+        if let working = oauthCache.withLock({ $0.working }) { return [working.secret] }
         return loadBinaryOAuth().secrets
     }
 
-    private static var cachedBinaryOAuth: (ids: [String], secrets: [String])?
-
-    private static func loadBinaryOAuth() -> (ids: [String], secrets: [String]) {
-        if let cachedBinaryOAuth { return cachedBinaryOAuth }
+    private static func loadBinaryOAuth() -> BinaryOAuth {
+        if let cached = oauthCache.withLock({ $0.binary }) { return cached }
         guard let path = locateAgyBinary(),
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
-        else { return ([], []) }
-        let loaded = (
+        else { return BinaryOAuth(ids: [], secrets: []) }
+        let loaded = BinaryOAuth(
             ids: Array(scanEmbeddedClientIDs(data).reversed()),
             secrets: scanEmbeddedClientSecrets(data)
         )
-        cachedBinaryOAuth = loaded
+        oauthCache.withLock { $0.binary = loaded }
         return loaded
     }
 
