@@ -16,12 +16,24 @@ final class IslandWindowController {
     private var dragActiveObserver: NSObjectProtocol?
     private var requestKeyObserver: NSObjectProtocol?
     private var targetDisplayObserver: NSObjectProtocol?
+    /// Occlusion + Low Power (default center) and display sleep (workspace center).
+    private var motionObservers: [NSObjectProtocol] = []
+    private var workspaceMotionObservers: [NSObjectProtocol] = []
+    private var screensAsleep = false
+    /// Last other app that was frontmost, and the app to hand focus back to
+    /// when the island collapses after a click activated us.
+    private var lastOtherApp: NSRunningApplication?
+    private var focusReturnApp: NSRunningApplication?
+    private var focusObservers: [NSObjectProtocol] = []
+    private var workspaceFocusObserver: NSObjectProtocol?
     /// While true, the full window receives mouse events so drags aren't killed.
     private var dragActive = false
     private var pointerInside = false
     /// Follow-cursor hysteresis: candidate screen + pending switch task.
     private var followCandidateStableID: String?
     private var followCandidateTask: Task<Void, Never>?
+    /// Follow-cursor fast path: frame of the display the pointer was last resolved on.
+    private var lastPointerScreenFrame: NSRect?
     /// True while exit-up / enter-down hop is running.
     private var isFollowTransitioning = false
     /// Brief dwell so a bezel graze doesn't hop — keep short; hop animation covers the rest.
@@ -87,6 +99,8 @@ final class IslandWindowController {
         observeTargetDisplayChanges()
         observeDragActive()
         observeKeyRequests()
+        observeMotionConditions()
+        observeFocus()
         installMouseTracking()
     }
 
@@ -106,6 +120,12 @@ final class IslandWindowController {
         if let observer = targetDisplayObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        motionObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        focusObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let observer = workspaceFocusObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        workspaceMotionObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         spaceRevealTask?.cancel()
         followCandidateTask?.cancel()
         if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
@@ -144,6 +164,89 @@ final class IslandWindowController {
         }
     }
 
+    /// Pause decoration nobody can see (occluded window, sleeping displays) and in Low Power Mode.
+    private func observeMotionConditions() {
+        let center = NotificationCenter.default
+        motionObservers = [
+            center.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.updateWindowHidden() }
+            },
+            center.addObserver(
+                forName: .NSProcessInfoPowerStateDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.model.setLowPower(ProcessInfo.processInfo.isLowPowerModeEnabled)
+                }
+            }
+        ]
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspaceMotionObservers = [
+            (NSWorkspace.screensDidSleepNotification, true),
+            (NSWorkspace.screensDidWakeNotification, false)
+        ].map { name, asleep in
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.screensAsleep = asleep
+                    self?.updateWindowHidden()
+                }
+            }
+        }
+        updateWindowHidden()
+    }
+
+    private func updateWindowHidden() {
+        model.setWindowHidden(screensAsleep || !window.occlusionState.contains(.visible))
+    }
+
+    /// Remember who had focus before we became active; give it back on pointer collapse.
+    private func observeFocus() {
+        let own = NSRunningApplication.current.processIdentifier
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != own {
+            lastOtherApp = front
+        }
+        workspaceFocusObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor in
+                guard let app, app.processIdentifier != own else { return }
+                self?.lastOtherApp = app
+            }
+        }
+        let center = NotificationCenter.default
+        focusObservers = [
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.focusReturnApp = self?.lastOtherApp }
+            },
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.focusReturnApp = nil }
+            },
+            center.addObserver(forName: .dashIslandPointerCollapsed, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.returnFocus() }
+            }
+        ]
+    }
+
+    /// Collapse after a click left us active with no window of ours in use:
+    /// the previous app gets keyboard focus back.
+    private func returnFocus() {
+        guard NSApp.isActive,
+              NSApp.keyWindow == nil || NSApp.keyWindow === window,
+              let app = focusReturnApp, !app.isTerminated
+        else { return }
+        focusReturnApp = nil
+        app.activate(options: [])
+        Log.window.debug("focus returned on collapse")
+    }
+
     private func observeScreenChanges() {
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -151,6 +254,7 @@ final class IslandWindowController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.lastPointerScreenFrame = nil
                 self?.refreshNotchGeometry()
                 self?.pinCanvas(animate: false)
             }
@@ -277,6 +381,8 @@ final class IslandWindowController {
 
     private func handleActiveSpaceDidChange() {
         spaceRevealTask?.cancel()
+        // Activating an app from the old space would swipe the user back there.
+        focusReturnApp = nil
 
         // Drop expanded chrome immediately — never carry a wide panel across spaces.
         model.setState(.compact)
@@ -308,10 +414,44 @@ final class IslandWindowController {
     private func refreshNotchGeometry() {
         let screen = DisplayInfo.currentScreen()
         let next = NotchInfo.detect(from: screen)
+        // Space swipes refresh often; log only real geometry changes.
+        if next != model.notch {
+            Log.window.debug(
+                "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
+            )
+        }
         model.updateNotch(next)
-        Log.window.info(
-            "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
+        refreshCompactPresence(on: screen)
+    }
+
+    /// Non-notch display in a full-screen space: the handle would float over the
+    /// app's content, so hide it (and its hit area) until the space changes back.
+    /// Notch displays keep the pill — full-screen content sits below the notch there.
+    private func refreshCompactPresence(on screen: NSScreen?) {
+        guard !model.notch.hasNotch, let screen else {
+            model.setCompactHidden(false)
+            return
+        }
+        let own = NSRunningApplication.current.processIdentifier
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        // Bounds and layer only — never window names.
+        let bounds: [CGRect] = windows.compactMap { info in
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowOwnerPID as String] as? pid_t) != own,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary
+            else { return nil }
+            return CGRect(dictionaryRepresentation: dict as CFDictionary)
+        }
+        let hidden = IslandGeometry.hasFullScreenWindow(
+            screenFrame: screen.frame,
+            primaryScreenHeight: NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY,
+            windowBounds: bounds
         )
+        if hidden != model.compactHidden {
+            Log.window.debug("compact hidden=\(hidden) reason=fullscreen")
+        }
+        model.setCompactHidden(hidden)
     }
 
     /// Pin the fixed canvas window to the physical notch center.
@@ -342,11 +482,14 @@ final class IslandWindowController {
     }
 
     private func installMouseTracking() {
+        // 60–120 moves/s: run inline on the main thread instead of a Task each.
+        // AppKit does not document the monitor thread, so hop rather than trap.
         let handler: (NSEvent) -> Void = { [weak self] _ in
-            Task { @MainActor in
-                self?.updateMouseEventPassthrough()
-                self?.noteMouseMovedForFollowCursor()
+            guard Thread.isMainThread else {
+                Task { @MainActor in self?.handleMouseMoved() }
+                return
             }
+            MainActor.assumeIsolated { self?.handleMouseMoved() }
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler)
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
@@ -354,6 +497,11 @@ final class IslandWindowController {
             return event
         }
         updateMouseEventPassthrough()
+    }
+
+    private func handleMouseMoved() {
+        updateMouseEventPassthrough()
+        noteMouseMovedForFollowCursor()
     }
 
     private func updateMouseEventPassthrough() {
@@ -393,6 +541,7 @@ final class IslandWindowController {
     /// Cheap: only schedules work when the mouse is on a *different* display.
     private func noteMouseMovedForFollowCursor() {
         guard case .followCursor = TargetDisplayStore.shared.choice else {
+            lastPointerScreenFrame = nil
             if followCandidateTask != nil {
                 followCandidateTask?.cancel()
                 followCandidateTask = nil
@@ -403,7 +552,11 @@ final class IslandWindowController {
         // Don't thrash during space transitions, hops, or widget drags.
         guard window.alphaValue > 0.05, !dragActive, !isFollowTransitioning else { return }
 
+        // Most moves stay on one display: skip the per-screen UUID lookup until
+        // the pointer leaves the display it was last resolved on.
+        if let frame = lastPointerScreenFrame, frame.contains(NSEvent.mouseLocation) { return }
         guard let under = DisplayInfo.infoContainingMouse() else { return }
+        lastPointerScreenFrame = under.screen.frame
         let live = TargetDisplayStore.shared.followLiveStableID
         if under.stableID == live {
             // Settled — clear any pending switch.

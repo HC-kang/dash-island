@@ -20,6 +20,18 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         super.init(window: panel)
         panel.delegate = self
+        // Cmd-Tab away hides the panel without a click for the outside monitor;
+        // close it so `isOpen` does not hold the island expanded.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                let details = UsageDetailPanel.shared
+                if details.isOpen { details.close() }
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -72,6 +84,9 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
 
     private func clear() {
         guard isOpen else { return }
+        // Unmount the view: its 15 s `.task` reload otherwise keeps reading usage
+        // history while the panel is closed. `show` builds a fresh view.
+        window?.contentViewController = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         localMonitor = nil

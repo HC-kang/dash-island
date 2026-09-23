@@ -11,9 +11,9 @@ struct AddRail: View {
     @State private var openTask: Task<Void, Never>?
     @State private var closeTask: Task<Void, Never>?
 
-    static let chevronWidth: CGFloat = 16
+    static let chevronWidth: CGFloat = IslandGeometry.addChevronWidth
     /// ~⅓ of a 100pt slot — narrow dashed chassis for the add pocket.
-    static let railWidth: CGFloat = 36
+    static let railWidth: CGFloat = IslandGeometry.addRailWidth
     static var totalExpandedWidth: CGFloat { chevronWidth + railWidth }
 
     private static let dwellNanos: UInt64 = 500_000_000
@@ -55,7 +55,10 @@ struct AddRail: View {
             stripHovered = hovering
             if hovering {
                 cancelClose()
-                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+                // The `+` Menu accepts the first click; only macOS 13/14 need focus first.
+                if #unavailable(macOS 15.0) {
+                    NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+                }
                 scheduleOpen()
             } else {
                 cancelOpen()

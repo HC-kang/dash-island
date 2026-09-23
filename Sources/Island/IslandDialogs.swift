@@ -112,6 +112,7 @@ struct IslandTextPromptView: View {
                 HStack(spacing: 10) {
                     Spacer(minLength: 0)
                     dialogButton("Cancel", primary: false, destructive: false, action: onCancel)
+                        .keyboardShortcut(.cancelAction)
                     dialogButton(
                         confirmTitle,
                         primary: true,
@@ -174,6 +175,7 @@ struct IslandProgressView: View {
                 HStack {
                     Spacer(minLength: 0)
                     dialogButton("Cancel", primary: false, destructive: false, action: onCancel)
+                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -201,8 +203,11 @@ struct IslandConfirmView: View {
 
                 HStack(spacing: 10) {
                     Spacer(minLength: 0)
+                    // Destructive (HIG): Return picks Cancel; Remove needs a click.
+                    // Escape still cancels via the panel's `cancelOperation`.
                     if showCancel {
                         dialogButton("Cancel", primary: false, destructive: false, action: onCancel)
+                            .keyboardShortcut(isDestructive ? .defaultAction : .cancelAction)
                     }
                     dialogButton(
                         confirmTitle,
@@ -210,7 +215,7 @@ struct IslandConfirmView: View {
                         destructive: isDestructive,
                         action: onConfirm
                     )
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(isDestructive && showCancel ? nil : .defaultAction)
                 }
             }
         }

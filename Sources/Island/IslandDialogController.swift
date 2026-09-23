@@ -22,7 +22,7 @@ final class IslandDialogController: NSWindowController, NSWindowDelegate {
     private var progressPanel: NSPanel?
 
     private init() {
-        let panel = NSPanel(
+        let panel = DialogPanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
@@ -42,6 +42,25 @@ final class IslandDialogController: NSWindowController, NSWindowDelegate {
         panel.standardWindowButton(.closeButton)?.isHidden = true
         super.init(window: panel)
         panel.delegate = self
+        panel.onCancel = { [weak self] in
+            if self?.isOpen == true { self?.finish(.cancelled) }
+        }
+        // Dialog panels hide while the app is inactive (e.g. during browser login)
+        // and come back on activation. Release the island meanwhile; a hidden
+        // panel must not hold it expanded over the other app.
+        let center = NotificationCenter.default
+        for (name, visible) in [
+            (NSApplication.didResignActiveNotification, false),
+            (NSApplication.didBecomeActiveNotification, true)
+        ] {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in
+                    let dialogs = IslandDialogController.shared
+                    guard dialogs.isOpen || dialogs.isProgressOpen else { return }
+                    center.post(name: .dashIslandDialogOpenChanged, object: visible)
+                }
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -239,6 +258,12 @@ final class IslandDialogController: NSWindowController, NSWindowDelegate {
         }
         return true
     }
+}
+
+/// Escape always cancels — also when Return is bound to Cancel (destructive confirm).
+private final class DialogPanel: NSPanel {
+    var onCancel: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
 }
 
 extension Notification.Name {

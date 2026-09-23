@@ -607,3 +607,14 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Reauth clears the projection identity, projection, primary delta, and burn. Last-good (memory + file) goes only when both identities are known and differ.
 - Wake: `WakeScheduling` holds polls 60s (manual refresh bypasses it). A tick >120s late counts as a wake and clears `systemAsleep`.
 - `UsageProjection.applyRead` drops a SQLite read when a poll re-anchored during the await.
+
+## Island UI pass — Phase 1 stream `ui` (2026-09-23, branch p1/ui)
+
+- Canvas is not Animatable. `withAnimation` on @State that only a Canvas reads never interpolates. The ring/needle "springs" (Task 10, Burn motion UI) only blanked the rings ~80 ms per expand, then snapped (pixel probe). GaugeRingView now draws its inputs directly. To animate Canvas drawing, use an Animatable wrapper or TimelineView math.
+- `MotionPolicy` (Domain, tested) sets frame intervals. Compact rim: still unless a fetch is in flight. Expanded rim: 30 fps. Gauge: still at rest (energy < 0.05, jitter < 0.25pt), 15/30 fps above. Everything is still under Reduce Motion, Low Power, an occluded window, or sleeping displays. A TimelineView keeps ticking in an ordered-out window, so pause it explicitly. Scratch host: still rim 0.0% CPU, animated rim 4.1%.
+- Correction to 2026-07-19 ("activate on hover") and 2026-09-15 ("Hover itself may activate the app"): on macOS 15+ hover no longer activates. SwiftUI hover tracking areas are `.activeAlways`, the add Menu's popup button accepts first mouse, and clicks reach SwiftUI via `allowsWindowActivationEvents`. macOS 13/14 keep hover activation (not runtime-tested). Hover expands after 200 ms. After a pointer collapse, the previously frontmost app gets focus back. A space change clears that app, because activating it would swipe spaces.
+- A closed NSPanel keeps its SwiftUI view mounted, so `.task` loops keep running. Set `contentViewController = nil` on close. The detail panel reloaded usage every 15 s forever before this.
+- Floating panels hide on deactivate, but `isOpen` stayed true and held the island open. Prefs and details now close on resign active. Dialogs release the island on resign active and hold it again on become active.
+- Destructive confirm: Return = Cancel, Remove is click-only, Escape goes through `DialogPanel.cancelOperation`. A scratch key-event check confirmed Return removed before the fix.
+- `IslandGeometry` (Domain, tested) owns island geometry. Non-notch displays show a 64×4 top-edge handle. The handle and its hit area are hidden while a layer-0 window covers the display (CGWindowList bounds only, no window names, no permission prompt).
+- Known limits: `.help` tooltips and the pointing-hand cursor may not show while the app is inactive. `check-widget-render.sh` and `check-detail-toggle.sh` are not executable in git; run them with `bash`.
