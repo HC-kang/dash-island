@@ -1256,12 +1256,14 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Token-host 400/401/403 is fatal only for a spent/invalid grant.
     /// Other 400s (wrong host, HTML) should try the next URL.
+    /// Our client id is fixed, so a refused client is as final as a dead grant.
     static func isFatalOAuthRefreshError(status: Int, body: String) -> Bool {
-        guard (400...403).contains(status) else { return false }
-        let low = body.lowercased()
-        return low.contains("invalid_grant")
-            || low.contains("invalid_token")
-            || low.contains("\"error\":\"invalid_client\"")
+        switch TokenHostFailure.classify(status: status, body: Data(body.utf8), retryAfter: nil) {
+        case .rejected, .badClient:
+            return true
+        case .unavailable:
+            return false
+        }
     }
 
     /// Claude Code writes `expiresAt` as epoch **milliseconds**.

@@ -104,24 +104,33 @@ struct CodexAdapter: VendorAdapter {
         guard var creds = Self.readCredentials(codexHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        // Managed CODEX_HOME tokens — refresh before usage if we still have a refresh_token.
-        if let refreshed = await Self.refreshManagedCredentials(codexHome: dir) {
-            // Always try refresh path only when needed; method no-ops if fresh.
+        // Managed CODEX_HOME tokens — refresh before usage (no-op within 45m of
+        // the last one). Any failure keeps the current access: the probe decides.
+        var quiet: UsageSnapshot?
+        var refreshDead = false
+        switch await Self.refreshManagedCredentials(codexHome: dir) {
+        case .success(let refreshed):
             if refreshed.accessToken != creds.accessToken {
-                creds = refreshed
                 Log.auth.info("refresh vendor=codex outcome=ok ref=\(String(ref.prefix(8)))")
-            } else {
-                creds = refreshed
             }
+            creds = refreshed
+        case .unavailable(let message, let retryAt):
+            quiet = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: now)
+        case .rejected:
+            refreshDead = true
+        case .skipped:
+            break
         }
         var snap = await Self.probeUsage(
             token: creds.accessToken,
             accountID: creds.accountID,
             fetchedAt: now
         )
-        if case .authRequired = snap.error,
-           let refreshed = await Self.refreshManagedCredentials(codexHome: dir, force: true)
-        {
+        guard case .authRequired = snap.error, !refreshDead else { return snap }
+        // A busy token host is not a dead login: soft quiet, never red "reconnect".
+        if let quiet { return quiet }
+        switch await Self.refreshManagedCredentials(codexHome: dir, force: true) {
+        case .success(let refreshed):
             snap = await Self.probeUsage(
                 token: refreshed.accessToken,
                 accountID: refreshed.accountID,
@@ -130,6 +139,10 @@ struct CodexAdapter: VendorAdapter {
             if snap.error == nil {
                 Log.auth.info("refresh vendor=codex outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
             }
+        case .unavailable(let message, let retryAt):
+            snap = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: Date())
+        case .rejected, .skipped:
+            break
         }
         return snap
     }
@@ -274,18 +287,28 @@ struct CodexAdapter: VendorAdapter {
         )
     }
 
-    /// Refresh managed auth.json. When `force` is false, only refreshes if we
-    /// have a refresh token (always attempt when token may be stale — Codex
-    /// does not always store access expiry).
+    enum RefreshOutcome: Equatable {
+        /// Refreshed, or still fresh enough that no POST was needed.
+        case success(CodexCreds)
+        /// No refresh token / unreadable file: nothing to refresh with.
+        case skipped
+        /// Spent or revoked grant: only a new `codex login` helps.
+        case rejected
+        /// Token host busy / down (429, 5xx, network): keep the session.
+        case unavailable(String, retryAt: Date?)
+    }
+
+    /// Refresh managed auth.json. Without `force`, skip the POST while the last
+    /// refresh is under 45 minutes old (Codex does not always store expiry).
     static func refreshManagedCredentials(
         codexHome: URL,
         force: Bool = false
-    ) async -> CodexCreds? {
+    ) async -> RefreshOutcome {
         guard let creds = readCredentials(codexHome: codexHome),
               let refresh = creds.refreshToken, !refresh.isEmpty,
               let path = creds.filePath,
               let existing = try? Data(contentsOf: path)
-        else { return force ? nil : readCredentials(codexHome: codexHome) }
+        else { return .skipped }
 
         // Without force, skip network if last_refresh is very recent (< 30m)
         // and access token still works often enough — but we can't know without
@@ -302,7 +325,7 @@ struct CodexAdapter: VendorAdapter {
                 if let d = iso.date(from: last) ?? plain.date(from: last),
                    Date().timeIntervalSince(d) < 45 * 60
                 {
-                    return creds
+                    return .success(creds)
                 }
             }
         }
@@ -324,22 +347,33 @@ struct CodexAdapter: VendorAdapter {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                if let http = response as? HTTPURLResponse {
-                    Log.auth.warn("refresh vendor=codex http=\(http.statusCode)")
+            guard let http = response as? HTTPURLResponse else {
+                return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                switch TokenHostFailure.classify(
+                    status: http.statusCode,
+                    body: data,
+                    retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+                ) {
+                case .rejected, .badClient:
+                    Log.auth.warn("refresh vendor=codex outcome=rejected http=\(http.statusCode)")
+                    return .rejected
+                case .unavailable(let retryAt):
+                    Log.auth.warn("refresh vendor=codex outcome=quiet http=\(http.statusCode)")
+                    return .unavailable(TokenHostFailure.quietMessage(status: http.statusCode), retryAt: retryAt)
                 }
-                return force ? nil : creds
             }
             guard let updated = applyRefreshedToken(existingJSON: existing, responseJSON: data) else {
-                return force ? nil : creds
+                return .unavailable("token quiet — token refresh parse failed", retryAt: nil)
             }
             try? updated.write(to: path, options: .atomic)
             var next = parseAuthJSON(updated)
             next?.filePath = path
-            return next ?? creds
+            return .success(next ?? creds)
         } catch {
             Log.auth.warn("refresh vendor=codex outcome=failed error=\(error.localizedDescription)")
-            return force ? nil : creds
+            return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
         }
     }
 

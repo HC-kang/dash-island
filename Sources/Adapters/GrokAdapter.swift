@@ -111,22 +111,19 @@ struct GrokAdapter: VendorAdapter {
         }
 
         // Proactive refresh when access is near/past expiry (managed folder only).
+        // A busy token host is soft: the current access may still work, so probe.
+        var quiet: UsageSnapshot?
         if !Self.isAccessTokenFresh(session) {
             switch await Self.refreshManagedSession(grokHome: dir) {
             case .success(let next):
                 session = next
                 Log.auth.info("refresh vendor=grok outcome=ok trigger=proactive ref=\(String(ref.prefix(8)))")
-            case .rateLimited(let retry):
-                return Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry),
-                    fetchedAt: now
-                )
             case .rejected:
                 return Self.errorSnapshot(.authRequired, fetchedAt: now)
-            case .unavailable(let message):
-                return Self.errorSnapshot(.unavailable(message), fetchedAt: now)
+            case .unavailable(let message, let retryAt):
+                quiet = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: now)
             case .skipped:
-                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+                break
             }
         }
 
@@ -134,21 +131,17 @@ struct GrokAdapter: VendorAdapter {
 
         // Reactive: billing 401/403 → one forced refresh + retry.
         if case .authRequired = snap.error {
+            if let quiet { return quiet }
             switch await Self.refreshManagedSession(grokHome: dir) {
             case .success(let next):
                 snap = await Self.probeUsage(session: next, fetchedAt: Date())
                 if snap.error == nil {
                     Log.auth.info("refresh vendor=grok outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
                 }
-            case .rateLimited(let retry):
-                snap = Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry),
-                    fetchedAt: Date()
-                )
             case .rejected, .skipped:
                 snap = Self.errorSnapshot(.authRequired, fetchedAt: Date())
-            case .unavailable(let message):
-                snap = Self.errorSnapshot(.unavailable(message), fetchedAt: Date())
+            case .unavailable(let message, let retryAt):
+                snap = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: Date())
             }
         }
         return snap
@@ -302,9 +295,10 @@ struct GrokAdapter: VendorAdapter {
     enum RefreshOutcome: Equatable {
         case success(GrokSession)
         case skipped
-        case rateLimited(Date?)
+        /// Spent or revoked grant: only a new `grok login` helps.
         case rejected
-        case unavailable(String)
+        /// Token host busy / down (429, 5xx, network): keep the session.
+        case unavailable(String, retryAt: Date?)
     }
 
     /// Prefer `$GROK_HOME/auth.json`; fall back to nested `.grok/auth.json`
@@ -424,27 +418,28 @@ struct GrokAdapter: VendorAdapter {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
-                return .unavailable("token refresh: bad response")
+                return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
             }
-            switch http.statusCode {
-            case 200..<300:
-                break
-            case 429:
-                Log.auth.warn("refresh vendor=grok http=429")
-                return .rateLimited(retryAfterDate(from: http))
-            case 400, 401, 403:
-                Log.auth.warn("refresh vendor=grok outcome=rejected http=\(http.statusCode)")
-                return .rejected
-            default:
-                Log.auth.warn("refresh vendor=grok http=\(http.statusCode)")
-                return .unavailable("token refresh HTTP \(http.statusCode)")
+            guard (200..<300).contains(http.statusCode) else {
+                switch TokenHostFailure.classify(
+                    status: http.statusCode,
+                    body: data,
+                    retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+                ) {
+                case .rejected, .badClient:
+                    Log.auth.warn("refresh vendor=grok outcome=rejected http=\(http.statusCode)")
+                    return .rejected
+                case .unavailable(let retryAt):
+                    Log.auth.warn("refresh vendor=grok outcome=quiet http=\(http.statusCode)")
+                    return .unavailable(TokenHostFailure.quietMessage(status: http.statusCode), retryAt: retryAt)
+                }
             }
 
             guard let resp = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let access = resp["access_token"] as? String,
                   !access.isEmpty
             else {
-                return .unavailable("token refresh parse failed")
+                return .unavailable("token quiet — token refresh parse failed", retryAt: nil)
             }
 
             entry["key"] = access
@@ -461,7 +456,7 @@ struct GrokAdapter: VendorAdapter {
                 withJSONObject: root,
                 options: [.prettyPrinted, .sortedKeys]
             ) else {
-                return .unavailable("token refresh encode failed")
+                return .unavailable("token quiet — token refresh encode failed", retryAt: nil)
             }
             try? updated.write(to: path, options: .atomic)
 
@@ -472,7 +467,7 @@ struct GrokAdapter: VendorAdapter {
             return .success(session)
         } catch {
             Log.auth.warn("refresh vendor=grok outcome=failed error=\(error.localizedDescription)")
-            return .unavailable("token refresh: \(error.localizedDescription)")
+            return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
         }
     }
 

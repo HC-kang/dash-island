@@ -603,16 +603,18 @@ struct AgyAdapter: VendorAdapter {
             case 401, 403:
                 return errorSnapshot(.authRequired, fetchedAt: fetchedAt)
             case 429:
-                return errorSnapshot(.rateLimited(retryAfter: nil), fetchedAt: fetchedAt)
+                return errorSnapshot(.rateLimited(retryAfter: retryAfterDate(from: http)), fetchedAt: fetchedAt)
             default:
                 return errorSnapshot(.network("HTTP \(http.statusCode)"), fetchedAt: fetchedAt)
             }
-        } catch let error as AgyAdapterError {
+        } catch let error as CodeAssistError {
             switch error {
-            case .reauthFailed(let message) where message.contains("401") || message.contains("403"):
+            case .http(let status) where status == 401 || status == 403:
                 return errorSnapshot(.authRequired, fetchedAt: fetchedAt)
-            default:
-                return errorSnapshot(.unavailable(error.localizedDescription), fetchedAt: fetchedAt)
+            case .http(let status):
+                return errorSnapshot(.unavailable("loadCodeAssist HTTP \(status)"), fetchedAt: fetchedAt)
+            case .noProject:
+                return errorSnapshot(.unavailable("Antigravity project ID not found"), fetchedAt: fetchedAt)
             }
         } catch {
             if (error as NSError).domain == NSURLErrorDomain {
@@ -716,17 +718,26 @@ struct AgyAdapter: VendorAdapter {
                     ?? (obj["expires_in"] as? Double).map { Int($0) }
                 return .success(access: access, refresh: rotated, expiresIn: expiresIn)
             }
-            let errBody = String(data: data, encoding: .utf8) ?? ""
-            if status == 400, errBody.contains("invalid_grant") {
-                Log.auth.warn("refresh vendor=agy outcome=invalid_grant")
+            // Wrong client pair (invalid_client) tries the next one; a busy host
+            // retries later. Only a dead grant asks for a new sign-in.
+            switch TokenHostFailure.classify(status: status, body: data, retryAfter: nil) {
+            case .rejected:
+                Log.auth.warn("refresh vendor=agy outcome=invalid_grant http=\(status)")
                 return .invalidGrant
+            case .badClient, .unavailable:
+                Log.auth.warn("refresh vendor=agy http=\(status)")
+                return .failed
             }
-            Log.auth.warn("refresh vendor=agy http=\(status)")
-            return .failed
         } catch {
             Log.auth.warn("refresh vendor=agy outcome=failed error=\(error.localizedDescription)")
             return .failed
         }
+    }
+
+    /// `loadCodeAssist` failure, typed: 401/403 used to be found by substring.
+    enum CodeAssistError: Error, Equatable {
+        case http(Int)
+        case noProject
     }
 
     private static func loadProjectID(token: String, home: URL?) async throws -> String {
@@ -750,13 +761,13 @@ struct AgyAdapter: VendorAdapter {
         )
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else {
-            throw AgyAdapterError.reauthFailed("loadCodeAssist failed")
+            throw CodeAssistError.http(0)
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw AgyAdapterError.reauthFailed("loadCodeAssist HTTP \(http.statusCode)")
+            throw CodeAssistError.http(http.statusCode)
         }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
+            throw CodeAssistError.noProject
         }
         let project: String?
         if let s = obj["cloudaicompanionProject"] as? String, !s.isEmpty {
@@ -769,7 +780,7 @@ struct AgyAdapter: VendorAdapter {
             project = nil
         }
         guard let project else {
-            throw AgyAdapterError.reauthFailed("Antigravity project ID not found")
+            throw CodeAssistError.noProject
         }
         if let home { writeCachedProjectID(project, home: home) }
         return project
@@ -983,6 +994,13 @@ struct AgyAdapter: VendorAdapter {
             return nil
         }
         return nil
+    }
+
+    private static func retryAfterDate(from http: HTTPURLResponse) -> Date? {
+        guard let raw = http.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = TimeInterval(raw)
+        else { return nil }
+        return Date().addingTimeInterval(seconds)
     }
 
     private static func errorSnapshot(_ error: UsageError, fetchedAt: Date) -> UsageSnapshot {

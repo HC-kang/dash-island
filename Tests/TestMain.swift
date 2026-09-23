@@ -21,6 +21,7 @@ struct TestMain {
         failures += LogSuite.run()
         failures += await LoginProcessSuite.run()
         failures += CredentialStoreSuite.run()
+        failures += await TokenHostSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")
