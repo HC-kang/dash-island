@@ -414,6 +414,8 @@ struct CodexAdapter: VendorAdapter {
         if let accountID, !accountID.isEmpty {
             req.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
+        // Default is 60s; a stalled host held a poll slot that long.
+        req.timeoutInterval = 20
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)

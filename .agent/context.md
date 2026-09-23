@@ -595,3 +595,15 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Supersedes Task 9: Grok Add no longer copies `~/.grok/auth.json` when the CLI is missing (shared refresh family). Claude setup-token paste code removed (no UI used it); stored long-lived files still work.
 - Missing windows: Claude null `seven_day` → no weekly ring; no window at all → `reported = false`. A null `five_hour` beside a live week stays 0% (idle window, unverified API shape). Agy daily/unlabeled → `.unknown`; resetTime without remainingFraction → exhausted.
 - Tests: `StubHTTP` (URLProtocol) answers `URLSession.shared` in-process, so adapter refresh paths are tested with temp dirs and no vendor traffic.
+
+## Phase 1 stream polling (2026-09-23, branch p1/polling)
+
+- Local burn scan runs in a detached utility task. `ClaudeActivity.LogCache` keeps an (inode, offset) cursor and parsed events (15m retention) per file, so an unchanged file costs one `stat`. The sampler no longer skips while a poll runs: both timers fire on the same second, and that guard dropped most samples of a busy account.
+- Fetch uses `forEachBounded`: 2 in flight, each result applied on arrival. Usage GET `timeoutInterval = 20` (Claude/Codex/Grok; Agy already 12).
+- The Claude CLI ping runs detached (`startBackgroundCLIPing`). While it runs, `CLIPingRegistry` makes polls return "refresh pending" and `discardCLIKeychainCopy` does nothing. Reason: the CLI may delete `.credentials.json` during the ping, and a poll then read "no credentials" (false red reauth + 30m auth cooldown). Keep this guard if the ping moves again.
+- Cadence: `lastFetchAt` = fetch start; `isDue` tolerance = half a tick. A cadence test must walk an absolute tick grid with jitter. Walking `lastFetch + k·tick` hid the 80s aliasing.
+- Network errors back off 1/2/4/8m (`networkFailureStreak`); any other answer resets the streak.
+- `PollGenerations`: reauth (`refresh(accountID:)`) bumps it and in-flight results are dropped. Event polls that meet a running poll are queued (`queuedPoll`); timer ticks are not.
+- Reauth clears the projection identity, projection, primary delta, and burn. Last-good (memory + file) goes only when both identities are known and differ.
+- Wake: `WakeScheduling` holds polls 60s (manual refresh bypasses it). A tick >120s late counts as a wake and clears `systemAsleep`.
+- `UsageProjection.applyRead` drops a SQLite read when a poll re-anchored during the await.

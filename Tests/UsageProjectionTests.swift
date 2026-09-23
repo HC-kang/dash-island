@@ -134,6 +134,48 @@ enum UsageProjectionSuite {
             try assertTrue(p.rate == nil)
         }
 
+        failures += check("a spend read taken before a re-anchor is dropped") {
+            var p = UsageProjection()
+            p.anchor(fraction: 0.10, resetAt: reset, at: t0)
+            p.anchor(fraction: 0.20, resetAt: reset, at: t0.addingTimeInterval(300))
+            // The SQLite read starts for this anchor and pending pair …
+            let readAnchor = p.anchorAt
+            let readLearnFrom = p.pendingPreviousAt
+            // … and a poll lands a fresh API sample while it runs.
+            p.anchor(fraction: 0.30, resetAt: reset, at: t0.addingTimeInterval(360))
+            let applied = p.applyRead(
+                learn: 5.0,
+                since: 4.0,
+                anchorAt: readAnchor,
+                learnFrom: readLearnFrom,
+                now: t0.addingTimeInterval(370)
+            )
+            try assertTrue(!applied)
+            // Spend the new API value already counts is not added again, and the
+            // new pending pair is not consumed with the old pair's dollars.
+            try assertTrue(p.projected == nil)
+            try assertEqual(p.spentSinceAnchor, 0, accuracy: 0)
+            try assertTrue(p.rate == nil)
+            try assertEqual(p.pendingPreviousAt, t0.addingTimeInterval(300))
+        }
+
+        failures += check("a spend read for the current anchor learns and projects") {
+            var p = UsageProjection()
+            p.anchor(fraction: 0.10, resetAt: reset, at: t0)
+            p.anchor(fraction: 0.20, resetAt: reset, at: t0.addingTimeInterval(300))
+            let applied = p.applyRead(
+                learn: 5.0,
+                since: 2.5,
+                anchorAt: p.anchorAt,
+                learnFrom: p.pendingPreviousAt,
+                now: t0.addingTimeInterval(400)
+            )
+            try assertTrue(applied)
+            try assertEqual(p.rate ?? 0, 0.02, accuracy: 1e-9)
+            try assertEqual(p.spentSinceAnchor, 2.5, accuracy: 1e-9)
+            try assertEqual(p.projected ?? 0, 0.25, accuracy: 1e-9)
+        }
+
         failures += check("captured spend read is absent, not zero, without a database") {
             let missing = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("dash-island-projection-\(UUID().uuidString)")

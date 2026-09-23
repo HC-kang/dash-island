@@ -9,7 +9,8 @@ import Foundation
 /// - Background: fixed 15m seed (no user interval picker).
 /// - Expand: lazy refresh after dwell, debounced by max(120s, vendor minPoll).
 /// - Prefer last-good snapshot over aggressive 429.
-/// - Sleep: no network; lock: floor 30m; launch: one seed poll.
+/// - Sleep: no network; wake: one poll after a 60s grace; lock: floor 30m;
+///   launch: one seed poll.
 @MainActor
 final class UsageOrchestrator: ObservableObject {
     static let shared = UsageOrchestrator(
@@ -34,8 +35,9 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let postResetGrace: TimeInterval = 120
     /// Scheduler tick. Deliberately shorter than the shortest poll interval —
     /// `isDue` enforces the real per-account spacing. A tick equal to the interval
-    /// aliased to ~2×: `lastFetchAt` is stamped *after* the HTTP round trip, so the
-    /// next tick was always a few hundred ms early and skipped the account.
+    /// aliased to ~2×: `lastFetchAt` was stamped *after* the HTTP round trip, so the
+    /// next tick was always a few hundred ms early and skipped the account. Now the
+    /// stamp is the fetch start and `isDue` allows `dueTolerance` of slack.
     nonisolated static let schedulerTickSeconds: TimeInterval = 20
     /// Expand/lazy floor — never more often than this even if minPoll is lower.
     nonisolated static let expandDebounceFloor: TimeInterval = 120
@@ -52,6 +54,12 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let authFailureCooldown: TimeInterval = 30 * 60
     /// While the Mac is asleep / screen locked, floor poll spacing.
     nonisolated static let inactivePollFloor: TimeInterval = 30 * 60
+    /// First retry after a network error, then doubling. Without it an idle
+    /// account waited the full 15m after one DNS blip or a wake before Wi-Fi.
+    nonisolated static let transientRetryBase: TimeInterval = 60
+    /// Backoff cap; stays below `backgroundPollSeconds` so a failure never
+    /// makes an account slower than idle.
+    nonisolated static let transientRetryMax: TimeInterval = 8 * 60
 
     enum PollMode: Equatable, Sendable {
         /// Timer / wake: `backgroundPollSeconds` × minPoll.
@@ -60,6 +68,27 @@ final class UsageOrchestrator: ObservableObject {
         case expand
         /// Manual refresh — still respects minPoll unless cooldowns cleared by `refresh()`.
         case force
+
+        fileprivate var rank: Int {
+            switch self {
+            case .background: return 0
+            case .expand: return 1
+            case .force: return 2
+            }
+        }
+    }
+
+    /// What to run after the poll in flight. Event polls (`forceActive`:
+    /// launch, wake, account change, expand, refresh) are queued, the strongest
+    /// wins; plain timer ticks just wait for the next tick.
+    nonisolated static func queuedPoll(
+        pending: PollMode?,
+        incoming: PollMode,
+        forceActive: Bool
+    ) -> PollMode? {
+        guard forceActive else { return pending }
+        guard let pending else { return incoming }
+        return incoming.rank > pending.rank ? incoming : pending
     }
 
     @Published private(set) var widgets: [WidgetViewModel] = []
@@ -89,6 +118,8 @@ final class UsageOrchestrator: ObservableObject {
     private var cooldownUntil: [AccountID: Date] = [:]
     /// Consecutive rate-limit hits → longer quiet windows (1×, 2×, 3× base… capped).
     private var rateLimitStreak: [AccountID: Int] = [:]
+    /// Consecutive network errors → short retry backoff (`transientRetryWait`).
+    private var networkFailureStreak: [AccountID: Int] = [:]
     /// Soft notices (token expiring soon).
     private var lastNotice: [AccountID: String] = [:]
     /// Between-poll ring extension learned from captured local spend.
@@ -102,14 +133,29 @@ final class UsageOrchestrator: ObservableObject {
     private var timer: Timer?
     /// Local-only Claude needle tick (no network).
     private var burnTimer: Timer?
+    /// Read positions for local Claude logs; lives as long as the orchestrator.
+    private let claudeLogCache = ClaudeActivity.LogCache()
+    /// One local log scan at a time (it runs off the main actor).
+    private var burnScanInFlight = false
     private var cancellables = Set<AnyCancellable>()
     private var powerObservers: [NSObjectProtocol] = []
     private var started = false
     private var polling = false
+    /// Event poll that arrived while `polling`; runs right after (`queuedPoll`).
+    private var pendingPoll: PollMode?
+    /// Guards against applying a result fetched with replaced credentials.
+    private var generations = PollGenerations()
     /// True between willSleep and didWake — skip network polls.
     private var systemAsleep = false
     /// Screen locked (optional extra inactive floor when awake).
     private var screenLocked = false
+    /// Network polls wait until this instant after a wake (`WakeScheduling`).
+    private var wakeGraceUntil: Date?
+    /// The one poll scheduled for the end of the wake grace.
+    private var wakePollTask: Task<Void, Never>?
+    /// When the repeating scheduler timer should fire next; a much later fire
+    /// is the catch-up fire of a sleep.
+    private var nextExpectedTick: Date?
 
     /// How often to re-read local Claude session logs for the needle.
     nonisolated static let localBurnSeconds: TimeInterval = 60
@@ -179,6 +225,10 @@ final class UsageOrchestrator: ObservableObject {
         cancellables.removeAll()
         started = false
         polling = false
+        pendingPoll = nil
+        wakePollTask?.cancel()
+        wakePollTask = nil
+        wakeGraceUntil = nil
     }
 
     /// Force a poll. Optionally mark one account immediately due (e.g. after reauth).
@@ -187,6 +237,9 @@ final class UsageOrchestrator: ObservableObject {
         if let accountID {
             lastFetchAt[accountID] = nil
             cooldownUntil[accountID] = nil
+            // Reauth: a fetch still running used the old credentials; drop its result.
+            generations.bump(accountID)
+            resetIdentityState(accountID)
         } else {
             for id in accountStore.accounts.map(\.id) {
                 lastFetchAt[id] = nil
@@ -197,10 +250,74 @@ final class UsageOrchestrator: ObservableObject {
         Task { await pollDueAccounts(mode: .force, forceActive: true) }
     }
 
+    /// After a reauth the slot may hold a different login. Never carry signals
+    /// from the old identity over: the cached collector identity, the projection
+    /// and its activity delta, and the burn history go. Last-good rings go only
+    /// when both identities are known and differ; otherwise the forced poll
+    /// replaces them.
+    private func resetIdentityState(_ id: AccountID) {
+        let old = projectionIdentity[id]
+        projectionIdentity[id] = nil
+        projectionByAccount[id] = nil
+        lastPrimaryDelta[id] = nil
+        burnByAccount[id] = nil
+        burnSourceByAccount[id] = nil
+        guard let account = accountStore.accounts.first(where: { $0.id == id }),
+              Self.projectableVendors.contains(account.vendorID)
+        else { return }
+        let home = CredentialStore.directoryURL(for: account.credentialRef)
+        let new = AccountUsageReader.identity(provider: account.vendorID, home: home)
+        if Self.reauthDropsLastGood(oldIdentity: old, newIdentity: new) {
+            lastGood[id] = nil
+            lastSuccessAt[id] = nil
+            lastNotice[id] = nil
+            // Or `restoreLastGoodSnapshots` would reload the old login's rings.
+            CredentialStore.removeLastGoodUsage(inDirectory: home)
+            Log.accounts.info("reauth account=\(id.short) identity=changed lastGood=dropped")
+        }
+    }
+
+    nonisolated static func reauthDropsLastGood(oldIdentity: String?, newIdentity: String?) -> Bool {
+        guard let oldIdentity, let newIdentity else { return false }
+        return oldIdentity != newIdentity
+    }
+
     /// Island became expanded (caller should dwell ~400ms first). Lazy refresh
     /// stale accounts without clearing 429/auth cooldowns.
     func onIslandExpanded() {
         Task { await pollDueAccounts(mode: .expand, forceActive: true) }
+    }
+
+    /// Hold network polls for `WakeScheduling.graceDelay`, then poll once.
+    /// Called by the wake notification and by an overdue scheduler tick;
+    /// whichever comes second restarts the same grace.
+    private func beginWakeGrace(now: Date) {
+        wakeGraceUntil = now.addingTimeInterval(WakeScheduling.graceDelay)
+        wakePollTask?.cancel()
+        wakePollTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(WakeScheduling.graceDelay * 1_000_000_000))
+            guard !Task.isCancelled, let self, !self.systemAsleep else { return }
+            self.wakePollTask = nil
+            // The sleep clock and the wall clock can disagree by a hair.
+            self.wakeGraceUntil = nil
+            await self.pollDueAccounts(mode: .background, forceActive: true)
+        }
+    }
+
+    private func schedulerTick() async {
+        let now = Date()
+        let expected = nextExpectedTick
+        nextExpectedTick = now.addingTimeInterval(Self.schedulerTickSeconds)
+        // The run loop delivers one catch-up fire right at wake, sometimes before
+        // (or without) the wake notification. A timer that fired at all means
+        // the Mac is awake.
+        if WakeScheduling.isOverdueFire(now: now, expected: expected) {
+            Log.poll.info("power event=wake source=overdueTick late=\(Int(now.timeIntervalSince(expected ?? now)))s")
+            systemAsleep = false
+            beginWakeGrace(now: now)
+            return
+        }
+        await pollDueAccounts(mode: .background)
     }
 
     private func installPowerObservers() {
@@ -214,6 +331,8 @@ final class UsageOrchestrator: ObservableObject {
                 Task { @MainActor in
                     Log.poll.info("power event=sleep")
                     self?.systemAsleep = true
+                    self?.wakePollTask?.cancel()
+                    self?.wakePollTask = nil
                 }
             }
         )
@@ -226,7 +345,7 @@ final class UsageOrchestrator: ObservableObject {
                 Task { @MainActor in
                     Log.poll.info("power event=wake")
                     self?.systemAsleep = false
-                    await self?.pollDueAccounts(mode: .background, forceActive: true)
+                    self?.beginWakeGrace(now: Date())
                 }
             }
         )
@@ -261,18 +380,25 @@ final class UsageOrchestrator: ObservableObject {
 
     /// Whether an account should be fetched at `now`.
     ///
-    /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll)`.
+    /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll) - tolerance`.
     nonisolated static func isDue(
         lastFetch: Date?,
         now: Date,
         userInterval: TimeInterval,
-        minPoll: TimeInterval
+        minPoll: TimeInterval,
+        tolerance: TimeInterval = 0
     ) -> Bool {
         guard let lastFetch else { return true }
         let interval = max(userInterval, minPoll)
         guard interval > 0 else { return true }
-        return now.timeIntervalSince(lastFetch) >= interval
+        return now.timeIntervalSince(lastFetch) >= interval - tolerance
     }
+
+    /// Slack for `isDue`. Ticks land on a fixed grid with run-loop jitter, and a
+    /// fetch may start a few seconds after its tick; an exact comparison missed
+    /// the 60s slot by milliseconds and polled at 80s. Half a tick can never
+    /// pull a poll a whole tick early.
+    nonisolated static let dueTolerance: TimeInterval = schedulerTickSeconds / 2
 
     /// Interval used for expand lazy-refresh: never below `expandDebounceFloor`
     /// or the vendor's `minPollSeconds`.
@@ -297,6 +423,12 @@ final class UsageOrchestrator: ObservableObject {
         return max(60, max(local, vendor))
     }
 
+    /// Spacing after `streak` network errors in a row: 1m, 2m, 4m, then 8m.
+    nonisolated static func transientRetryWait(streak: Int) -> TimeInterval {
+        let steps = max(0, min(streak, 4) - 1)
+        return min(transientRetryMax, transientRetryBase * pow(2, Double(steps)))
+    }
+
     // MARK: - Polling
 
     private func rescheduleTimer() {
@@ -304,18 +436,19 @@ final class UsageOrchestrator: ObservableObject {
         let seconds = Self.schedulerTickSeconds
         let t = Timer(timeInterval: max(1, seconds), repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.pollDueAccounts(mode: .background)
+                await self?.schedulerTick()
             }
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        nextExpectedTick = Date().addingTimeInterval(max(1, seconds))
     }
 
     private func rescheduleBurnTimer() {
         burnTimer?.invalidate()
         let t = Timer(timeInterval: Self.localBurnSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.sampleLocalBurnActivity()
+                await self?.sampleLocalBurnActivity()
                 await self?.refreshProjections()
             }
         }
@@ -332,21 +465,37 @@ final class UsageOrchestrator: ObservableObject {
 
     /// **No network.** Refresh Claude needles from local session logs only.
     /// Prefers managed `CLAUDE_CONFIG_DIR` project trees per account; host-wide fallback.
-    private func sampleLocalBurnActivity() {
-        guard !polling, !systemAsleep else { return }
-        guard accountStore.accounts.contains(where: { $0.vendorID == "claude" }) else { return }
+    /// The scan reads and parses files, so it runs off the main actor; only the
+    /// ratios come back here. It no longer skips while a poll is in flight: both
+    /// timers fire on the same second, so that guard dropped most samples of a
+    /// busy account.
+    private func sampleLocalBurnActivity() async {
+        guard !burnScanInFlight, !systemAsleep else { return }
+        let targets = accountStore.accounts
+            .filter { $0.vendorID == "claude" }
+            .map { (id: $0.id, dir: CredentialStore.directoryURL(for: $0.credentialRef)) }
+        guard !targets.isEmpty else { return }
+        burnScanInFlight = true
+        defer { burnScanInFlight = false }
 
         let now = Date()
+        let cache = claudeLogCache
+        let ratios = await Task.detached(priority: .utility) { () -> [(id: AccountID, ratio: Double)] in
+            let out = targets.map {
+                (id: $0.id, ratio: ClaudeActivity.liveBurnRatio(now: now, configDir: $0.dir, cache: cache))
+            }
+            cache.evict(unseenSince: now.addingTimeInterval(-3600))
+            return out
+        }.value
+
+        let live = Set(accountStore.accounts.map(\.id))
         var changed = false
-        for account in accountStore.accounts where account.vendorID == "claude" {
-            let dir = CredentialStore.directoryURL(for: account.credentialRef)
-            let ratio = ClaudeActivity.liveBurnRatio(now: now, configDir: dir)
-            guard ratio > 0 else { continue }
-            var smoother = burnByAccount[account.id] ?? BurnSmoother()
+        for (id, ratio) in ratios where ratio > 0 && live.contains(id) {
+            var smoother = burnByAccount[id] ?? BurnSmoother()
             let before = smoother.current.ratio
             _ = smoother.noteLiveActivity(ratio: ratio, at: now)
-            burnByAccount[account.id] = smoother
-            mergeBurnSource(accountID: account.id, local: true)
+            burnByAccount[id] = smoother
+            mergeBurnSource(accountID: id, local: true)
             if abs(smoother.current.ratio - before) > 1e-6 { changed = true }
         }
         if changed { rebuildWidgets() }
@@ -403,9 +552,11 @@ final class UsageOrchestrator: ObservableObject {
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
         rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
+        networkFailureStreak = networkFailureStreak.filter { live.contains($0.key) }
         projectionByAccount = projectionByAccount.filter { live.contains($0.key) }
         projectionIdentity = projectionIdentity.filter { live.contains($0.key) }
         lastPrimaryDelta = lastPrimaryDelta.filter { live.contains($0.key) }
+        generations.prune(live: live)
     }
 
     /// Reload error-free rings from disk so restart + soft quiet keeps gauges.
@@ -467,8 +618,15 @@ final class UsageOrchestrator: ObservableObject {
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
         // Coalesce overlapping ticks (timer may fire while a slow adapter runs).
+        // A user or event request is queued and runs right after, never dropped.
         guard !polling else {
-            Log.poll.debug("tick skip reason=inflight mode=\(mode)")
+            let queued = Self.queuedPoll(pending: pendingPoll, incoming: mode, forceActive: forceActive)
+            if queued != pendingPoll {
+                pendingPoll = queued
+                Log.poll.debug("tick queue reason=inflight mode=\(mode)")
+            } else {
+                Log.poll.debug("tick skip reason=inflight mode=\(mode)")
+            }
             return
         }
         // While asleep, never hit vendor APIs (wake handler resumes).
@@ -476,18 +634,29 @@ final class UsageOrchestrator: ObservableObject {
             Log.poll.debug("tick skip reason=asleep mode=\(mode)")
             return
         }
-
-        polling = true
-        loading = true
-        defer {
-            polling = false
-            loading = false
+        // Just woke: the wake poll at the end of the grace covers everyone.
+        if WakeScheduling.holdsPoll(now: Date(), graceUntil: wakeGraceUntil, manual: mode == .force) {
+            Log.poll.debug("tick skip reason=wakeGrace mode=\(mode)")
+            return
         }
 
+        polling = true
+        defer { polling = false }
+        await runPoll(mode: mode, forceActive: forceActive)
+        while let next = pendingPoll {
+            pendingPoll = nil
+            if WakeScheduling.holdsPoll(now: Date(), graceUntil: wakeGraceUntil, manual: next == .force) {
+                continue
+            }
+            await runPoll(mode: next, forceActive: true)
+        }
+    }
+
+    private func runPoll(mode: PollMode, forceActive: Bool) async {
         let accounts = accountStore.accounts
         guard !accounts.isEmpty else {
-            widgets = []
-            budgetCaption = ""
+            if !widgets.isEmpty { widgets = [] }
+            if !budgetCaption.isEmpty { budgetCaption = "" }
             return
         }
 
@@ -530,7 +699,8 @@ final class UsageOrchestrator: ObservableObject {
                 lastFetch: lastFetchAt[account.id],
                 now: now,
                 userInterval: interval,
-                minPoll: minPoll
+                minPoll: minPoll,
+                tolerance: Self.dueTolerance
             ) {
                 due.append(account)
             } else {
@@ -543,73 +713,128 @@ final class UsageOrchestrator: ObservableObject {
             return
         }
 
+        // Only a poll that goes to the network shows the spinner.
+        loading = true
+        defer { loading = false }
         Log.poll.info("tick mode=\(mode) due=\(due.count)/\(accounts.count) locked=\(inactive)")
-        let results = await fetchAccounts(due)
-
-        let applyAt = Date()
-        var anyGood = false
-        for (id, snapshot) in results {
-            apply(accountID: id, snapshot: snapshot, now: applyAt)
-            if snapshot.error == nil { anyGood = true }
-        }
-        if anyGood || lastUpdated == nil {
-            lastUpdated = applyAt
-        }
-        rebuildWidgets()
+        await fetchAccounts(due)
     }
 
-    /// Parallel fetch with concurrency cap (default 2).
-    private func fetchAccounts(_ accounts: [Account]) async -> [(AccountID, UsageSnapshot)] {
-        var collected: [(AccountID, UsageSnapshot)] = []
-        collected.reserveCapacity(accounts.count)
-        var index = 0
-        while index < accounts.count {
-            let end = min(index + Self.maxFetchConcurrency, accounts.count)
-            let batch = Array(accounts[index..<end])
-            index = end
-            await withTaskGroup(of: (AccountID, UsageSnapshot).self) { group in
-                for account in batch {
-                    let ref = account.credentialRef
-                    let vendorID = account.vendorID
-                    let id = account.id
-                    group.addTask {
-                        let started = Date()
-                        let snapshot: UsageSnapshot
-                        if let adapter = VendorRegistry.adapter(for: vendorID) {
-                            snapshot = await adapter.fetchUsage(ref)
-                        } else {
-                            snapshot = UsageSnapshot(
-                                primary: WindowUsage(usedFraction: 0, kind: .unknown),
-                                secondary: nil,
-                                plan: nil,
-                                fetchedAt: Date(),
-                                error: .unavailable("unknown vendor")
-                            )
-                        }
-                        let ms = Int(Date().timeIntervalSince(started) * 1000)
-                        let outcome: String
-                        switch snapshot.error {
-                        case nil: outcome = "ok"
-                        case .rateLimited?: outcome = "rateLimited"
-                        case .authRequired?: outcome = "authRequired"
-                        case .network?: outcome = "network"
-                        case .parse?: outcome = "parse"
-                        case .unavailable?: outcome = "unavailable"
-                        }
-                        Log.fetch.info("usage vendor=\(vendorID) account=\(id.short) ms=\(ms) outcome=\(outcome)")
-                        return (id, snapshot)
-                    }
+    /// At most `maxFetchConcurrency` requests in flight. A slot frees as soon as
+    /// its account answers, and each result is applied on arrival, so one slow
+    /// vendor holds one slot instead of the whole batch.
+    private func fetchAccounts(_ accounts: [Account]) async {
+        await Self.forEachBounded(
+            accounts,
+            limit: Self.maxFetchConcurrency,
+            start: { queued -> FetchJob? in
+                // Read the account again: it may have been removed or reauthed
+                // (new credentialRef) while it waited for a slot.
+                guard let account = self.accountStore.accounts.first(where: { $0.id == queued.id }) else {
+                    return nil
                 }
-                for await item in group {
-                    collected.append(item)
+                return FetchJob(account: account, startedAt: Date(), generation: self.generations.current(account.id))
+            },
+            work: { job in await Self.fetchOne(job.account) },
+            finish: { job, snapshot in
+                let id = job.account.id
+                let live = Set(self.accountStore.accounts.map(\.id))
+                guard self.generations.accepts(id, generation: job.generation, live: live) else {
+                    Log.poll.info("discard account=\(id.short) reason=stale")
+                    return
                 }
+                let applyAt = Date()
+                self.apply(accountID: id, snapshot: snapshot, startedAt: job.startedAt, now: applyAt)
+                if snapshot.error == nil || self.lastUpdated == nil {
+                    self.lastUpdated = applyAt
+                }
+                self.rebuildWidgets()
+            }
+        )
+    }
+
+    private struct FetchJob: Sendable {
+        let account: Account
+        /// Spacing is measured start to start. Stamping after the round trip
+        /// made every interval one fetch longer than asked.
+        let startedAt: Date
+        /// `PollGenerations.current` when the fetch started.
+        let generation: Int
+    }
+
+    nonisolated private static func fetchOne(_ account: Account) async -> UsageSnapshot {
+        let started = Date()
+        let snapshot: UsageSnapshot
+        if let adapter = VendorRegistry.adapter(for: account.vendorID) {
+            snapshot = await adapter.fetchUsage(account.credentialRef)
+        } else {
+            snapshot = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                secondary: nil,
+                plan: nil,
+                fetchedAt: Date(),
+                error: .unavailable("unknown vendor")
+            )
+        }
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        let line = "usage vendor=\(account.vendorID) account=\(account.id.short) ms=\(ms)"
+        let outcome: String
+        switch snapshot.error {
+        case nil: outcome = "ok"
+        case .rateLimited?: outcome = "rateLimited"
+        case .authRequired?: outcome = "authRequired"
+        case .network?: outcome = "network"
+        case .parse?: outcome = "parse"
+        case .unavailable?: outcome = "unavailable"
+        }
+        if let error = snapshot.error {
+            // The one failure line per fetch (adapters no longer log their own).
+            // Error payloads are app-built strings, never response bodies.
+            Log.fetch.warn("\(line) outcome=\(outcome) error=\(String(describing: error))")
+        } else {
+            Log.fetch.info("\(line) outcome=\(outcome)")
+        }
+        return snapshot
+    }
+
+    /// Run `work` for each item with at most `limit` jobs in flight. `start`
+    /// runs on the caller's actor right before an item starts (nil skips it);
+    /// `finish` runs there as soon as that job's result lands.
+    static func forEachBounded<Item, Job: Sendable, Result: Sendable>(
+        _ items: [Item],
+        limit: Int,
+        isolation: isolated (any Actor)? = #isolation,
+        start: (Item) -> Job?,
+        work: @escaping @Sendable (Job) async -> Result,
+        finish: (Job, Result) -> Void
+    ) async {
+        var waiting = items[...]
+        await withTaskGroup(of: (Job, Result).self) { group in
+            var running = 0
+            while true {
+                while running < max(1, limit), let item = waiting.popFirst() {
+                    guard let job = start(item) else { continue }
+                    group.addTask { (job, await work(job)) }
+                    running += 1
+                }
+                guard let (job, result) = await group.next() else { break }
+                running -= 1
+                finish(job, result)
             }
         }
-        return collected
     }
 
-    private func apply(accountID: AccountID, snapshot: UsageSnapshot, now: Date) {
-        lastFetchAt[accountID] = now
+    private func apply(accountID: AccountID, snapshot: UsageSnapshot, startedAt: Date, now: Date) {
+        lastFetchAt[accountID] = startedAt
+
+        // Any answer from the vendor, good or bad, ends a network outage.
+        if case .network = snapshot.error {
+            let streak = (networkFailureStreak[accountID] ?? 0) + 1
+            networkFailureStreak[accountID] = streak
+            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(Self.transientRetryWait(streak: streak)))s")
+        } else {
+            networkFailureStreak[accountID] = nil
+        }
 
         if let error = snapshot.error {
             lastError[accountID] = error
@@ -696,8 +921,11 @@ final class UsageOrchestrator: ObservableObject {
         lastPrimaryDelta: Double?,
         windowResetAt: Date?,
         screenLocked: Bool,
+        networkFailures: Int = 0,
         now: Date
     ) -> TimeInterval {
+        // A failing network is its own schedule: sooner than idle, later than busy.
+        if networkFailures > 0 { return transientRetryWait(streak: networkFailures) }
         if let windowResetAt, now >= windowResetAt,
            now.timeIntervalSince(windowResetAt) <= postResetGrace
         {
@@ -719,6 +947,7 @@ final class UsageOrchestrator: ObservableObject {
             lastPrimaryDelta: lastPrimaryDelta[account.id],
             windowResetAt: lastGood[account.id]?.primary.resetAt,
             screenLocked: screenLocked,
+            networkFailures: networkFailureStreak[account.id] ?? 0,
             now: now
         )
     }
@@ -778,8 +1007,9 @@ final class UsageOrchestrator: ObservableObject {
         }
         guard !queries.isEmpty else { return }
 
-        let reads = await Task.detached(priority: .utility) { () -> [AccountID: (learn: Double?, since: Double?)] in
-            var out: [AccountID: (learn: Double?, since: Double?)] = [:]
+        typealias Read = (learn: Double?, since: Double?, anchorAt: Date, learnFrom: Date?)
+        let reads = await Task.detached(priority: .utility) { () -> [AccountID: Read] in
+            var out: [AccountID: Read] = [:]
             for query in queries {
                 let learn = query.learnFrom.flatMap {
                     AccountUsageReader.capturedDollars(
@@ -795,7 +1025,7 @@ final class UsageOrchestrator: ObservableObject {
                     from: query.anchorAt,
                     to: now
                 )
-                out[query.id] = (learn: learn, since: since)
+                out[query.id] = (learn: learn, since: since, anchorAt: query.anchorAt, learnFrom: query.learnFrom)
             }
             return out
         }.value
@@ -803,12 +1033,15 @@ final class UsageOrchestrator: ObservableObject {
         var changed = false
         for (id, read) in reads {
             guard var projection = projectionByAccount[id] else { continue }
-            if let learn = read.learn { projection.learn(dollarsBetween: learn) }
             let before = projection.projected
-            projection.spentSinceAnchor = read.since ?? 0
-            projection.projected = read.since.flatMap {
-                projection.projectedFraction(spentSinceAnchor: $0, now: now)
-            }
+            // A poll may have re-anchored during the await; then this read is stale.
+            guard projection.applyRead(
+                learn: read.learn,
+                since: read.since,
+                anchorAt: read.anchorAt,
+                learnFrom: read.learnFrom,
+                now: now
+            ) else { continue }
             projectionByAccount[id] = projection
             if abs((projection.projected ?? 0) - (before ?? 0)) > 1e-6 { changed = true }
         }
@@ -828,15 +1061,17 @@ final class UsageOrchestrator: ObservableObject {
     private func rebuildWidgets() {
         expireCooldowns(now: Date())
         let mode = preferences.displayMode
-        widgets = accountStore.accounts.map { account in
+        let next = accountStore.accounts.map { account in
             makeViewModel(account: account, mode: mode)
         }
+        // Every assignment re-renders SwiftUI observers; most ticks change nothing.
+        if next != widgets { widgets = next }
         rebuildFetchStatuses()
     }
 
     private func rebuildFetchStatuses() {
         let now = Date()
-        fetchStatuses = accountStore.accounts.map { account in
+        let statuses: [AccountFetchStatus] = accountStore.accounts.map { account in
             let attempt = lastFetchAt[account.id]
             let success = lastSuccessAt[account.id]
             let err = lastError[account.id]
@@ -884,7 +1119,9 @@ final class UsageOrchestrator: ObservableObject {
                 outcome: outcome
             )
         }
-        budgetCaption = Self.estimateBudgetCaption(accounts: accountStore.accounts)
+        if statuses != fetchStatuses { fetchStatuses = statuses }
+        let budget = Self.estimateBudgetCaption(accounts: accountStore.accounts)
+        if budget != budgetCaption { budgetCaption = budget }
     }
 
     /// Rough **worst case** for background traffic: every account burning at once.
@@ -1265,6 +1502,27 @@ final class UsageOrchestrator: ObservableObject {
             return String(format: "%.1fm", v / 1_000_000)
         }
         return String(format: "%.0fm", v / 1_000_000)
+    }
+}
+
+// MARK: - Poll generations
+
+/// Per-account counter bumped when an account's credentials change under a
+/// running poll (reauth). A result is applied only when the generation it
+/// started under is still current and the account still exists.
+struct PollGenerations: Equatable {
+    private var values: [AccountID: Int] = [:]
+
+    func current(_ id: AccountID) -> Int { values[id] ?? 0 }
+
+    mutating func bump(_ id: AccountID) { values[id] = current(id) + 1 }
+
+    func accepts(_ id: AccountID, generation: Int, live: Set<AccountID>) -> Bool {
+        live.contains(id) && current(id) == generation
+    }
+
+    mutating func prune(live: Set<AccountID>) {
+        values = values.filter { live.contains($0.key) }
     }
 }
 

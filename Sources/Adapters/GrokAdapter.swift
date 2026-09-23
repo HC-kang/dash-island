@@ -578,6 +578,8 @@ struct GrokAdapter: VendorAdapter {
         if let userId = session.userId, !userId.isEmpty {
             req.setValue(userId, forHTTPHeaderField: "x-userid")
         }
+        // Default is 60s; a stalled host held a poll slot that long.
+        req.timeoutInterval = 20
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
