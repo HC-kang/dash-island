@@ -102,6 +102,10 @@ final class UsageOrchestrator: ObservableObject {
     private var timer: Timer?
     /// Local-only Claude needle tick (no network).
     private var burnTimer: Timer?
+    /// Read positions for local Claude logs; lives as long as the orchestrator.
+    private let claudeLogCache = ClaudeActivity.LogCache()
+    /// One local log scan at a time (it runs off the main actor).
+    private var burnScanInFlight = false
     private var cancellables = Set<AnyCancellable>()
     private var powerObservers: [NSObjectProtocol] = []
     private var started = false
@@ -315,7 +319,7 @@ final class UsageOrchestrator: ObservableObject {
         burnTimer?.invalidate()
         let t = Timer(timeInterval: Self.localBurnSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.sampleLocalBurnActivity()
+                await self?.sampleLocalBurnActivity()
                 await self?.refreshProjections()
             }
         }
@@ -332,21 +336,37 @@ final class UsageOrchestrator: ObservableObject {
 
     /// **No network.** Refresh Claude needles from local session logs only.
     /// Prefers managed `CLAUDE_CONFIG_DIR` project trees per account; host-wide fallback.
-    private func sampleLocalBurnActivity() {
-        guard !polling, !systemAsleep else { return }
-        guard accountStore.accounts.contains(where: { $0.vendorID == "claude" }) else { return }
+    /// The scan reads and parses files, so it runs off the main actor; only the
+    /// ratios come back here. It no longer skips while a poll is in flight: both
+    /// timers fire on the same second, so that guard dropped most samples of a
+    /// busy account.
+    private func sampleLocalBurnActivity() async {
+        guard !burnScanInFlight, !systemAsleep else { return }
+        let targets = accountStore.accounts
+            .filter { $0.vendorID == "claude" }
+            .map { (id: $0.id, dir: CredentialStore.directoryURL(for: $0.credentialRef)) }
+        guard !targets.isEmpty else { return }
+        burnScanInFlight = true
+        defer { burnScanInFlight = false }
 
         let now = Date()
+        let cache = claudeLogCache
+        let ratios = await Task.detached(priority: .utility) { () -> [(id: AccountID, ratio: Double)] in
+            let out = targets.map {
+                (id: $0.id, ratio: ClaudeActivity.liveBurnRatio(now: now, configDir: $0.dir, cache: cache))
+            }
+            cache.evict(unseenSince: now.addingTimeInterval(-3600))
+            return out
+        }.value
+
+        let live = Set(accountStore.accounts.map(\.id))
         var changed = false
-        for account in accountStore.accounts where account.vendorID == "claude" {
-            let dir = CredentialStore.directoryURL(for: account.credentialRef)
-            let ratio = ClaudeActivity.liveBurnRatio(now: now, configDir: dir)
-            guard ratio > 0 else { continue }
-            var smoother = burnByAccount[account.id] ?? BurnSmoother()
+        for (id, ratio) in ratios where ratio > 0 && live.contains(id) {
+            var smoother = burnByAccount[id] ?? BurnSmoother()
             let before = smoother.current.ratio
             _ = smoother.noteLiveActivity(ratio: ratio, at: now)
-            burnByAccount[account.id] = smoother
-            mergeBurnSource(accountID: account.id, local: true)
+            burnByAccount[id] = smoother
+            mergeBurnSource(accountID: id, local: true)
             if abs(smoother.current.ratio - before) > 1e-6 { changed = true }
         }
         if changed { rebuildWidgets() }
