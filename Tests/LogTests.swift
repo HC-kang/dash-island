@@ -67,6 +67,35 @@ enum LogSuite {
             try assertEqual(lines.allSatisfy { $0.hasPrefix("t=") && $0.hasSuffix(" end") }, true)
         }
 
+        failures += check("rotation failure turns the sink off instead of growing") {
+            let dir = try makeTempDir()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+                try? FileManager.default.removeItem(at: dir)
+            }
+            let url = dir.appendingPathComponent("r.log")
+            let file = LogFile(url: url, maxBytes: 100, keep: 3)!
+            // Read-only dir: the file stays writable but rename fails.
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+            for i in 0..<50 { file.append("L\(i)" + String(repeating: "x", count: 57)) }
+            let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+            guard size < 300 else { throw TestFailure(description: "log grew to \(size) bytes") }
+        }
+
+        failures += check("two writers on one file never overwrite each other") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let url = dir.appendingPathComponent("two.log")
+            let a = LogFile(url: url, maxBytes: 10_000_000, keep: 3)!
+            let b = LogFile(url: url, maxBytes: 10_000_000, keep: 3)!
+            for i in 0..<20 {
+                a.append("a\(i)")
+                b.append("b\(i)")
+            }
+            let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n")
+            try assertEqual(lines.count, 40)
+        }
+
         failures += check("startFile on unwritable path leaves sink off") {
             Log.startFile(at: URL(fileURLWithPath: "/dev/null/nope/x.log"))
             try assertEqual(Log.fileURL, nil)

@@ -117,6 +117,9 @@ final class LogFile: @unchecked Sendable {
         defer { lock.unlock() }
         guard let handle else { return }
         do {
+            // Seek every write: a second app instance may have appended since.
+            // ponytail: not atomic across processes; O_APPEND fd if interleaving ever shows up.
+            try handle.seekToEnd()
             try handle.write(contentsOf: Data((line + "\n").utf8))
             if try handle.offset() > UInt64(maxBytes) { try rotate() }
         } catch {
@@ -131,9 +134,11 @@ final class LogFile: @unchecked Sendable {
         let fm = FileManager.default
         func path(_ i: Int) -> URL { i == 0 ? url : URL(fileURLWithPath: url.path + ".\(i)") }
         try? fm.removeItem(at: path(keep))
-        for i in stride(from: keep - 1, through: 0, by: -1) {
+        for i in stride(from: keep - 1, through: 1, by: -1) {
             try? fm.moveItem(at: path(i), to: path(i + 1))
         }
+        // Must succeed, or the next append would rotate again on the same big file.
+        try fm.moveItem(at: path(0), to: path(1))
         handle = try Self.open(url)
     }
 
