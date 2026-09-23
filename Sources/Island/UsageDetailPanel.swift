@@ -84,6 +84,9 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
 
     private func clear() {
         guard isOpen else { return }
+        // Unmount the view: its 15 s `.task` reload otherwise keeps reading usage
+        // history while the panel is closed. `show` builds a fresh view.
+        window?.contentViewController = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         localMonitor = nil
