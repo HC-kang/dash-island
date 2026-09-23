@@ -105,7 +105,7 @@ struct CodexAdapter: VendorAdapter {
             // Always try refresh path only when needed; method no-ops if fresh.
             if refreshed.accessToken != creds.accessToken {
                 creds = refreshed
-                NSLog("DashIsland: Codex refresh ok ref=%@", String(ref.prefix(8)))
+                Log.auth.info("refresh vendor=codex outcome=ok ref=\(String(ref.prefix(8)))")
             } else {
                 creds = refreshed
             }
@@ -124,7 +124,7 @@ struct CodexAdapter: VendorAdapter {
                 fetchedAt: Date()
             )
             if snap.error == nil {
-                NSLog("DashIsland: Codex reactive refresh ok ref=%@", String(ref.prefix(8)))
+                Log.auth.info("refresh vendor=codex outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
             }
         }
         return snap
@@ -143,7 +143,7 @@ struct CodexAdapter: VendorAdapter {
         for path in paths where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
-        NSLog("DashIsland: cleared Codex managed creds at %@", codexHome.path)
+        Log.auth.info("clearCreds vendor=codex dir=\(codexHome.path)")
     }
 
     private func runLogin(codexHome: URL) async throws {
@@ -324,7 +324,7 @@ struct CodexAdapter: VendorAdapter {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 if let http = response as? HTTPURLResponse {
-                    NSLog("DashIsland: Codex refresh HTTP %d", http.statusCode)
+                    Log.auth.warn("refresh vendor=codex http=\(http.statusCode)")
                 }
                 return force ? nil : creds
             }
@@ -336,7 +336,7 @@ struct CodexAdapter: VendorAdapter {
             next?.filePath = path
             return next ?? creds
         } catch {
-            NSLog("DashIsland: Codex refresh failed: %@", error.localizedDescription)
+            Log.auth.warn("refresh vendor=codex outcome=failed error=\(error.localizedDescription)")
             return force ? nil : creds
         }
     }

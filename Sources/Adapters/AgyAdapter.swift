@@ -159,7 +159,7 @@ struct AgyAdapter: VendorAdapter {
         case .pass:
             return
         case .softKeep:
-            NSLog("DashIsland: Agy token smoke-test soft error %@", String(describing: snap.error))
+            Log.auth.info("smoke-test vendor=agy outcome=soft error=\(String(describing: snap.error))")
         case .reject:
             throw AgyAdapterError.reauthFailed(
                 """
@@ -183,7 +183,7 @@ struct AgyAdapter: VendorAdapter {
             try? fm.removeItem(at: path)
         }
         CredentialStore.removeLastGoodUsage(inDirectory: home)
-        NSLog("DashIsland: cleared Agy managed creds at %@", home.path)
+        Log.auth.info("clearCreds vendor=agy dir=\(home.path)")
     }
 
     static func isAcceptableLogin(
@@ -670,7 +670,7 @@ struct AgyAdapter: VendorAdapter {
         do {
             try task.run()
         } catch {
-            NSLog("DashIsland: Agy CLI ping failed %@", error.localizedDescription)
+            Log.auth.warn("cliPing vendor=agy outcome=failed error=\(error.localizedDescription)")
             return false
         }
         let deadline = Date().addingTimeInterval(50)
@@ -678,7 +678,7 @@ struct AgyAdapter: VendorAdapter {
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
         if task.isRunning { task.terminate() }
-        NSLog("DashIsland: Agy CLI ping finished")
+        Log.auth.info("cliPing vendor=agy outcome=finished")
         return true
     }
 
@@ -692,7 +692,7 @@ struct AgyAdapter: VendorAdapter {
         let ids = oauthClientIDsFromAgyBinary()
         let secrets = oauthSecretsFromAgyBinary()
         guard !ids.isEmpty, !secrets.isEmpty else {
-            NSLog("DashIsland: Agy OAuth client not found in agy binary")
+            Log.auth.warn("refresh vendor=agy outcome=failed reason=oauthClientNotFound")
             return .failed
         }
         var last: TokenRefreshResult = .failed
@@ -752,13 +752,13 @@ struct AgyAdapter: VendorAdapter {
             }
             let errBody = String(data: data, encoding: .utf8) ?? ""
             if status == 400, errBody.contains("invalid_grant") {
-                NSLog("DashIsland: Agy refresh invalid_grant")
+                Log.auth.warn("refresh vendor=agy outcome=invalid_grant")
                 return .invalidGrant
             }
-            NSLog("DashIsland: Agy token refresh HTTP %d", status)
+            Log.auth.warn("refresh vendor=agy http=\(status)")
             return .failed
         } catch {
-            NSLog("DashIsland: Agy token refresh error %@", error.localizedDescription)
+            Log.auth.warn("refresh vendor=agy outcome=failed error=\(error.localizedDescription)")
             return .failed
         }
     }

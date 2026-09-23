@@ -44,10 +44,7 @@ struct AccountsPersistence: Sendable {
             let existing = (try? Data(contentsOf: fileURL)) ?? Data()
             if !existing.isEmpty {
                 // Safety: empty save would wipe registered accounts.
-                NSLog(
-                    "DashIsland: refused empty accounts save over existing file at %@",
-                    fileURL.path
-                )
+                Log.accounts.warn("save refused reason=empty-over-existing path=\(fileURL.path)")
                 return
             }
         }
@@ -64,6 +61,6 @@ struct AccountsPersistence: Sendable {
         let backup = fileURL.deletingLastPathComponent()
             .appendingPathComponent("accounts.corrupt.\(stamp).json", isDirectory: false)
         try data.write(to: backup, options: .atomic)
-        NSLog("DashIsland: backed up corrupt accounts.json → %@", backup.path)
+        Log.accounts.error("corrupt backup=\(backup.path)")
     }
 }

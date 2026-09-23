@@ -26,7 +26,7 @@ final class LaunchAtLoginStore: ObservableObject {
             }
             isEnabled = Self.readEnabled()
         } catch {
-            NSLog("DashIsland: Launch at Login failed: %@", error.localizedDescription)
+            Log.app.warn("launchAtLogin failed enabled=\(enabled) error=\(error.localizedDescription)")
             isEnabled = Self.readEnabled()
         }
     }

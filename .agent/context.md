@@ -557,3 +557,20 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Known under-counts, all in the same direction (the projection lags, it cannot overshoot): processes started before telemetry was installed, claude.ai web/mobile use, rows stored without a price. Live check found 0 null-price rows in 6h of Claude data.
 - The estimate is drawn as a faint thin arc past the measured one and labelled in the tip. Never the centre number. Reason: an estimate presented as a reading costs more trust than a stale number does.
 - Pre-existing flake fixed on the way: `ClaudeRefreshGate` dates round-trip through UserDefaults as doubles, so exact `Date` equality in `runGate` failed about one run in three. Compare with tolerance.
+
+## Internal logging overhaul — designed, not built (2026-09-23)
+
+- Baseline: 53 `NSLog("DashIsland: …")` across 10 files, unified log only, no file/level/category. Poll due/skip, per-fetch http/ms, mode transitions, sleep/wake, add/reauth stages are not logged at all — the reason past incidents (overnight 429, 4h lock, stale needle) were hard to trace.
+- Approved design: `docs/superpowers/specs/2026-09-23-internal-logging-design.md`. One `Sources/Infra/Log.swift`, file sink `Application Support/DashIsland/logs/dashisland.log` (2 MB × 3) + os_log mirror, categories `app accounts poll fetch auth burn local window`, level via `DASHISLAND_LOG` env / `DashIsland.logLevel` default. No Prefs UI. `scripts/logs.sh` for tailing.
+- Handoff for the implementing session: `docs/superpowers/handoffs/2026-09-23-internal-logging-handoff.md` (call-site inventory, insertion points, TDD order, secrets rule).
+- Never log tokens / auth headers / response bodies at any level; `Log.redact` and `UUID.short` only.
+
+## Internal logging — shipped (2026-09-23, branch feat/internal-logging)
+
+- `Log.<category>.<level>("event key=value")` in `Sources/Infra/Log.swift`. Categories `app accounts poll fetch auth burn local window`. `NSLog` is gone from `Sources/`; do not add it back.
+- File `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3), plus unified log subsystem `dev.dashisland.DashIsland`. `scripts/logs.sh [-f] [pattern]`.
+- Level: `DASHISLAND_LOG` env > `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` > `info`. Poll skip reasons (`inflight asleep cooldown interval`) and burn samples appear only at `debug`. Restart the app after changing the level.
+- File sink is opt-in (`Log.startFile` in `AppDelegate` only) so the test binary never writes the real log.
+- Mistake found in the old code: Claude and Grok OAuth refresh 400/401/403 lines printed the response body. Removed; only `http=` stays. Keep response bodies out of every log line.
+- Rotation must fail closed: if `.log`→`.log.1` rename fails, the sink turns off. Otherwise every append rotates again and the file grows without limit. Each append seeks to end, because a dev build and the installed app can write the same file.
+- Deferred: `local load` info lines run every ~15 s while the detail panel is open; soft cooldown line also prints when the cooldown was already set; `local load scope=` holds a full account UUID.
