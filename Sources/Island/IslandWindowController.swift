@@ -411,10 +411,13 @@ final class IslandWindowController {
     private func refreshNotchGeometry() {
         let screen = DisplayInfo.currentScreen()
         let next = NotchInfo.detect(from: screen)
+        // Space swipes refresh often; log only real geometry changes.
+        if next != model.notch {
+            Log.window.debug(
+                "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
+            )
+        }
         model.updateNotch(next)
-        Log.window.info(
-            "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
-        )
         refreshCompactPresence(on: screen)
     }
 
