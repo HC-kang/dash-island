@@ -11,6 +11,10 @@ import shutil
 import subprocess
 import sys
 import time
+
+if sys.version_info < (3, 11):  # tomllib; stock macOS /usr/bin/python3 is 3.9.
+    raise SystemExit('connect-usage.py needs Python 3.11 or newer; this is Python %d.%d. '
+                     'Run it with a newer python3 (Homebrew or uv).' % tuple(sys.version_info[:2]))
 import tomllib
 
 BEGIN = '# BEGIN Dash Island account usage'
@@ -231,7 +235,8 @@ def install(home, environ, run):
     start_collector(run, plist)
     backup = apply(edits, directory)
     print('Connected %d configurations. New Codex/Claude processes export account usage locally.' % len(edits))
-    print('Collector: 127.0.0.1:%d, run by %s' % (PORT, sys.executable))
+    # The LaunchAgent pins this interpreter; if it is removed, launchd restarts a missing binary.
+    print('Collector: 127.0.0.1:%d, run by %s (run this again if that Python is removed)' % (PORT, sys.executable))
     if backup:
         print('Config backups: %s' % backup)
     print('Undo with: python3 %s --disconnect' % Path(__file__).name)

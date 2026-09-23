@@ -208,6 +208,15 @@ with tempfile.TemporaryDirectory() as temporary:
     assert json.loads(target.read_text()) == {'env': {'EDITED': '1'}} and codex_path.read_text() == 'model="keep"\n'
 print('PASS: connector writes through symlinks, keeps token files 0600, and refuses to overwrite a concurrent edit')
 
+# Stock macOS python3 is 3.9: say what is needed instead of a tomllib traceback. Only the
+# module body runs (not __main__), so this can never reach install().
+old_python = "import runpy, sys; sys.version_info = (3, 9, 6, 'final', 0); runpy.run_path(%r)" % str(Path(i.__file__))
+with tempfile.TemporaryDirectory() as temporary:
+    result = subprocess.run([sys.executable, '-c', old_python], capture_output=True, text=True,
+                            env={'HOME': temporary, 'PATH': '/nonexistent'})
+assert result.returncode == 1 and 'Python 3.11' in result.stderr and 'Traceback' not in result.stderr, result.stderr
+print('PASS: connector explains the Python 3.11 requirement')
+
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:
