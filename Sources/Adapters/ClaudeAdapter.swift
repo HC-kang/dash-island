@@ -47,15 +47,17 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 /// Anthropic Claude Code usage via `/api/oauth/usage`.
 ///
 /// **Credentials (multi-account safe):** each account owns
-/// `accounts/<uuid>/.credentials.json`. Poll and refresh never touch Keychain.
+/// `accounts/<uuid>/.credentials.json`. Poll and refresh never read Keychain via
+/// `SecItem` (no password sheet); only the gated CLI-ping fallback harvests
+/// through `/usr/bin/security`.
 /// Claude CLI on macOS writes login to `Claude Code-credentials-<sha8(configDir)>`
 /// — a **new item per account folder**. We copy that once after Add, then
 /// delete it so Keychain is not a graveyard of hashes. Reauth prefers HTTP
 /// refresh of the file (refresh_token lives ~27d) over another CLI login.
 ///
-/// Two auth modes:
-/// 1. **Long-lived setup-token** (`claude setup-token` → paste) — no refresh;
-///    often lacks `user:profile` for usage.
+/// Two credential kinds on disk:
+/// 1. **Long-lived setup-token** (older builds let users paste one) — no
+///    refresh; often lacks `user:profile` for usage.
 /// 2. **CLI OAuth** (`claude auth login`) — short access + refresh_token. We
 ///    own refresh via the public Claude Code client id, with a **process-wide**
 ///    gate so multi-account polls do not 429-storm `oauth/token`.
@@ -119,34 +121,6 @@ struct ClaudeAdapter: VendorAdapter {
                 let short = String(ref.prefix(8))
                 let label = Self.suggestedLabel(plan: creds.subscriptionType, short: short)
                 return AddAccountResult(vendorID: id, label: label, credentialRef: ref)
-            } catch {
-                Self.clearManagedCredentials(configDir: dir)
-                try? CredentialStore.removeDirectory(for: ref)
-                throw error
-            }
-        } catch {
-            try? CredentialStore.removeDirectory(for: ref)
-            throw error
-        }
-    }
-
-    /// Optional advanced path: paste a token. **Must** pass a usage smoke test —
-    /// plain `claude setup-token` often lacks `user:profile` and cannot read
-    /// `/api/oauth/usage` (403). Prefer browser OAuth for Dash Island.
-    func beginAddWithSetupToken(_ rawToken: String) async throws -> AddAccountResult {
-        let accountID = UUID()
-        let ref = accountID.uuidString
-        do {
-            let dir = try CredentialStore.createDirectory(for: ref)
-            do {
-                try Self.installSetupToken(rawToken, configDir: dir)
-                try await Self.verifyUsageAccess(configDir: dir)
-                let short = String(ref.prefix(8))
-                return AddAccountResult(
-                    vendorID: id,
-                    label: "Claude \(short)",
-                    credentialRef: ref
-                )
             } catch {
                 Self.clearManagedCredentials(configDir: dir)
                 try? CredentialStore.removeDirectory(for: ref)
@@ -234,21 +208,7 @@ struct ClaudeAdapter: VendorAdapter {
         }
     }
 
-    /// Replace managed creds with a pasted token (smoke-tested against usage API).
-    func reauthenticateWithSetupToken(_ ref: CredentialRef, token: String) async throws -> CredentialRef {
-        let dir = try CredentialStore.createDirectory(for: ref)
-        do {
-            Self.clearManagedCredentials(configDir: dir)
-            try Self.installSetupToken(token, configDir: dir)
-            try await Self.verifyUsageAccess(configDir: dir)
-            return ref
-        } catch {
-            Self.clearManagedCredentials(configDir: dir)
-            throw error
-        }
-    }
-
-    /// Pure policy for the usage smoke test (browser add/reauth + setup-token).
+    /// Pure policy for the usage smoke test (browser add/reauth).
     /// 200 → pass; 401/403 (`authRequired`) → reject; 429/network/parse → soft keep.
     enum UsageSmokeDecision: Equatable {
         case pass
@@ -382,8 +342,9 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Gated recover + re-probe. Soft outcomes keep orchestrator last-good rings.
     /// This managed dir is ours: extend from the file's refresh_token via
-    /// oauth/token. Do **not** spawn `claude -p` on the poll path — that hits
-    /// Keychain and pops a password sheet every expiry.
+    /// oauth/token. When both token hosts fail, `refreshManagedCredentialsDetailed`
+    /// runs one gated `claude -p` ping (`pingCLIThenAdopt`: 15m while access is
+    /// dead, else 6h) and harvests via `/usr/bin/security`, never `SecItem`.
     private static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
@@ -461,9 +422,8 @@ struct ClaudeAdapter: VendorAdapter {
         return quiet
     }
 
-    /// Unused on the poll path (Keychain spam). Kept for tests / last-resort.
-    static var refreshPingSpawner: ((URL) -> Bool)?
-
+    /// Poll-path fallback after both token hosts fail: the CLI still refreshes
+    /// when HTTP oauth/token 429s for days (2026-09-02).
     static func pingCLIThenAdopt(
         configDir: URL,
         failedAccessToken: String?
@@ -475,13 +435,7 @@ struct ClaudeAdapter: VendorAdapter {
         if pingRecentlyAttempted(configDir: configDir, gap: gap) { return nil }
         markPingAttempted(configDir: configDir)
         let before = readCredentialsFile(configDir: configDir)?.accessToken
-        let spawned: Bool
-        if let refreshPingSpawner {
-            spawned = refreshPingSpawner(configDir)
-        } else {
-            spawned = await spawnManagedRefreshPing(configDir: configDir)
-        }
-        guard spawned else { return nil }
+        guard await spawnManagedRefreshPing(configDir: configDir) else { return nil }
         // Darwin CLI writes Keychain and often *deletes* `.credentials.json`.
         // Harvest via `/usr/bin/security` (no Dash password sheet), then file.
         if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir) {
@@ -640,10 +594,6 @@ struct ClaudeAdapter: VendorAdapter {
             return file
         }
         return nil
-    }
-
-    static func existingAccessToken(configDir: URL) -> String? {
-        existingCredentials(configDir: configDir)?.accessToken
     }
 
     /// Reauth must mint a *new session*. Leftover CLI sessions often rotate
@@ -864,62 +814,6 @@ struct ClaudeAdapter: VendorAdapter {
         return t.hasPrefix("sk-ant-oat")
     }
 
-    /// Normalize pasted token (strip whitespace / accidental labels).
-    /// Live tokens are typically ~100+ chars; short pastes are almost always truncated.
-    static let minSetupTokenLength = 90
-
-    static func normalizePastedToken(_ raw: String) -> String? {
-        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // If user pasted multi-line help text, keep the sk-ant- line only.
-        if let line = t.split(whereSeparator: \.isNewline).map(String.init)
-            .first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("sk-ant-") })
-        {
-            t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        // Drop wrapping quotes if present.
-        if (t.hasPrefix("\"") && t.hasSuffix("\"")) || (t.hasPrefix("'") && t.hasSuffix("'")) {
-            t = String(t.dropFirst().dropLast())
-        }
-        guard t.hasPrefix("sk-ant-"), t.count >= minSetupTokenLength else { return nil }
-        return t
-    }
-
-    /// Write long-lived token into managed credentials (no refresh, no short expiry).
-    static func installSetupToken(_ raw: String, configDir: URL) throws {
-        guard let token = normalizePastedToken(raw) else {
-            throw ClaudeAdapterError.reauthFailed(
-                """
-                Token looks incomplete or invalid (need full sk-ant-…, typically 100+ characters).
-                Run in Terminal:  claude setup-token
-                Copy the entire line — truncated pastes return “Invalid bearer token”.
-                """
-            )
-        }
-        let creds = ClaudeCreds(
-            accessToken: token,
-            refreshToken: nil,
-            subscriptionType: nil,
-            expiresAt: nil,
-            longLived: true,
-            rawJSON: nil
-        )
-        persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
-        Log.auth.info("setupToken vendor=claude outcome=installed len=\(token.count) dir=\(configDir.path)")
-    }
-
-    /// Near expiry (within buffer) or unknown expiry — candidate for refresh.
-    /// Long-lived setup-tokens never refresh. Fetch path is **probe-first**; this
-    /// is used by the refresh gate skip-if-fresh path, not to pre-empt usage.
-    static func needsRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
-        shouldRefresh(creds, now: now)
-    }
-
-    /// Prefer always probing (usage server is source of truth). Kept for callers/tests.
-    static func shouldProbeBeforeRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
-        if isLongLived(creds) { return true }
-        return !creds.accessToken.isEmpty
-    }
-
     /// Near expiry / already expired / unknown — refresh is *allowed* if canAttempt.
     static func shouldRefresh(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
         if isLongLived(creds) { return false }
@@ -972,13 +866,6 @@ struct ClaudeAdapter: VendorAdapter {
         return now >= exp
     }
 
-    /// Kept for tests / callers: access older than maxStale (days), not a short quiet cut.
-    static func isHardExpired(_ creds: ClaudeCreds, now: Date = Date()) -> Bool {
-        if isLongLived(creds) { return false }
-        guard let exp = creds.expiresAt else { return false }
-        return now >= exp.addingTimeInterval(maxStaleForRefresh)
-    }
-
     /// Outcome of a managed-folder OAuth refresh (distinguishes 429 from real reauth).
     enum RefreshOutcome: Equatable {
         case success(ClaudeCreds)
@@ -996,15 +883,6 @@ struct ClaudeAdapter: VendorAdapter {
     /// Refresh this account's managed file only. Rotates refresh_token when the
     /// server returns a new one (single-use — must persist atomically).
     /// Multi-account isolation is path-based.
-    static func refreshManagedCredentials(configDir: URL) async -> ClaudeCreds? {
-        switch await refreshManagedCredentialsDetailed(configDir: configDir) {
-        case .success(let creds), .adopted(let creds):
-            return creds
-        default:
-            return nil
-        }
-    }
-
     static func refreshManagedCredentialsDetailed(
         configDir: URL,
         failedAccessToken: String? = nil,

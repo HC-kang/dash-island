@@ -44,7 +44,8 @@ enum CodexAdapterError: Error, Equatable, LocalizedError {
 ///
 /// **Credentials:** per-account folder under Application Support
 /// (`accounts/<uuid>/` as `CODEX_HOME`). Auth lives at `$CODEX_HOME/auth.json`
-/// (`tokens.access_token`). Codex CLI rotates tokens itself — we only read.
+/// (`tokens.access_token`). We refresh it via auth.openai.com and write the
+/// rotated tokens back (`refreshManagedCredentials`).
 struct CodexAdapter: VendorAdapter {
     let id: VendorID = "codex"
     let displayName = "Codex"

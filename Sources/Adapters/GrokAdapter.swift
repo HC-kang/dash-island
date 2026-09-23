@@ -665,39 +665,6 @@ struct GrokAdapter: VendorAdapter {
         )
     }
 
-    /// Full dual-window parse when both weekly and monthly are known (tests / future).
-    static func parseBillingWindows(
-        weeklyConfig: [String: Any]?,
-        monthlyConfig: [String: Any]?,
-        plan: String?,
-        fetchedAt: Date = Date()
-    ) -> UsageSnapshot {
-        let weekly = weeklyConfig.flatMap(mapWeeklyCredits)
-        let monthly = monthlyConfig.flatMap(mapMonthlyUsage)
-        if weekly == nil && monthly == nil {
-            return errorSnapshot(
-                .unavailable("Grok billing response did not include credit usage"),
-                fetchedAt: fetchedAt
-            )
-        }
-        if let weekly {
-            return UsageSnapshot(
-                primary: weekly,
-                secondary: monthly,
-                plan: plan,
-                fetchedAt: fetchedAt,
-                error: nil
-            )
-        }
-        return UsageSnapshot(
-            primary: monthly!,
-            secondary: nil,
-            plan: plan,
-            fetchedAt: fetchedAt,
-            error: nil
-        )
-    }
-
     static func resolveBillingConfig(_ root: [String: Any]) -> [String: Any]? {
         if let config = root["config"] as? [String: Any] {
             return config

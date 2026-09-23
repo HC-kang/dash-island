@@ -1,6 +1,5 @@
 import Foundation
 import os
-import Security
 
 enum AgyAdapterError: Error, Equatable, LocalizedError {
     case agyBinaryNotFound
@@ -312,17 +311,10 @@ struct AgyAdapter: VendorAdapter {
             }
     }
 
-    /// Copy the freshest store (CLI file / Keychain) into oauth_creds.json.
-    static func syncManagedCredentials(
-        home: URL,
-        includeKeychain: Bool = false,
-        allowPrompt: Bool = false
-    ) {
-        guard let live = captureLoginCredentials(
-            home: home,
-            includeKeychain: includeKeychain,
-            allowPrompt: allowPrompt
-        ) else { return }
+    /// Copy the freshest managed store (CLI token file) into oauth_creds.json.
+    /// File only: Keychain reads popped a password sheet on every poll.
+    static func syncManagedCredentials(home: URL) {
+        guard let live = readCredentials(home: home) else { return }
         if let file = readOAuthCredsJSONFile(home: home),
            file.accessToken == live.accessToken,
            (file.expiryDate ?? .distantPast) >= (live.expiryDate ?? .distantPast)
@@ -330,19 +322,6 @@ struct AgyAdapter: VendorAdapter {
             return
         }
         try? persistCredentialsFile(live, home: home)
-    }
-
-    /// Files always. Keychain only when asked — polling it pops the password sheet.
-    static func captureLoginCredentials(
-        home: URL,
-        includeKeychain: Bool = false,
-        allowPrompt: Bool = false
-    ) -> AgyCreds? {
-        preferFresher(
-            readOAuthCredsJSONFile(home: home),
-            readCLITokenFile(home: home),
-            includeKeychain ? readKeychainCredentials(allowPrompt: allowPrompt) : nil
-        )
     }
 
     static func parseKeychainBlob(_ data: Data) -> AgyCreds? {
@@ -380,23 +359,6 @@ struct AgyAdapter: VendorAdapter {
             refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
             expiryDate: expiry
         )
-    }
-
-    private static func readKeychainCredentials(allowPrompt: Bool) -> AgyCreds? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "gemini",
-            kSecAttrAccount as String: "antigravity",
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-            kSecUseAuthenticationUI as String: allowPrompt
-                ? kSecUseAuthenticationUIAllow
-                : kSecUseAuthenticationUIFail,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return parseKeychainBlob(data)
     }
 
     private static let loginScriptName = ".dash-island-agy-login.command"
@@ -632,7 +594,7 @@ struct AgyAdapter: VendorAdapter {
 
     /// Extend from the file's refresh_token. Never spawn `agy` or touch Keychain.
     static func freshCredentials(home: URL) async -> FreshResult {
-        syncManagedCredentials(home: home, includeKeychain: false)
+        syncManagedCredentials(home: home)
         guard var creds = readCredentials(home: home) else { return .needsReauth }
         if isFresh(creds, slack: 5 * 60) { return .ok(creds) }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else {

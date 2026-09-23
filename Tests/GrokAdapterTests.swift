@@ -247,25 +247,6 @@ enum GrokAdapterSuite {
             try assertEqual(VendorRegistry.adapter(for: "grok")?.minPollSeconds, 300)
         }
 
-        failures += check("dual-window helper prefers weekly primary") {
-            let weeklyCfg: [String: Any] = [
-                "creditUsagePercent": 20,
-                "currentPeriod": ["end": "2026-07-07T00:00:00Z"],
-            ]
-            let monthlyCfg: [String: Any] = [
-                "monthlyLimit": ["val": 100],
-                "used": ["val": 25],
-            ]
-            let snap = GrokAdapter.parseBillingWindows(
-                weeklyConfig: weeklyCfg,
-                monthlyConfig: monthlyCfg,
-                plan: "SuperGrok"
-            )
-            try assertEqual(snap.primary.usedFraction, 0.20, accuracy: 0.0001)
-            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.25, accuracy: 0.0001)
-            try assertEqual(snap.plan, "SuperGrok")
-        }
-
         failures += check("reauth keeps auth.json aside, restored on cancel") {
             let home = FileManager.default.temporaryDirectory
                 .appendingPathComponent("dash-island-grok-\(UUID().uuidString)", isDirectory: true)
