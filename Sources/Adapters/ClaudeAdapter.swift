@@ -165,7 +165,7 @@ struct ClaudeAdapter: VendorAdapter {
 
         func restorePriorFile() {
             if let priorFile {
-                try? priorFile.write(to: credPath, options: .atomic)
+                try? CredentialStore.writeSecret(priorFile, to: credPath)
             } else {
                 Self.clearManagedCredentials(configDir: dir)
             }
@@ -834,7 +834,8 @@ struct ClaudeAdapter: VendorAdapter {
     /// Persist the managed file, then delete the CLI’s hashed Keychain item
     /// so each account UUID does not leave `Claude Code-credentials-<sha8>`.
     static func commitHarvestedCredentials(creds: ClaudeCreds, configDir: URL) {
-        persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
+        // The Keychain item may be the only copy: drop it only once the file is verified.
+        guard persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true) else { return }
         deleteScopedKeychainItem(configDir: configDir)
     }
 
@@ -1092,8 +1093,14 @@ struct ClaudeAdapter: VendorAdapter {
                             await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
                             return .unavailable("token refresh parse failed")
                         }
-                        try? updated.write(to: path, options: .atomic)
                         await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
+                        do {
+                            try CredentialStore.writeSecret(updated, to: path)
+                        } catch {
+                            // The server already rotated: the old refresh token is spent.
+                            Log.auth.error("refresh vendor=claude outcome=writeFailed error=\(error.localizedDescription)")
+                            return .unavailable("credential write failed")
+                        }
                         Log.auth.info("refresh vendor=claude outcome=ok host=\(tokenURL.host ?? "") type=\(contentType)")
                         return .success(next)
                     case 429:
@@ -1179,22 +1186,28 @@ struct ClaudeAdapter: VendorAdapter {
     }
 
     /// Write app-owned credentials file.
+    /// `false` when the file did not land (checked by read-back).
+    @discardableResult
     static func persistCredentialsFile(
         creds: ClaudeCreds,
         configDir: URL,
         overwrite: Bool = false
-    ) {
+    ) -> Bool {
         let path = configDir.appendingPathComponent(credentialsFileName, isDirectory: false)
         if !overwrite, FileManager.default.fileExists(atPath: path.path) {
-            return
+            return true
+        }
+        func write(_ data: Data) -> Bool {
+            do {
+                try CredentialStore.writeSecret(data, to: path)
+                return true
+            } catch {
+                Log.auth.error("persist vendor=claude outcome=writeFailed error=\(error.localizedDescription)")
+                return false
+            }
         }
         if let raw = creds.rawJSON {
-            try? raw.write(to: path, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: path.path
-            )
-            return
+            return write(raw)
         }
         var oauth: [String: Any] = ["accessToken": creds.accessToken]
         if let refresh = creds.refreshToken {
@@ -1213,13 +1226,10 @@ struct ClaudeAdapter: VendorAdapter {
             oauth["dashIslandLongLived"] = true
         }
         let blob: [String: Any] = ["claudeAiOauth": oauth]
-        if let data = try? JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted]) {
-            try? data.write(to: path, options: .atomic)
+        guard let data = try? JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted]) else {
+            return false
         }
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: path.path
-        )
+        return write(data)
     }
 
     /// Decode Claude Code credential JSON (`claudeAiOauth.accessToken`, …).

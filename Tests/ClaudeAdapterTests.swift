@@ -485,6 +485,24 @@ enum ClaudeAdapterSuite {
             // Wipe must not invent a global Keychain service name.
             try assertTrue(ClaudeAdapter.scopedKeychainService(for: dir) != "Claude Code-credentials")
         }
+        failures += check("credential file is 0600 and a failed write is reported") {
+            let dir = try makeTempDir()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+                try? FileManager.default.removeItem(at: dir)
+            }
+            let creds = ClaudeAdapter.ClaudeCreds(
+                accessToken: "at", refreshToken: "rt", subscriptionType: nil, expiresAt: nil, rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.persistCredentialsFile(creds: creds, configDir: dir, overwrite: true))
+            let file = dir.appendingPathComponent(".credentials.json")
+            let mode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
+            try assertEqual(mode, 0o600)
+            try FileManager.default.removeItem(at: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+            // commitHarvestedCredentials deletes the Keychain copy only after this is true.
+            try assertTrue(!ClaudeAdapter.persistCredentialsFile(creds: creds, configDir: dir, overwrite: true))
+        }
         failures += check("reauth composition: snapshot → wipe → leftover vs new session") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }

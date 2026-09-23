@@ -526,7 +526,7 @@ struct AgyAdapter: VendorAdapter {
         }
         let data = try JSONSerialization.data(withJSONObject: blob, options: [.prettyPrinted])
         let path = dir.appendingPathComponent(credsFileName, isDirectory: false)
-        try data.write(to: path, options: .atomic)
+        try CredentialStore.writeSecret(data, to: path)
     }
 
     /// `fetchAvailableModels` → rings. Dedupes shared quota counters (oh-my-pi).
@@ -641,7 +641,12 @@ struct AgyAdapter: VendorAdapter {
         switch await refreshAccessToken(refresh) {
         case .success(let access, let rotated, let expiresIn):
             creds = extended(creds, access: access, rotated: rotated, expiresIn: expiresIn)
-            try? persistCredentialsFile(creds, home: home)
+            do {
+                try persistCredentialsFile(creds, home: home)
+            } catch {
+                Log.auth.error("refresh vendor=agy outcome=writeFailed error=\(error.localizedDescription)")
+                return .retryLater
+            }
             return .ok(creds)
         case .invalidGrant:
             return .needsReauth

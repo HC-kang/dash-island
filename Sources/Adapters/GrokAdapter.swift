@@ -458,7 +458,13 @@ struct GrokAdapter: VendorAdapter {
             ) else {
                 return .unavailable("token quiet — token refresh encode failed", retryAt: nil)
             }
-            try? updated.write(to: path, options: .atomic)
+            do {
+                try CredentialStore.writeSecret(updated, to: path)
+            } catch {
+                // The server already rotated: the old refresh token is spent.
+                Log.auth.error("refresh vendor=grok outcome=writeFailed error=\(error.localizedDescription)")
+                return .unavailable("token quiet — credential write failed", retryAt: nil)
+            }
 
             session.accessToken = access
             session.refreshToken = (entry["refresh_token"] as? String) ?? refresh

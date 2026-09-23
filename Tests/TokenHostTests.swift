@@ -109,6 +109,35 @@ enum TokenHostSuite {
             try assertEqual(dead, .rejected)
         }
 
+        failures += await checkAsync("rotated tokens that fail to land on disk are not a success") {
+            let fresh = #"{"access_token":"at-new","refresh_token":"rt-new","expires_in":3600}"#
+            let grok = try grokHome()
+            let codex = try codexHome()
+            defer {
+                for dir in [grok, codex] {
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+                    try? FileManager.default.removeItem(at: dir)
+                }
+            }
+            for dir in [grok, codex] {
+                try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+            }
+            let grokOutcome = await StubHTTP.with(status: 200, body: fresh) {
+                await GrokAdapter.refreshManagedSession(grokHome: grok)
+            }
+            guard case .unavailable(let grokMessage, _) = grokOutcome else {
+                throw TestFailure(description: "Grok: expected unavailable, got \(grokOutcome)")
+            }
+            try assertTrue(grokMessage.contains("credential write failed"))
+            let codexOutcome = await StubHTTP.with(status: 200, body: fresh) {
+                await CodexAdapter.refreshManagedCredentials(codexHome: codex, force: true)
+            }
+            guard case .unavailable(let codexMessage, _) = codexOutcome else {
+                throw TestFailure(description: "Codex: expected unavailable, got \(codexOutcome)")
+            }
+            try assertTrue(codexMessage.contains("credential write failed"))
+        }
+
         return failures
     }
 
