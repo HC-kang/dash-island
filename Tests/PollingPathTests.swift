@@ -50,4 +50,59 @@ enum PollingPathSuite {
 
         return failures
     }
+
+    /// Records how many jobs run at once.
+    actor Gauge {
+        private(set) var running = 0
+        private(set) var peak = 0
+        func enter() { running += 1; peak = max(peak, running) }
+        func leave() { running -= 1 }
+    }
+
+    static func runAsync() async -> Int {
+        var failures = 0
+
+        // Item 0 is slow. Fixed pairs made items 2…4 wait for it; a sliding
+        // window keeps the other slot busy and hands results over on arrival.
+        let gauge = Gauge()
+        let delaysMs: [UInt64] = [400, 20, 20, 20, 20]
+        var started: [Int] = []
+        var finished: [Int] = []
+        await UsageOrchestrator.forEachBounded(
+            Array(0..<5),
+            limit: 2,
+            start: { item -> Int? in
+                started.append(item)
+                return item
+            },
+            work: { item -> Int in
+                await gauge.enter()
+                try? await Task.sleep(nanoseconds: delaysMs[item] * 1_000_000)
+                await gauge.leave()
+                return item
+            },
+            finish: { _, result in finished.append(result) }
+        )
+        let peak = await gauge.peak
+        failures += check("bounded fetch: a slow account holds one slot, not the batch") {
+            try assertEqual(started, [0, 1, 2, 3, 4])
+            try assertEqual(peak, 2)
+            try assertEqual(finished, [1, 2, 3, 4, 0])
+        }
+
+        // `start` returning nil skips the item without spending a slot.
+        var ran: [Int] = []
+        await UsageOrchestrator.forEachBounded(
+            Array(0..<4),
+            limit: 1,
+            start: { item -> Int? in item % 2 == 0 ? item : nil },
+            work: { item -> Int in item },
+            finish: { _, result in ran.append(result) }
+        )
+        failures += check("bounded fetch: skipped items do not run") {
+            try assertEqual(ran, [0, 2])
+        }
+
+        return failures
+    }
 }

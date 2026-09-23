@@ -498,16 +498,12 @@ final class UsageOrchestrator: ObservableObject {
         }
 
         polling = true
-        loading = true
-        defer {
-            polling = false
-            loading = false
-        }
+        defer { polling = false }
 
         let accounts = accountStore.accounts
         guard !accounts.isEmpty else {
-            widgets = []
-            budgetCaption = ""
+            if !widgets.isEmpty { widgets = [] }
+            if !budgetCaption.isEmpty { budgetCaption = "" }
             return
         }
 
@@ -563,69 +559,86 @@ final class UsageOrchestrator: ObservableObject {
             return
         }
 
+        // Only a poll that goes to the network shows the spinner.
+        loading = true
+        defer { loading = false }
         Log.poll.info("tick mode=\(mode) due=\(due.count)/\(accounts.count) locked=\(inactive)")
-        let results = await fetchAccounts(due)
-
-        let applyAt = Date()
-        var anyGood = false
-        for (id, snapshot) in results {
-            apply(accountID: id, snapshot: snapshot, now: applyAt)
-            if snapshot.error == nil { anyGood = true }
-        }
-        if anyGood || lastUpdated == nil {
-            lastUpdated = applyAt
-        }
-        rebuildWidgets()
+        await fetchAccounts(due)
     }
 
-    /// Parallel fetch with concurrency cap (default 2).
-    private func fetchAccounts(_ accounts: [Account]) async -> [(AccountID, UsageSnapshot)] {
-        var collected: [(AccountID, UsageSnapshot)] = []
-        collected.reserveCapacity(accounts.count)
-        var index = 0
-        while index < accounts.count {
-            let end = min(index + Self.maxFetchConcurrency, accounts.count)
-            let batch = Array(accounts[index..<end])
-            index = end
-            await withTaskGroup(of: (AccountID, UsageSnapshot).self) { group in
-                for account in batch {
-                    let ref = account.credentialRef
-                    let vendorID = account.vendorID
-                    let id = account.id
-                    group.addTask {
-                        let started = Date()
-                        let snapshot: UsageSnapshot
-                        if let adapter = VendorRegistry.adapter(for: vendorID) {
-                            snapshot = await adapter.fetchUsage(ref)
-                        } else {
-                            snapshot = UsageSnapshot(
-                                primary: WindowUsage(usedFraction: 0, kind: .unknown),
-                                secondary: nil,
-                                plan: nil,
-                                fetchedAt: Date(),
-                                error: .unavailable("unknown vendor")
-                            )
-                        }
-                        let ms = Int(Date().timeIntervalSince(started) * 1000)
-                        let outcome: String
-                        switch snapshot.error {
-                        case nil: outcome = "ok"
-                        case .rateLimited?: outcome = "rateLimited"
-                        case .authRequired?: outcome = "authRequired"
-                        case .network?: outcome = "network"
-                        case .parse?: outcome = "parse"
-                        case .unavailable?: outcome = "unavailable"
-                        }
-                        Log.fetch.info("usage vendor=\(vendorID) account=\(id.short) ms=\(ms) outcome=\(outcome)")
-                        return (id, snapshot)
-                    }
+    /// At most `maxFetchConcurrency` requests in flight. A slot frees as soon as
+    /// its account answers, and each result is applied on arrival, so one slow
+    /// vendor holds one slot instead of the whole batch.
+    private func fetchAccounts(_ accounts: [Account]) async {
+        await Self.forEachBounded(
+            accounts,
+            limit: Self.maxFetchConcurrency,
+            start: { account -> Account? in account },
+            work: { account in await Self.fetchOne(account) },
+            finish: { account, snapshot in
+                let applyAt = Date()
+                self.apply(accountID: account.id, snapshot: snapshot, now: applyAt)
+                if snapshot.error == nil || self.lastUpdated == nil {
+                    self.lastUpdated = applyAt
                 }
-                for await item in group {
-                    collected.append(item)
+                self.rebuildWidgets()
+            }
+        )
+    }
+
+    nonisolated private static func fetchOne(_ account: Account) async -> UsageSnapshot {
+        let started = Date()
+        let snapshot: UsageSnapshot
+        if let adapter = VendorRegistry.adapter(for: account.vendorID) {
+            snapshot = await adapter.fetchUsage(account.credentialRef)
+        } else {
+            snapshot = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                secondary: nil,
+                plan: nil,
+                fetchedAt: Date(),
+                error: .unavailable("unknown vendor")
+            )
+        }
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        let outcome: String
+        switch snapshot.error {
+        case nil: outcome = "ok"
+        case .rateLimited?: outcome = "rateLimited"
+        case .authRequired?: outcome = "authRequired"
+        case .network?: outcome = "network"
+        case .parse?: outcome = "parse"
+        case .unavailable?: outcome = "unavailable"
+        }
+        Log.fetch.info("usage vendor=\(account.vendorID) account=\(account.id.short) ms=\(ms) outcome=\(outcome)")
+        return snapshot
+    }
+
+    /// Run `work` for each item with at most `limit` jobs in flight. `start`
+    /// runs on the caller's actor right before an item starts (nil skips it);
+    /// `finish` runs there as soon as that job's result lands.
+    static func forEachBounded<Item, Job: Sendable, Result: Sendable>(
+        _ items: [Item],
+        limit: Int,
+        isolation: isolated (any Actor)? = #isolation,
+        start: (Item) -> Job?,
+        work: @escaping @Sendable (Job) async -> Result,
+        finish: (Job, Result) -> Void
+    ) async {
+        var waiting = items[...]
+        await withTaskGroup(of: (Job, Result).self) { group in
+            var running = 0
+            while true {
+                while running < max(1, limit), let item = waiting.popFirst() {
+                    guard let job = start(item) else { continue }
+                    group.addTask { (job, await work(job)) }
+                    running += 1
                 }
+                guard let (job, result) = await group.next() else { break }
+                running -= 1
+                finish(job, result)
             }
         }
-        return collected
     }
 
     private func apply(accountID: AccountID, snapshot: UsageSnapshot, now: Date) {
@@ -848,15 +861,17 @@ final class UsageOrchestrator: ObservableObject {
     private func rebuildWidgets() {
         expireCooldowns(now: Date())
         let mode = preferences.displayMode
-        widgets = accountStore.accounts.map { account in
+        let next = accountStore.accounts.map { account in
             makeViewModel(account: account, mode: mode)
         }
+        // Every assignment re-renders SwiftUI observers; most ticks change nothing.
+        if next != widgets { widgets = next }
         rebuildFetchStatuses()
     }
 
     private func rebuildFetchStatuses() {
         let now = Date()
-        fetchStatuses = accountStore.accounts.map { account in
+        let statuses: [AccountFetchStatus] = accountStore.accounts.map { account in
             let attempt = lastFetchAt[account.id]
             let success = lastSuccessAt[account.id]
             let err = lastError[account.id]
@@ -904,7 +919,9 @@ final class UsageOrchestrator: ObservableObject {
                 outcome: outcome
             )
         }
-        budgetCaption = Self.estimateBudgetCaption(accounts: accountStore.accounts)
+        if statuses != fetchStatuses { fetchStatuses = statuses }
+        let budget = Self.estimateBudgetCaption(accounts: accountStore.accounts)
+        if budget != budgetCaption { budgetCaption = budget }
     }
 
     /// Rough **worst case** for background traffic: every account burning at once.

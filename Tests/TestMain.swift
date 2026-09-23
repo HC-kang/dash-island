@@ -13,6 +13,7 @@ struct TestMain {
         failures += UsageProjectionSuite.run()
         failures += ClaudeActivitySuite.run()
         failures += PollingPathSuite.run()
+        failures += await PollingPathSuite.runAsync()
         failures += ClaudeAdapterSuite.run()
         failures += await ClaudeAdapterSuite.runGate()
         failures += CodexAdapterSuite.run()
