@@ -31,6 +31,14 @@ enum IslandGeometry {
     /// compact island leaves the menu bar center clickable.
     static let handleSize = CGSize(width: 64, height: 4)
 
+    /// Pointer hit test in AppKit global coordinates. A pointer pushed against
+    /// the top of a display reports y == maxY, which `CGRect.contains` excludes.
+    /// `NSMouseInRect` counts the top edge and drops the bottom one, so a shared
+    /// edge belongs to exactly one display.
+    static func pointer(_ point: CGPoint, isOn frame: CGRect) -> Bool {
+        NSMouseInRect(point, frame, false)
+    }
+
     static func menuBarHeight(
         safeTop: CGFloat,
         visibleFrameDelta: CGFloat,

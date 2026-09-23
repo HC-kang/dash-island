@@ -16,6 +16,19 @@ enum IslandGeometrySuite {
             try assertEqual(G.menuBarHeight(safeTop: 0, visibleFrameDelta: 0, statusBarThickness: 22), 22)
             try assertEqual(G.menuBarHeight(safeTop: 0, visibleFrameDelta: 0, statusBarThickness: 0), 24)
         }
+        f += check("a pointer pushed against the top edge is on that display") {
+            // AppKit reports y == maxY at the top edge; `CGRect.contains` drops it,
+            // so follow-cursor found no display where the island sits.
+            let lower = CGRect(x: 0, y: 0, width: 1512, height: 982)
+            let upper = CGRect(x: 0, y: 982, width: 1512, height: 982)
+            try assertTrue(G.pointer(CGPoint(x: 700, y: 982), isOn: lower))
+            try assertTrue(G.pointer(CGPoint(x: 700, y: 1964), isOn: upper))
+            try assertTrue(!G.pointer(CGPoint(x: 700, y: 1965), isOn: upper))
+            // A shared edge belongs to exactly one display.
+            for p in [CGPoint(x: 700, y: 982), CGPoint(x: 700, y: 981.5)] {
+                try assertTrue(G.pointer(p, isOn: lower) != G.pointer(p, isOn: upper))
+            }
+        }
         f += check("compact: notch pill with rim pad and 80pt floor") {
             try assertEqual(G.compactSize(notchWidth: 185, notchHeight: 32, hasNotch: true), CGSize(width: 191, height: 35))
             try assertEqual(G.compactSize(notchWidth: 40, notchHeight: 32, hasNotch: true).width, 80)

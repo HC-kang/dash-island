@@ -90,7 +90,7 @@ struct DisplayInfo: Equatable {
 
     /// Display containing a global AppKit point (e.g. `NSEvent.mouseLocation`).
     static func infoContaining(_ point: NSPoint) -> DisplayInfo? {
-        all().first { $0.screen.frame.contains(point) }
+        all().first { IslandGeometry.pointer(point, isOn: $0.screen.frame) }
     }
 
     static func infoContainingMouse() -> DisplayInfo? {

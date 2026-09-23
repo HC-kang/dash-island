@@ -554,7 +554,7 @@ final class IslandWindowController {
 
         // Most moves stay on one display: skip the per-screen UUID lookup until
         // the pointer leaves the display it was last resolved on.
-        if let frame = lastPointerScreenFrame, frame.contains(NSEvent.mouseLocation) { return }
+        if let frame = lastPointerScreenFrame, IslandGeometry.pointer(NSEvent.mouseLocation, isOn: frame) { return }
         guard let under = DisplayInfo.infoContainingMouse() else { return }
         lastPointerScreenFrame = under.screen.frame
         let live = TargetDisplayStore.shared.followLiveStableID
@@ -583,6 +583,9 @@ final class IslandWindowController {
                   still.stableID == candidateID
             else {
                 self.followCandidateStableID = nil
+                // The cache still names the candidate; without this reset the
+                // fast path never looks up the display again while the pointer stays.
+                self.lastPointerScreenFrame = nil
                 return
             }
             TargetDisplayStore.shared.setFollowLive(stableID: still.stableID)
