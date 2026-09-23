@@ -32,12 +32,8 @@ final class IslandWindowController {
     init() {
         let notch = NotchInfo.detect(from: DisplayInfo.currentScreen())
         model = IslandModel(notch: notch)
-        NSLog(
-            "DashIsland: notch width=%.1f height=%.1f hasNotch=%@ minX=%@",
-            notch.width,
-            notch.height,
-            notch.hasNotch ? "yes" : "no",
-            notch.screenMinX.map { String(format: "%.1f", $0) } ?? "nil"
+        Log.window.info(
+            "notch width=\(notch.width) height=\(notch.height) hasNotch=\(notch.hasNotch) minX=\(notch.screenMinX.map { String(format: "%.1f", $0) } ?? "nil")"
         )
 
         window = BorderlessFloatingWindow(
@@ -313,12 +309,8 @@ final class IslandWindowController {
         let screen = DisplayInfo.currentScreen()
         let next = NotchInfo.detect(from: screen)
         model.updateNotch(next)
-        NSLog(
-            "DashIsland: notch refresh width=%.1f height=%.1f minX=%@ screen=%@",
-            next.width,
-            next.height,
-            next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil",
-            screen?.localizedName ?? "?"
+        Log.window.info(
+            "notch refresh width=\(next.width) height=\(next.height) minX=\(next.screenMinX.map { String(format: "%.1f", $0) } ?? "nil") screen=\(screen?.localizedName ?? "?")"
         )
     }
 

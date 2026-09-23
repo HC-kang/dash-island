@@ -42,29 +42,18 @@ final class AccountStore: ObservableObject {
                     reindex(&loaded)
                     accounts = loaded
                     try? persistence.save(accounts)
-                    NSLog(
-                        "DashIsland: recovered %d orphan credential folder(s) → accounts.json",
-                        recovered.count
-                    )
+                    Log.accounts.warn("recovered orphans=\(recovered.count)")
                 } else {
                     accounts = loaded
                 }
             } else {
                 accounts = loaded
             }
-            NSLog(
-                "DashIsland: loaded %d account(s) from %@",
-                accounts.count,
-                path
-            )
+            Log.accounts.info("load count=\(accounts.count) path=\(path)")
         } catch {
             // Corrupt list: keep empty in-memory but do **not** overwrite the file.
             accounts = []
-            NSLog(
-                "DashIsland: failed to load accounts.json (%@) — left file intact at %@",
-                String(describing: error),
-                path
-            )
+            Log.accounts.error("load failed error=\(error) path=\(path) file=kept")
             if isLivePersistence {
                 let recovered = recoverOrphans(existing: [])
                 if !recovered.isEmpty {
@@ -75,7 +64,7 @@ final class AccountStore: ObservableObject {
                     reindex(&loaded)
                     accounts = loaded
                     try? persistence.save(accounts)
-                    NSLog("DashIsland: rebuilt accounts.json from %d credential folder(s)", accounts.count)
+                    Log.accounts.warn("rebuilt fromFolders=\(accounts.count)")
                 }
             }
         }
@@ -95,6 +84,7 @@ final class AccountStore: ObservableObject {
         var copy = account
         copy.sortIndex = accounts.count
         try persist(accounts + [copy])
+        Log.accounts.info("add account=\(copy.id.short) vendor=\(copy.vendorID)")
     }
 
     /// Create metadata from an adapter `beginAdd` result. Account `id` matches folder UUID when possible.
@@ -114,6 +104,7 @@ final class AccountStore: ObservableObject {
             lastAuthenticatedAt: Date()
         )
         try persist(accounts + [account])
+        Log.accounts.info("add account=\(account.id.short) vendor=\(account.vendorID)")
         return account
     }
 
@@ -124,6 +115,7 @@ final class AccountStore: ObservableObject {
         let removed = next.remove(at: index)
         // A failed metadata save must not remove the account or its credentials.
         try persist(next)
+        Log.accounts.info("remove account=\(removed.id.short) vendor=\(removed.vendorID)")
         let dir = CredentialStore.directoryURL(for: removed.credentialRef)
         switch removed.vendorID {
         case "claude":
@@ -145,6 +137,8 @@ final class AccountStore: ObservableObject {
         var next = accounts
         next[index].label = label
         try persist(next)
+        // Label text may be an e-mail address: log the id only.
+        Log.accounts.info("rename account=\(id.short)")
     }
 
     /// Move `id` so it ends at `toIndex` in the final array (0-based).
@@ -156,6 +150,7 @@ final class AccountStore: ObservableObject {
         let item = list.remove(at: from)
         list.insert(item, at: target)
         try persist(list)
+        Log.accounts.info("reorder account=\(id.short) from=\(from) to=\(target)")
     }
 
     /// Replace order with an explicit id list (drag commit). Unknown ids ignored.
@@ -173,6 +168,7 @@ final class AccountStore: ObservableObject {
         let after = next.map(\.id)
         guard after != before else { return }
         try persist(next)
+        Log.accounts.info("reorder count=\(after.count)")
     }
 
     /// After adapter `reauthenticate`, stamp auth time and optionally replace credential ref.

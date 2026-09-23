@@ -37,6 +37,7 @@ final class LocalUsageStore: ObservableObject {
             guard !loading.contains(provider), updated[provider].map({ Date().timeIntervalSince($0) >= 10 }) ?? true else { return }
             loading.insert(provider)
             defer { loading.remove(provider) }
+            let started = Date()
             let captured = await Task.detached(priority: .utility) {
                 AccountUsageReader.readAccounts(provider: provider)
             }.value
@@ -50,11 +51,13 @@ final class LocalUsageStore: ObservableObject {
                     notice: identity == nil ? "Account identity unavailable. Reauthenticate this account to reconnect tracking." : captured.notice)
                 updated[key] = date
             }
+            Log.local.info("load provider=\(provider) scope=captured events=\(captured.accounts.values.reduce(0) { $0 + $1.count }) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
             return
         }
         if let date = updated[key], Date().timeIntervalSince(date) < 120 { return }
         loading.insert(key)
         defer { loading.remove(key) }
+        let started = Date()
         // Keep the existing transcript archive, separate from captured-call totals.
         let archiveScope = transcriptHistory ? provider : key
         if snapshots[key] == nil {
@@ -63,6 +66,7 @@ final class LocalUsageStore: ObservableObject {
         let roots = roots(provider: provider, accountID: accountID)
         snapshots[key] = await LocalUsageArchive.shared.refresh(provider: provider, roots: roots, scope: archiveScope)
         updated[key] = Date()
+        Log.local.info("load provider=\(provider) scope=\(archiveScope) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
     }
 
     private func roots(provider: String, accountID: AccountID?) -> [URL] {
