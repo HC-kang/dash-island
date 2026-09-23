@@ -86,15 +86,19 @@ struct GrokAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let priorToken = Self.readSession(grokHome: dir)?.accessToken
+        // Move auth.json aside, never delete it: Cancel or a failed login used
+        // to leave a healthy account with no refresh token at all.
+        let prior = CredentialStore.PriorFiles.stash(Self.authFiles(grokHome: dir))
         do {
-            // Wipe first — runLogin otherwise returns as soon as old auth.json is seen.
-            Self.clearManagedCredentials(grokHome: dir)
-            try await ensureCredentials(grokHome: dir, forceLogin: true)
+            try await runLogin(grokHome: dir, priorToken: priorToken)
             _ = try Self.requireSession(grokHome: dir)
+            prior.discard()
             return ref
-        } catch let error as GrokAdapterError {
-            throw error
         } catch {
+            prior.restore()
+            if error is CancellationError { throw error }
+            if let error = error as? GrokAdapterError { throw error }
             throw GrokAdapterError.reauthFailed(error.localizedDescription)
         }
     }
@@ -171,26 +175,29 @@ struct GrokAdapter: VendorAdapter {
         throw GrokAdapterError.grokBinaryNotFound
     }
 
-    static func clearManagedCredentials(grokHome: URL) {
-        let fm = FileManager.default
-        let paths = [
+    /// `$GROK_HOME/auth.json`, plus the nested copy a HOME-isolated login writes.
+    static func authFiles(grokHome: URL) -> [URL] {
+        [
             grokHome.appendingPathComponent(authFileName, isDirectory: false),
             grokHome
                 .appendingPathComponent(".grok", isDirectory: true)
                 .appendingPathComponent(authFileName, isDirectory: false),
         ]
-        for path in paths where fm.fileExists(atPath: path.path) {
+    }
+
+    static func clearManagedCredentials(grokHome: URL) {
+        let fm = FileManager.default
+        for path in authFiles(grokHome: grokHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         Log.auth.info("clearCreds vendor=grok dir=\(grokHome.path)")
     }
 
-    private func runLogin(grokHome: URL) async throws {
+    /// `priorToken` is never accepted as the new login's result.
+    private func runLogin(grokHome: URL, priorToken: String? = nil) async throws {
         guard let binary = Self.locateGrokBinary() else {
             throw GrokAdapterError.grokBinaryNotFound
         }
-
-        let priorToken = Self.readSession(grokHome: grokHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)

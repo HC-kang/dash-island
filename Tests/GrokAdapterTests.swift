@@ -240,6 +240,23 @@ enum GrokAdapterSuite {
             try assertEqual(snap.plan, "SuperGrok")
         }
 
+        failures += check("reauth keeps auth.json aside, restored on cancel") {
+            let home = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-island-grok-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            let nested = home.appendingPathComponent(".grok/auth.json")
+            try FileManager.default.createDirectory(
+                at: nested.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(#"{"https://auth.x.ai":{"key":"tok-old","refresh_token":"rt-old"}}"#.utf8).write(to: nested)
+            let prior = CredentialStore.PriorFiles.stash(GrokAdapter.authFiles(grokHome: home))
+            try assertTrue(GrokAdapter.readSession(grokHome: home) == nil, "grok login starts signed out")
+            prior.restore()
+            try assertEqual(GrokAdapter.readSession(grokHome: home)?.refreshToken, "rt-old")
+        }
+
         return failures
     }
 }

@@ -186,6 +186,18 @@ enum CodexAdapterSuite {
             let roundtrip = try JSONDecoder().decode(UsageSnapshot.self, from: JSONEncoder().encode(old))
             try assertTrue(roundtrip.resetCreditsAvailable == nil)
         }
+        failures += check("reauth keeps auth.json aside, restored on cancel") {
+            let home = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-island-codex-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            let auth = #"{"tokens":{"access_token":"at-old","refresh_token":"rt-old"}}"#
+            try Data(auth.utf8).write(to: home.appendingPathComponent("auth.json"))
+            let prior = CredentialStore.PriorFiles.stash(CodexAdapter.authFiles(codexHome: home))
+            try assertTrue(CodexAdapter.readCredentials(codexHome: home) == nil, "codex login starts signed out")
+            prior.restore()
+            try assertEqual(CodexAdapter.readCredentials(codexHome: home)?.refreshToken, "rt-old")
+        }
         failures += check("registry includes codex") {
             try assertTrue(VendorRegistry.adapter(for: "codex") != nil)
             try assertEqual(VendorRegistry.adapter(for: "codex")?.displayName, "Codex")

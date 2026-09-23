@@ -172,7 +172,7 @@ enum AccountChromeActions {
         case "agy":
             message = "Extending this Antigravity session. A Terminal sign-in opens only if the stored session no longer works."
         default:
-            message = "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes)."
+            message = "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds."
         }
         IslandDialogController.shared.showProgress(
             title: "Reauthenticate",

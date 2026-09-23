@@ -81,15 +81,19 @@ struct CodexAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let priorToken = Self.readCredentials(codexHome: dir)?.accessToken
+        // Move auth.json aside, never delete it: Cancel or a failed login used
+        // to leave a healthy account with no refresh token at all.
+        let prior = CredentialStore.PriorFiles.stash(Self.authFiles(codexHome: dir))
         do {
-            // Wipe first — existing auth.json makes runLogin return immediately.
-            Self.clearManagedCredentials(codexHome: dir)
-            try await runLogin(codexHome: dir)
+            try await runLogin(codexHome: dir, priorToken: priorToken)
             _ = try Self.requireCredentials(codexHome: dir)
+            prior.discard()
             return ref
-        } catch let error as CodexAdapterError {
-            throw error
         } catch {
+            prior.restore()
+            if error is CancellationError { throw error }
+            if let error = error as? CodexAdapterError { throw error }
             throw CodexAdapterError.reauthFailed(error.localizedDescription)
         }
     }
@@ -132,26 +136,29 @@ struct CodexAdapter: VendorAdapter {
 
     // MARK: - Login (managed CODEX_HOME)
 
-    static func clearManagedCredentials(codexHome: URL) {
-        let fm = FileManager.default
-        let paths = [
+    /// `$CODEX_HOME/auth.json`, plus the nested copy a HOME-isolated login writes.
+    static func authFiles(codexHome: URL) -> [URL] {
+        [
             codexHome.appendingPathComponent(authFileName, isDirectory: false),
             codexHome
                 .appendingPathComponent(".codex", isDirectory: true)
                 .appendingPathComponent(authFileName, isDirectory: false),
         ]
-        for path in paths where fm.fileExists(atPath: path.path) {
+    }
+
+    static func clearManagedCredentials(codexHome: URL) {
+        let fm = FileManager.default
+        for path in authFiles(codexHome: codexHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         Log.auth.info("clearCreds vendor=codex dir=\(codexHome.path)")
     }
 
-    private func runLogin(codexHome: URL) async throws {
+    /// `priorToken` is never accepted as the new login's result.
+    private func runLogin(codexHome: URL, priorToken: String? = nil) async throws {
         guard let binary = Self.locateCodexBinary() else {
             throw CodexAdapterError.codexBinaryNotFound
         }
-
-        let priorToken = Self.readCredentials(codexHome: codexHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
