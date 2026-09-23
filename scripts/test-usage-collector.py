@@ -137,6 +137,48 @@ with tempfile.TemporaryDirectory() as temporary:
     assert installed.read_bytes() == source_collector, 'an older installed collector is replaced'
 print('PASS: connector installs the repo collector unless the installed copy is newer')
 
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    tracking = home / 'Library/Application Support/DashIsland/tracking'
+    plist = home / 'Library/LaunchAgents/dev.dashisland.usage-collector.plist'
+    codex_path, claude_path, custom = home / '.codex/config.toml', home / '.claude/settings.json', home / 'custom'
+    codex_path.parent.mkdir()
+    codex_path.write_text('model="keep"\n')
+    claude_path.parent.mkdir()
+    claude_path.write_text('{"env": {"KEEP": "yes", "OTEL_LOG_USER_PROMPTS": "1"}}')
+    originals = {path: path.read_bytes() for path in (codex_path, claude_path)}
+    environ = {'CLAUDE_CONFIG_DIR': str(custom)}
+    calls = []
+    try:
+        quiet(i.install, home, environ, launchctl(calls, fail=True))
+        raise AssertionError('a collector that cannot start must stop the connector')
+    except SystemExit as error:
+        assert 'boom' in str(error)
+    assert {path: path.read_bytes() for path in originals} == originals and not (custom / 'settings.json').exists()
+    assert not (tracking / 'config-backups').exists(), 'nothing was changed, so nothing is backed up'
+    started = []
+    quiet(i.install, home, environ, launchctl(calls, before=lambda _: started.append('otel' in codex_path.read_text())))
+    assert started == [False, False], 'the collector runs before any CLI config points at it'
+    assert json.loads(claude_path.read_text())['env']['OTEL_LOG_USER_PROMPTS'] == '0'
+    assert (custom / 'settings.json').exists()
+    # Edits made after connecting belong to the user and survive a disconnect.
+    settings = json.loads(claude_path.read_text())
+    settings['env']['OTEL_LOG_TOOL_DETAILS'] = '1'
+    settings['permissions'] = {'allow': ['Bash(ls)']}
+    claude_path.write_text(json.dumps(settings))
+    (tracking / 'account-usage.sqlite').write_bytes(b'kept')
+    calls = []
+    quiet(i.disconnect, home, {}, launchctl(calls))
+    assert codex_path.read_bytes() == originals[codex_path]
+    assert json.loads(claude_path.read_text()) == {'env': {'KEEP': 'yes', 'OTEL_LOG_USER_PROMPTS': '1', 'OTEL_LOG_TOOL_DETAILS': '1'},
+                                                   'permissions': {'allow': ['Bash(ls)']}}
+    assert not (custom / 'settings.json').exists(), 'a file the connector created is removed (found via the manifest)'
+    assert calls == ['bootout'] and not plist.exists() and not (tracking / 'collector-token').exists()
+    assert (tracking / 'account-usage.sqlite').read_bytes() == b'kept'
+    quiet(i.disconnect, home, {}, launchctl(calls))
+    assert codex_path.read_bytes() == originals[codex_path], 'disconnect is idempotent'
+print('PASS: connector starts the collector first, changes nothing when it fails, and disconnect undoes only its own settings')
+
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:
