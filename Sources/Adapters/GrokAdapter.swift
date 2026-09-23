@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - Errors
 
@@ -73,7 +74,7 @@ struct GrokAdapter: VendorAdapter {
         let ref = accountID.uuidString
         do {
             let dir = try CredentialStore.createDirectory(for: ref)
-            try await ensureCredentials(grokHome: dir)
+            try await runLogin(grokHome: dir)
             let session = try Self.requireSession(grokHome: dir)
             let short = String(ref.prefix(8))
             let label = Self.suggestedLabel(email: session.email, short: short)
@@ -86,15 +87,19 @@ struct GrokAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let priorToken = Self.readSession(grokHome: dir)?.accessToken
+        // Move auth.json aside, never delete it: Cancel or a failed login used
+        // to leave a healthy account with no refresh token at all.
+        let prior = CredentialStore.PriorFiles.stash(Self.authFiles(grokHome: dir))
         do {
-            // Wipe first — runLogin otherwise returns as soon as old auth.json is seen.
-            Self.clearManagedCredentials(grokHome: dir)
-            try await ensureCredentials(grokHome: dir, forceLogin: true)
+            try await runLogin(grokHome: dir, priorToken: priorToken)
             _ = try Self.requireSession(grokHome: dir)
+            prior.discard()
             return ref
-        } catch let error as GrokAdapterError {
-            throw error
         } catch {
+            prior.restore()
+            if error is CancellationError { throw error }
+            if let error = error as? GrokAdapterError { throw error }
             throw GrokAdapterError.reauthFailed(error.localizedDescription)
         }
     }
@@ -107,22 +112,19 @@ struct GrokAdapter: VendorAdapter {
         }
 
         // Proactive refresh when access is near/past expiry (managed folder only).
+        // A busy token host is soft: the current access may still work, so probe.
+        var quiet: UsageSnapshot?
         if !Self.isAccessTokenFresh(session) {
             switch await Self.refreshManagedSession(grokHome: dir) {
             case .success(let next):
                 session = next
                 Log.auth.info("refresh vendor=grok outcome=ok trigger=proactive ref=\(String(ref.prefix(8)))")
-            case .rateLimited(let retry):
-                return Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry),
-                    fetchedAt: now
-                )
             case .rejected:
                 return Self.errorSnapshot(.authRequired, fetchedAt: now)
-            case .unavailable(let message):
-                return Self.errorSnapshot(.unavailable(message), fetchedAt: now)
+            case .unavailable(let message, let retryAt):
+                quiet = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: now)
             case .skipped:
-                return Self.errorSnapshot(.authRequired, fetchedAt: now)
+                break
             }
         }
 
@@ -130,67 +132,51 @@ struct GrokAdapter: VendorAdapter {
 
         // Reactive: billing 401/403 → one forced refresh + retry.
         if case .authRequired = snap.error {
+            if let quiet { return quiet }
             switch await Self.refreshManagedSession(grokHome: dir) {
             case .success(let next):
                 snap = await Self.probeUsage(session: next, fetchedAt: Date())
                 if snap.error == nil {
                     Log.auth.info("refresh vendor=grok outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
                 }
-            case .rateLimited(let retry):
-                snap = Self.errorSnapshot(
-                    .rateLimited(retryAfter: retry),
-                    fetchedAt: Date()
-                )
             case .rejected, .skipped:
                 snap = Self.errorSnapshot(.authRequired, fetchedAt: Date())
-            case .unavailable(let message):
-                snap = Self.errorSnapshot(.unavailable(message), fetchedAt: Date())
+            case .unavailable(let message, let retryAt):
+                snap = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: Date())
             }
         }
         return snap
     }
 
-    // MARK: - Login / seed credentials
+    // MARK: - Login
+    //
+    // Add never copies the user's global `~/.grok/auth.json` any more: that
+    // clone shared one refresh-token family, so our rotation logged the user's
+    // own `grok` out (and theirs broke ours). No CLI found → install it.
 
-    /// Prefer interactive `grok login` under managed `GROK_HOME`. If the binary
-    /// is missing, fall back to copying a usable default `~/.grok/auth.json`
-    /// only for **first add** (`forceLogin == false`) — never on reauth.
-    private func ensureCredentials(grokHome: URL, forceLogin: Bool = false) async throws {
-        if !forceLogin, Self.readSession(grokHome: grokHome) != nil {
-            return
-        }
-        if Self.locateGrokBinary() != nil {
-            try await runLogin(grokHome: grokHome)
-            _ = try Self.requireSession(grokHome: grokHome)
-            return
-        }
-        // beginAdd only: seed from default home when CLI is absent.
-        if !forceLogin, try Self.copyDefaultAuthIfPresent(into: grokHome) {
-            return
-        }
-        throw GrokAdapterError.grokBinaryNotFound
-    }
-
-    static func clearManagedCredentials(grokHome: URL) {
-        let fm = FileManager.default
-        let paths = [
+    /// `$GROK_HOME/auth.json`, plus the nested copy a HOME-isolated login writes.
+    static func authFiles(grokHome: URL) -> [URL] {
+        [
             grokHome.appendingPathComponent(authFileName, isDirectory: false),
             grokHome
                 .appendingPathComponent(".grok", isDirectory: true)
                 .appendingPathComponent(authFileName, isDirectory: false),
         ]
-        for path in paths where fm.fileExists(atPath: path.path) {
+    }
+
+    static func clearManagedCredentials(grokHome: URL) {
+        let fm = FileManager.default
+        for path in authFiles(grokHome: grokHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         Log.auth.info("clearCreds vendor=grok dir=\(grokHome.path)")
     }
 
-    private func runLogin(grokHome: URL) async throws {
+    /// `priorToken` is never accepted as the new login's result.
+    private func runLogin(grokHome: URL, priorToken: String? = nil) async throws {
         guard let binary = Self.locateGrokBinary() else {
             throw GrokAdapterError.grokBinaryNotFound
         }
-
-        let priorToken = Self.readSession(grokHome: grokHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -217,53 +203,30 @@ struct GrokAdapter: VendorAdapter {
             return !session.accessToken.isEmpty
         }
 
-        while Date() < deadline {
-            if Task.isCancelled {
-                if task.isRunning { task.terminate() }
-                throw CancellationError()
-            }
-            if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning {
-                    task.terminate()
-                }
-                return
-            }
-            if !task.isRunning {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        // Cancel ends `grok login` too, so no orphan keeps the callback port.
+        try await LoginProcess.supervise(task) {
+            while Date() < deadline {
+                try Task.checkCancellation()
                 if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
                     return
                 }
-                throw GrokAdapterError.credentialsMissing(grokHome: grokHome.path)
+                if !task.isRunning {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
+                        return
+                    }
+                    throw GrokAdapterError.credentialsMissing(grokHome: grokHome.path)
+                }
+                try await Task.sleep(nanoseconds: Self.pollNanos)
             }
-            try await Task.sleep(nanoseconds: Self.pollNanos)
-        }
 
-        if task.isRunning {
-            task.terminate()
+            LoginProcess.terminate(task)
+            if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
+                return
+            }
+            throw GrokAdapterError.loginTimeout(grokHome: grokHome.path)
         }
-        if let session = Self.readSession(grokHome: grokHome), isAcceptable(session) {
-            return
-        }
-        throw GrokAdapterError.loginTimeout(grokHome: grokHome.path)
-    }
-
-    /// Copy `~/.grok/auth.json` into managed home when it already has a token.
-    @discardableResult
-    static func copyDefaultAuthIfPresent(into grokHome: URL) throws -> Bool {
-        let defaultAuth = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".grok", isDirectory: true)
-            .appendingPathComponent(authFileName, isDirectory: false)
-        guard FileManager.default.fileExists(atPath: defaultAuth.path),
-              let data = try? Data(contentsOf: defaultAuth),
-              parseAuthJSON(data) != nil
-        else { return false }
-        let dest = grokHome.appendingPathComponent(authFileName, isDirectory: false)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
-        }
-        try data.write(to: dest, options: .atomic)
-        return true
     }
 
     private static func requireSession(grokHome: URL) throws -> GrokSession {
@@ -300,9 +263,10 @@ struct GrokAdapter: VendorAdapter {
     enum RefreshOutcome: Equatable {
         case success(GrokSession)
         case skipped
-        case rateLimited(Date?)
+        /// Spent or revoked grant: only a new `grok login` helps.
         case rejected
-        case unavailable(String)
+        /// Token host busy / down (429, 5xx, network): keep the session.
+        case unavailable(String, retryAt: Date?)
     }
 
     /// Prefer `$GROK_HOME/auth.json`; fall back to nested `.grok/auth.json`
@@ -422,27 +386,28 @@ struct GrokAdapter: VendorAdapter {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
-                return .unavailable("token refresh: bad response")
+                return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
             }
-            switch http.statusCode {
-            case 200..<300:
-                break
-            case 429:
-                Log.auth.warn("refresh vendor=grok http=429")
-                return .rateLimited(retryAfterDate(from: http))
-            case 400, 401, 403:
-                Log.auth.warn("refresh vendor=grok outcome=rejected http=\(http.statusCode)")
-                return .rejected
-            default:
-                Log.auth.warn("refresh vendor=grok http=\(http.statusCode)")
-                return .unavailable("token refresh HTTP \(http.statusCode)")
+            guard (200..<300).contains(http.statusCode) else {
+                switch TokenHostFailure.classify(
+                    status: http.statusCode,
+                    body: data,
+                    retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+                ) {
+                case .rejected, .badClient:
+                    Log.auth.warn("refresh vendor=grok outcome=rejected http=\(http.statusCode)")
+                    return .rejected
+                case .unavailable(let retryAt):
+                    Log.auth.warn("refresh vendor=grok outcome=quiet http=\(http.statusCode)")
+                    return .unavailable(TokenHostFailure.quietMessage(status: http.statusCode), retryAt: retryAt)
+                }
             }
 
             guard let resp = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let access = resp["access_token"] as? String,
                   !access.isEmpty
             else {
-                return .unavailable("token refresh parse failed")
+                return .unavailable("token quiet — token refresh parse failed", retryAt: nil)
             }
 
             entry["key"] = access
@@ -459,9 +424,15 @@ struct GrokAdapter: VendorAdapter {
                 withJSONObject: root,
                 options: [.prettyPrinted, .sortedKeys]
             ) else {
-                return .unavailable("token refresh encode failed")
+                return .unavailable("token quiet — token refresh encode failed", retryAt: nil)
             }
-            try? updated.write(to: path, options: .atomic)
+            do {
+                try CredentialStore.writeSecret(updated, to: path)
+            } catch {
+                // The server already rotated: the old refresh token is spent.
+                Log.auth.error("refresh vendor=grok outcome=writeFailed error=\(error.localizedDescription)")
+                return .unavailable("token quiet — credential write failed", retryAt: nil)
+            }
 
             session.accessToken = access
             session.refreshToken = (entry["refresh_token"] as? String) ?? refresh
@@ -470,7 +441,7 @@ struct GrokAdapter: VendorAdapter {
             return .success(session)
         } catch {
             Log.auth.warn("refresh vendor=grok outcome=failed error=\(error.localizedDescription)")
-            return .unavailable("token refresh: \(error.localizedDescription)")
+            return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
         }
     }
 
@@ -499,8 +470,20 @@ struct GrokAdapter: VendorAdapter {
     /// Weekly alone drives rings + burn; monthly is a secondary ring only.
     nonisolated static let monthlyFetchMinInterval: TimeInterval = 15 * 60
 
-    /// Best-effort thrift cache (races only waste an occasional extra fetch).
-    nonisolated(unsafe) private static var monthlyCache: [String: (at: Date, window: WindowUsage?)] = [:]
+    private struct MonthlyEntry: Sendable {
+        let at: Date
+        let window: WindowUsage?
+    }
+
+    /// Thrift cache, one entry per account. Two accounts fetch in parallel,
+    /// and an unlocked Dictionary written from both is undefined behavior.
+    private static let monthlyCache = OSAllocatedUnfairLock(initialState: [String: MonthlyEntry]())
+
+    /// The account: user id, else its managed file. Never a token prefix —
+    /// JWTs share their first characters, so accounts would swap months.
+    static func monthlyCacheKey(_ session: GrokSession) -> String {
+        session.userId ?? session.filePath?.path ?? session.accessToken
+    }
 
     static func probeUsage(session: GrokSession, fetchedAt: Date) async -> UsageSnapshot {
         let creditsResult = await fetchBilling(url: creditsURL, session: session)
@@ -517,7 +500,7 @@ struct GrokAdapter: VendorAdapter {
                 )
             }
             let plan = config["subscriptionTier"] as? String
-            let cacheKey = session.userId ?? String(session.accessToken.prefix(16))
+            let cacheKey = monthlyCacheKey(session)
 
             if let weekly = mapWeeklyCredits(config) {
                 // Live Grok credits are **weekly**, not 5h. Monthly is optional
@@ -560,7 +543,7 @@ struct GrokAdapter: VendorAdapter {
         cacheKey: String,
         now: Date
     ) async -> WindowUsage? {
-        let cached = monthlyCache[cacheKey]
+        let cached = monthlyCache.withLock { $0[cacheKey] }
         if let cached, now.timeIntervalSince(cached.at) < monthlyFetchMinInterval {
             return cached.window
         }
@@ -574,12 +557,12 @@ struct GrokAdapter: VendorAdapter {
         } else {
             window = cached?.window
         }
-        monthlyCache[cacheKey] = (now, window)
+        storeMonthlyCache(key: cacheKey, window: window, at: now)
         return window
     }
 
     private static func storeMonthlyCache(key: String, window: WindowUsage?, at: Date) {
-        monthlyCache[key] = (at, window)
+        monthlyCache.withLock { $0[key] = MonthlyEntry(at: at, window: window) }
     }
 
     private enum BillingFetch {
@@ -642,9 +625,11 @@ struct GrokAdapter: VendorAdapter {
                 error: nil
             )
         }
-        // No weekly — caller may try monthly fallback. Surface as soft empty for pure parse tests.
+        // No weekly — caller may try monthly fallback. "Not reported", never a real 0%.
+        var empty = WindowUsage(usedFraction: 0, kind: .unknown)
+        empty.reported = false
         return UsageSnapshot(
-            primary: WindowUsage(usedFraction: 0, kind: .unknown),
+            primary: empty,
             secondary: nil,
             plan: plan,
             fetchedAt: fetchedAt,
@@ -677,39 +662,6 @@ struct GrokAdapter: VendorAdapter {
         return errorSnapshot(
             .unavailable("Grok billing response did not include credit usage"),
             fetchedAt: fetchedAt
-        )
-    }
-
-    /// Full dual-window parse when both weekly and monthly are known (tests / future).
-    static func parseBillingWindows(
-        weeklyConfig: [String: Any]?,
-        monthlyConfig: [String: Any]?,
-        plan: String?,
-        fetchedAt: Date = Date()
-    ) -> UsageSnapshot {
-        let weekly = weeklyConfig.flatMap(mapWeeklyCredits)
-        let monthly = monthlyConfig.flatMap(mapMonthlyUsage)
-        if weekly == nil && monthly == nil {
-            return errorSnapshot(
-                .unavailable("Grok billing response did not include credit usage"),
-                fetchedAt: fetchedAt
-            )
-        }
-        if let weekly {
-            return UsageSnapshot(
-                primary: weekly,
-                secondary: monthly,
-                plan: plan,
-                fetchedAt: fetchedAt,
-                error: nil
-            )
-        }
-        return UsageSnapshot(
-            primary: monthly!,
-            secondary: nil,
-            plan: plan,
-            fetchedAt: fetchedAt,
-            error: nil
         )
     }
 
@@ -762,8 +714,8 @@ struct GrokAdapter: VendorAdapter {
         return WindowUsage(
             usedFraction: fraction,
             resetAt: periodEndDate(config),
-            usedTokens: Int64(used.rounded()),
-            limitTokens: Int64(limit.rounded()),
+            usedTokens: JSONNumber.int64(used),
+            limitTokens: JSONNumber.int64(limit),
             kind: .monthly
         )
     }
@@ -792,11 +744,7 @@ struct GrokAdapter: VendorAdapter {
     }
 
     static func numberValue(_ value: Any?) -> Double? {
-        if let d = value as? Double { return d }
-        if let i = value as? Int { return Double(i) }
-        if let i = value as? Int64 { return Double(i) }
-        if let s = value as? String, let d = Double(s) { return d }
-        return nil
+        JSONNumber.double(value)
     }
 
     static func timestampsMatch(_ left: Any?, _ right: Any?) -> Bool {
@@ -847,6 +795,9 @@ struct GrokAdapter: VendorAdapter {
             "/usr/local/bin/grok",
             "\(home)/.npm-global/bin/grok",
             "\(home)/.bun/bin/grok",
+            "\(home)/.volta/bin/grok",
+            "\(home)/.local/share/mise/shims/grok",
+            "\(home)/.asdf/shims/grok",
         ]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path

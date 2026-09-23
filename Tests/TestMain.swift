@@ -16,8 +16,12 @@ struct TestMain {
         failures += CodexAdapterSuite.run()
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
+        failures += await AgyAdapterSuite.runLogin()
         failures += await LocalUsageSuite.run()
         failures += LogSuite.run()
+        failures += await LoginProcessSuite.run()
+        failures += CredentialStoreSuite.run()
+        failures += await TokenHostSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

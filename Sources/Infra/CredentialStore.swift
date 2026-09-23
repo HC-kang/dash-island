@@ -13,6 +13,10 @@ import Foundation
 ///     Codex:  auth.json
 ///     Grok:   auth.json
 /// ```
+enum CredentialStoreError: Error, Equatable {
+    case invalidRef
+}
+
 enum CredentialStore {
     static let appFolderName = "DashIsland"
 
@@ -34,8 +38,26 @@ enum CredentialStore {
     }
 
     /// Directory for a single account credential ref: `accounts/<ref>/`.
-    static func directoryURL(for ref: CredentialRef) -> URL {
-        rootURL.appendingPathComponent(ref, isDirectory: true)
+    static func directoryURL(for ref: CredentialRef, root: URL = rootURL) -> URL {
+        root.appendingPathComponent(ref, isDirectory: true)
+    }
+
+    /// A ref is exactly one folder name under `accounts/`. `""`, `.` and `..`
+    /// resolve to the root or its parent, so removing one would delete every account.
+    static func isValidRef(_ ref: CredentialRef) -> Bool {
+        !ref.isEmpty && ref != "." && ref != ".." && !ref.contains("/") && !ref.contains("\0")
+    }
+
+    private static func checkedDirectoryURL(for ref: CredentialRef, root: URL) throws -> URL {
+        let url = directoryURL(for: ref, root: root)
+        guard isValidRef(ref),
+              url.standardizedFileURL.deletingLastPathComponent().path
+                == root.standardizedFileURL.path
+        else {
+            Log.accounts.error("credentialRef rejected length=\(ref.count)")
+            throw CredentialStoreError.invalidRef
+        }
+        return url
     }
 
     /// App-owned last-good usage cache (error-free rings) for one managed account.
@@ -56,19 +78,82 @@ enum CredentialStore {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Create `accounts/<ref>/` (and parents). Returns the directory URL.
+    /// Create `accounts/<ref>/` (and parents), owner-only. Returns the directory URL.
     @discardableResult
-    static func createDirectory(for ref: CredentialRef) throws -> URL {
-        let url = directoryURL(for: ref)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    static func createDirectory(for ref: CredentialRef, root: URL = rootURL) throws -> URL {
+        let url = try checkedDirectoryURL(for: ref, root: root)
+        let fm = FileManager.default
+        try fm.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // Folders made by older builds are 0755.
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url
     }
 
-    /// Remove `accounts/<ref>/` if it exists.
-    static func removeDirectory(for ref: CredentialRef) throws {
-        let url = directoryURL(for: ref)
+    /// Remove `accounts/<ref>/` if it exists. Refuses anything but one child of `root`.
+    static func removeDirectory(for ref: CredentialRef, root: URL = rootURL) throws {
+        let url = try checkedDirectoryURL(for: ref, root: root)
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// Write a credential file: atomic, owner-only (0600), then read back.
+    /// A rotated refresh token that silently fails to land is gone for good.
+    static func writeSecret(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        guard (try? Data(contentsOf: url)) == data else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    /// Reauth keeps the live session until the new login is accepted.
+    ///
+    /// `stash` moves each session file to `<name>.prior` so the CLI starts
+    /// signed out. `restore` drops whatever the failed login wrote and moves the
+    /// old files back; `discard` deletes the copies after success. A copy left by
+    /// a crashed reauth (no live file) is adopted, so the next attempt restores it.
+    struct PriorFiles {
+        let paths: [URL]
+        let moved: [URL]
+
+        static func priorURL(for url: URL) -> URL {
+            url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".prior")
+        }
+
+        static func stash(_ paths: [URL]) -> PriorFiles {
+            let fm = FileManager.default
+            var moved: [URL] = []
+            for path in paths {
+                let prior = priorURL(for: path)
+                if fm.fileExists(atPath: path.path) {
+                    try? fm.removeItem(at: prior)
+                    if (try? fm.moveItem(at: path, to: prior)) != nil { moved.append(path) }
+                } else if fm.fileExists(atPath: prior.path) {
+                    moved.append(path)
+                }
+            }
+            return PriorFiles(paths: paths, moved: moved)
+        }
+
+        func restore() {
+            let fm = FileManager.default
+            for path in paths where fm.fileExists(atPath: path.path) {
+                try? fm.removeItem(at: path)
+            }
+            for path in moved {
+                try? fm.moveItem(at: Self.priorURL(for: path), to: path)
+            }
+        }
+
+        func discard() {
+            for path in moved {
+                try? FileManager.default.removeItem(at: Self.priorURL(for: path))
+            }
         }
     }
 
