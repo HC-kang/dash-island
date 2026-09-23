@@ -67,6 +67,27 @@ final class UsageOrchestrator: ObservableObject {
         case expand
         /// Manual refresh — still respects minPoll unless cooldowns cleared by `refresh()`.
         case force
+
+        fileprivate var rank: Int {
+            switch self {
+            case .background: return 0
+            case .expand: return 1
+            case .force: return 2
+            }
+        }
+    }
+
+    /// What to run after the poll in flight. Event polls (`forceActive`:
+    /// launch, wake, account change, expand, refresh) are queued, the strongest
+    /// wins; plain timer ticks just wait for the next tick.
+    nonisolated static func queuedPoll(
+        pending: PollMode?,
+        incoming: PollMode,
+        forceActive: Bool
+    ) -> PollMode? {
+        guard forceActive else { return pending }
+        guard let pending else { return incoming }
+        return incoming.rank > pending.rank ? incoming : pending
     }
 
     @Published private(set) var widgets: [WidgetViewModel] = []
@@ -119,6 +140,10 @@ final class UsageOrchestrator: ObservableObject {
     private var powerObservers: [NSObjectProtocol] = []
     private var started = false
     private var polling = false
+    /// Event poll that arrived while `polling`; runs right after (`queuedPoll`).
+    private var pendingPoll: PollMode?
+    /// Guards against applying a result fetched with replaced credentials.
+    private var generations = PollGenerations()
     /// True between willSleep and didWake — skip network polls.
     private var systemAsleep = false
     /// Screen locked (optional extra inactive floor when awake).
@@ -192,6 +217,7 @@ final class UsageOrchestrator: ObservableObject {
         cancellables.removeAll()
         started = false
         polling = false
+        pendingPoll = nil
     }
 
     /// Force a poll. Optionally mark one account immediately due (e.g. after reauth).
@@ -200,6 +226,8 @@ final class UsageOrchestrator: ObservableObject {
         if let accountID {
             lastFetchAt[accountID] = nil
             cooldownUntil[accountID] = nil
+            // Reauth: a fetch still running used the old credentials; drop its result.
+            generations.bump(accountID)
         } else {
             for id in accountStore.accounts.map(\.id) {
                 lastFetchAt[id] = nil
@@ -449,6 +477,7 @@ final class UsageOrchestrator: ObservableObject {
         projectionByAccount = projectionByAccount.filter { live.contains($0.key) }
         projectionIdentity = projectionIdentity.filter { live.contains($0.key) }
         lastPrimaryDelta = lastPrimaryDelta.filter { live.contains($0.key) }
+        generations.prune(live: live)
     }
 
     /// Reload error-free rings from disk so restart + soft quiet keeps gauges.
@@ -510,8 +539,15 @@ final class UsageOrchestrator: ObservableObject {
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
         // Coalesce overlapping ticks (timer may fire while a slow adapter runs).
+        // A user or event request is queued and runs right after, never dropped.
         guard !polling else {
-            Log.poll.debug("tick skip reason=inflight mode=\(mode)")
+            let queued = Self.queuedPoll(pending: pendingPoll, incoming: mode, forceActive: forceActive)
+            if queued != pendingPoll {
+                pendingPoll = queued
+                Log.poll.debug("tick queue reason=inflight mode=\(mode)")
+            } else {
+                Log.poll.debug("tick skip reason=inflight mode=\(mode)")
+            }
             return
         }
         // While asleep, never hit vendor APIs (wake handler resumes).
@@ -522,7 +558,14 @@ final class UsageOrchestrator: ObservableObject {
 
         polling = true
         defer { polling = false }
+        await runPoll(mode: mode, forceActive: forceActive)
+        while let next = pendingPoll {
+            pendingPoll = nil
+            await runPoll(mode: next, forceActive: true)
+        }
+    }
 
+    private func runPoll(mode: PollMode, forceActive: Bool) async {
         let accounts = accountStore.accounts
         guard !accounts.isEmpty else {
             if !widgets.isEmpty { widgets = [] }
@@ -597,11 +640,24 @@ final class UsageOrchestrator: ObservableObject {
         await Self.forEachBounded(
             accounts,
             limit: Self.maxFetchConcurrency,
-            start: { account -> FetchJob? in FetchJob(account: account, startedAt: Date()) },
+            start: { queued -> FetchJob? in
+                // Read the account again: it may have been removed or reauthed
+                // (new credentialRef) while it waited for a slot.
+                guard let account = self.accountStore.accounts.first(where: { $0.id == queued.id }) else {
+                    return nil
+                }
+                return FetchJob(account: account, startedAt: Date(), generation: self.generations.current(account.id))
+            },
             work: { job in await Self.fetchOne(job.account) },
             finish: { job, snapshot in
+                let id = job.account.id
+                let live = Set(self.accountStore.accounts.map(\.id))
+                guard self.generations.accepts(id, generation: job.generation, live: live) else {
+                    Log.poll.info("discard account=\(id.short) reason=stale")
+                    return
+                }
                 let applyAt = Date()
-                self.apply(accountID: job.account.id, snapshot: snapshot, startedAt: job.startedAt, now: applyAt)
+                self.apply(accountID: id, snapshot: snapshot, startedAt: job.startedAt, now: applyAt)
                 if snapshot.error == nil || self.lastUpdated == nil {
                     self.lastUpdated = applyAt
                 }
@@ -615,6 +671,8 @@ final class UsageOrchestrator: ObservableObject {
         /// Spacing is measured start to start. Stamping after the round trip
         /// made every interval one fetch longer than asked.
         let startedAt: Date
+        /// `PollGenerations.current` when the fetch started.
+        let generation: Int
     }
 
     nonisolated private static func fetchOne(_ account: Account) async -> UsageSnapshot {
@@ -1346,6 +1404,27 @@ final class UsageOrchestrator: ObservableObject {
             return String(format: "%.1fm", v / 1_000_000)
         }
         return String(format: "%.0fm", v / 1_000_000)
+    }
+}
+
+// MARK: - Poll generations
+
+/// Per-account counter bumped when an account's credentials change under a
+/// running poll (reauth). A result is applied only when the generation it
+/// started under is still current and the account still exists.
+struct PollGenerations: Equatable {
+    private var values: [AccountID: Int] = [:]
+
+    func current(_ id: AccountID) -> Int { values[id] ?? 0 }
+
+    mutating func bump(_ id: AccountID) { values[id] = current(id) + 1 }
+
+    func accepts(_ id: AccountID, generation: Int, live: Set<AccountID>) -> Bool {
+        live.contains(id) && current(id) == generation
+    }
+
+    mutating func prune(live: Set<AccountID>) {
+        values = values.filter { live.contains($0.key) }
     }
 }
 

@@ -48,6 +48,35 @@ enum PollingPathSuite {
             try assertTrue(UsageOrchestrator.caption(for: snap.error, vendorID: "claude") == nil)
         }
 
+        failures += check("poll generations: a result started before reauth or removal is dropped") {
+            let a = UUID(), b = UUID()
+            var gens = PollGenerations()
+            let started = gens.current(a)
+            try assertTrue(gens.accepts(a, generation: started, live: [a, b]))
+            gens.bump(a)                                     // reauth / refresh(accountID:)
+            try assertTrue(!gens.accepts(a, generation: started, live: [a, b]))
+            try assertTrue(gens.accepts(a, generation: gens.current(a), live: [a, b]))
+            // Other accounts keep their in-flight results.
+            try assertTrue(gens.accepts(b, generation: 0, live: [a, b]))
+            // A removed account never takes a result.
+            try assertTrue(!gens.accepts(b, generation: 0, live: [a]))
+            gens.prune(live: [b])
+            try assertEqual(gens.current(a), 0)
+        }
+
+        failures += check("a user poll that meets a running poll is queued, not dropped") {
+            // Plain timer ticks just wait for the next tick.
+            try assertTrue(UsageOrchestrator.queuedPoll(pending: nil, incoming: .background, forceActive: false) == nil)
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: .expand, incoming: .background, forceActive: false), .expand)
+            // Launch / wake / account change / expand / refresh are queued.
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: nil, incoming: .background, forceActive: true), .background)
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: nil, incoming: .expand, forceActive: true), .expand)
+            // The strongest request wins; one queued poll covers them all.
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: .expand, incoming: .force, forceActive: true), .force)
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: .force, incoming: .expand, forceActive: true), .force)
+            try assertEqual(UsageOrchestrator.queuedPoll(pending: .expand, incoming: .background, forceActive: true), .expand)
+        }
+
         return failures
     }
 
