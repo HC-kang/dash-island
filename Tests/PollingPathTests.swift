@@ -64,6 +64,14 @@ enum PollingPathSuite {
             try assertEqual(gens.current(a), 0)
         }
 
+        failures += check("reauth drops last-good rings only for a proven identity change") {
+            try assertTrue(UsageOrchestrator.reauthDropsLastGood(oldIdentity: "a", newIdentity: "b"))
+            try assertTrue(!UsageOrchestrator.reauthDropsLastGood(oldIdentity: "a", newIdentity: "a"))
+            // Unknown on either side: keep the rings, the forced poll replaces them.
+            try assertTrue(!UsageOrchestrator.reauthDropsLastGood(oldIdentity: nil, newIdentity: "b"))
+            try assertTrue(!UsageOrchestrator.reauthDropsLastGood(oldIdentity: "a", newIdentity: nil))
+        }
+
         failures += check("a user poll that meets a running poll is queued, not dropped") {
             // Plain timer ticks just wait for the next tick.
             try assertTrue(UsageOrchestrator.queuedPoll(pending: nil, incoming: .background, forceActive: false) == nil)

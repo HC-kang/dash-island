@@ -228,6 +228,7 @@ final class UsageOrchestrator: ObservableObject {
             cooldownUntil[accountID] = nil
             // Reauth: a fetch still running used the old credentials; drop its result.
             generations.bump(accountID)
+            resetIdentityState(accountID)
         } else {
             for id in accountStore.accounts.map(\.id) {
                 lastFetchAt[id] = nil
@@ -236,6 +237,38 @@ final class UsageOrchestrator: ObservableObject {
         }
         rebuildWidgets()
         Task { await pollDueAccounts(mode: .force, forceActive: true) }
+    }
+
+    /// After a reauth the slot may hold a different login. Never carry signals
+    /// from the old identity over: the cached collector identity, the projection
+    /// and its activity delta, and the burn history go. Last-good rings go only
+    /// when both identities are known and differ; otherwise the forced poll
+    /// replaces them.
+    private func resetIdentityState(_ id: AccountID) {
+        let old = projectionIdentity[id]
+        projectionIdentity[id] = nil
+        projectionByAccount[id] = nil
+        lastPrimaryDelta[id] = nil
+        burnByAccount[id] = nil
+        burnSourceByAccount[id] = nil
+        guard let account = accountStore.accounts.first(where: { $0.id == id }),
+              Self.projectableVendors.contains(account.vendorID)
+        else { return }
+        let home = CredentialStore.directoryURL(for: account.credentialRef)
+        let new = AccountUsageReader.identity(provider: account.vendorID, home: home)
+        if Self.reauthDropsLastGood(oldIdentity: old, newIdentity: new) {
+            lastGood[id] = nil
+            lastSuccessAt[id] = nil
+            lastNotice[id] = nil
+            // Or `restoreLastGoodSnapshots` would reload the old login's rings.
+            CredentialStore.removeLastGoodUsage(inDirectory: home)
+            Log.accounts.info("reauth account=\(id.short) identity=changed lastGood=dropped")
+        }
+    }
+
+    nonisolated static func reauthDropsLastGood(oldIdentity: String?, newIdentity: String?) -> Bool {
+        guard let oldIdentity, let newIdentity else { return false }
+        return oldIdentity != newIdentity
     }
 
     /// Island became expanded (caller should dwell ~400ms first). Lazy refresh
