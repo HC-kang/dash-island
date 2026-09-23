@@ -153,6 +153,9 @@ private struct UsageDetailView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 24)
             }
+            // A connected mouse makes "Automatic" draw the legacy tracked scroller,
+            // which clashes with the dark panel. Scrolling still works.
+            .scrollIndicators(.hidden)
         }
         .background(Color(white: 0.045))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
