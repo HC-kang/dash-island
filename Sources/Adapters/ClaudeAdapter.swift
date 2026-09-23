@@ -161,7 +161,7 @@ struct ClaudeAdapter: VendorAdapter {
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
         let credPath = dir.appendingPathComponent(Self.credentialsFileName, isDirectory: false)
-        let priorFile = try? Data(contentsOf: credPath)
+        var priorFile = try? Data(contentsOf: credPath)
 
         func restorePriorFile() {
             if let priorFile {
@@ -200,6 +200,9 @@ struct ClaudeAdapter: VendorAdapter {
                             break
                         }
                     }
+                    // The refresh rotated the token: the pre-refresh file now
+                    // holds a spent one. A cancelled browser login restores this.
+                    priorFile = try? Data(contentsOf: credPath)
                 case .keepExisting:
                     // Token host 429 / blip — session is still ours. Never a
                     // "Reauthenticate failed" sheet; polls will retry.
