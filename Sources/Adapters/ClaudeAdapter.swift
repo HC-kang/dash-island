@@ -520,14 +520,7 @@ struct ClaudeAdapter: VendorAdapter {
         } catch {
             return nil
         }
-        let deadline = Date().addingTimeInterval(4)
-        while task.isRunning, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        if task.isRunning {
-            task.terminate()
-            return nil
-        }
+        guard await LoginProcess.waitForExit(task, timeout: 4) else { return nil }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         return parseSecurityPasswordStdout(data)
     }
@@ -583,11 +576,7 @@ struct ClaudeAdapter: VendorAdapter {
             Log.auth.warn("cliPing vendor=claude outcome=failed error=\(error.localizedDescription)")
             return false
         }
-        let deadline = Date().addingTimeInterval(45)
-        while task.isRunning, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-        }
-        if task.isRunning { task.terminate() }
+        await LoginProcess.waitForExit(task, timeout: 45)
         Log.auth.info("cliPing vendor=claude outcome=finished dir=\(configDir.path)")
         return true
     }
@@ -639,11 +628,7 @@ struct ClaudeAdapter: VendorAdapter {
         } catch {
             return
         }
-        let deadline = Date().addingTimeInterval(8)
-        while task.isRunning, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        if task.isRunning { task.terminate() }
+        await LoginProcess.waitForExit(task, timeout: 8)
     }
 
     /// File only. Keychain harvest is login-when-file-missing, never a poll.
@@ -727,36 +712,36 @@ struct ClaudeAdapter: VendorAdapter {
             )
         }
 
-        while Date() < deadline {
-            if Task.isCancelled {
-                if task.isRunning { task.terminate() }
-                throw CancellationError()
-            }
-            // Silent Keychain only while waiting — a prompt here would fire
-            // every second with a *new* hashed service name per account folder.
-            if let creds = harvest(prompt: false) {
-                Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning { task.terminate() }
-                return
-            }
-            if !task.isRunning {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if let creds = harvest(prompt: true) {
+        // Cancel ends `claude auth login` too; an orphan could still finish
+        // sign-in and leave a hashed Keychain item for a deleted folder.
+        try await LoginProcess.supervise(task) {
+            while Date() < deadline {
+                try Task.checkCancellation()
+                // Silent Keychain only while waiting — a prompt here would fire
+                // every second with a *new* hashed service name per account folder.
+                if let creds = harvest(prompt: false) {
                     Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
+                    try? await Task.sleep(nanoseconds: 400_000_000)
                     return
                 }
-                throw ClaudeAdapterError.credentialsMissing(configDir: configDir.path)
+                if !task.isRunning {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    if let creds = harvest(prompt: true) {
+                        Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
+                        return
+                    }
+                    throw ClaudeAdapterError.credentialsMissing(configDir: configDir.path)
+                }
+                try await Task.sleep(nanoseconds: Self.pollNanos)
             }
-            try await Task.sleep(nanoseconds: Self.pollNanos)
-        }
 
-        if task.isRunning { task.terminate() }
-        if let creds = harvest(prompt: true) {
-            Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
-            return
+            LoginProcess.terminate(task)
+            if let creds = harvest(prompt: true) {
+                Self.commitHarvestedCredentials(creds: creds, configDir: configDir)
+                return
+            }
+            throw ClaudeAdapterError.loginTimeout(configDir: configDir.path)
         }
-        throw ClaudeAdapterError.loginTimeout(configDir: configDir.path)
     }
 
     /// File only. Do not re-harvest Keychain here — that would persist a leftover

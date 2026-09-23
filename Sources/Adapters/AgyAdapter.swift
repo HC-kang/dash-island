@@ -673,11 +673,7 @@ struct AgyAdapter: VendorAdapter {
             Log.auth.warn("cliPing vendor=agy outcome=failed error=\(error.localizedDescription)")
             return false
         }
-        let deadline = Date().addingTimeInterval(50)
-        while task.isRunning, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-        }
-        if task.isRunning { task.terminate() }
+        await LoginProcess.waitForExit(task, timeout: 50)
         Log.auth.info("cliPing vendor=agy outcome=finished")
         return true
     }

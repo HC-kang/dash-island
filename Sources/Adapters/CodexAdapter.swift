@@ -182,35 +182,30 @@ struct CodexAdapter: VendorAdapter {
             return !creds.accessToken.isEmpty
         }
 
-        while Date() < deadline {
-            if Task.isCancelled {
-                if task.isRunning { task.terminate() }
-                throw CancellationError()
-            }
-            if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning {
-                    task.terminate()
-                }
-                return
-            }
-            if !task.isRunning {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        // Cancel ends `codex login` too, so no orphan keeps the callback port.
+        try await LoginProcess.supervise(task) {
+            while Date() < deadline {
+                try Task.checkCancellation()
                 if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
                     return
                 }
-                throw CodexAdapterError.credentialsMissing(codexHome: codexHome.path)
+                if !task.isRunning {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                        return
+                    }
+                    throw CodexAdapterError.credentialsMissing(codexHome: codexHome.path)
+                }
+                try await Task.sleep(nanoseconds: Self.pollNanos)
             }
-            try await Task.sleep(nanoseconds: Self.pollNanos)
-        }
 
-        if task.isRunning {
-            task.terminate()
+            LoginProcess.terminate(task)
+            if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                return
+            }
+            throw CodexAdapterError.loginTimeout(codexHome: codexHome.path)
         }
-        if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
-            return
-        }
-        throw CodexAdapterError.loginTimeout(codexHome: codexHome.path)
     }
 
     private static func requireCredentials(codexHome: URL) throws -> CodexCreds {
