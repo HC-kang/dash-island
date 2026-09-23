@@ -18,6 +18,7 @@ struct TestMain {
         failures += AgyAdapterSuite.run()
         failures += await LocalUsageSuite.run()
         failures += LogSuite.run()
+        failures += VendorStatusSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

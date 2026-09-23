@@ -99,14 +99,16 @@ final class VendorStatusStore: ObservableObject {
         await fetchStatuspage(
             url: "https://status.claude.com/api/v2/summary.json",
             vendorLabel: "Claude",
-            // Prefer product surfaces we actually hit.
-            preferredComponentNames: [
-                "Claude API (api.anthropic.com)",
-                "Claude Code",
-                "claude.ai",
-            ]
+            preferredComponentNames: claudeComponents
         )
     }
+
+    /// Exact status-page component names for product surfaces we actually hit.
+    nonisolated static let claudeComponents = [
+        "Claude API (api.anthropic.com)",
+        "Claude Code",
+        "claude.ai",
+    ]
 
     // MARK: - OpenAI / Codex
 
@@ -114,14 +116,19 @@ final class VendorStatusStore: ObservableObject {
         await fetchStatuspage(
             url: "https://status.openai.com/api/v2/summary.json",
             vendorLabel: "OpenAI",
-            preferredComponentNames: [
-                "Codex API",
-                "Codex in ChatGPT Desktop",
-                "ChatGPT",
-                "API",
-            ]
+            preferredComponentNames: openAIComponents
         )
     }
+
+    /// Exact names of the Codex surfaces on status.openai.com (checked 2026-09-23).
+    /// `CLI` and `VS Code extension` were created together with the Codex entries.
+    nonisolated static let openAIComponents = [
+        "Codex API",
+        "Codex Web",
+        "Codex in ChatGPT Desktop",
+        "CLI",
+        "VS Code extension",
+    ]
 
     // MARK: - Statuspage.io shared parser
 
@@ -168,38 +175,67 @@ final class VendorStatusStore: ObservableObject {
         let indicator = (overall?["indicator"] as? String)?.lowercased() ?? "none"
         let description = (overall?["description"] as? String) ?? "Status unknown"
 
-        var level = levelFromIndicator(indicator)
-
-        // Elevate from preferred components if they look worse than overall "none".
-        if let components = obj["components"] as? [[String: Any]] {
-            let preferred = preferredComponentNames.map { $0.lowercased() }
-            for c in components {
-                guard let name = c["name"] as? String else { continue }
-                let nl = name.lowercased()
-                let isPreferred = preferred.contains(where: { nl.contains($0) || $0.contains(nl) })
-                    || preferred.isEmpty
-                guard isPreferred else { continue }
-                let st = (c["status"] as? String)?.lowercased() ?? "operational"
-                let compLevel = levelFromComponentStatus(st)
-                if compLevel > level { level = compLevel }
-            }
+        // Exact names only: substring matching pulled in "Ads API" and "Compliance API".
+        let preferred = Set(preferredComponentNames.map { $0.lowercased() })
+        let matched = (obj["components"] as? [[String: Any]] ?? []).filter {
+            ($0["name"] as? String).map { preferred.contains($0.lowercased()) } ?? false
+        }
+        let open = (obj["incidents"] as? [[String: Any]] ?? []).filter {
+            let st = ($0["status"] as? String)?.lowercased() ?? ""
+            return st != "resolved" && st != "postmortem" && st != "completed"
+        }
+        func incidentLevel(_ inc: [String: Any]) -> ServiceLevel {
+            let impact = (inc["impact"] as? String)?.lowercased() ?? ""
+            return impact == "critical" || impact == "major" ? .outage : .degraded
         }
 
-        // Active incidents can force degraded even if indicator lags.
-        if let incidents = obj["incidents"] as? [[String: Any]], !incidents.isEmpty {
-            for inc in incidents {
-                let st = (inc["status"] as? String)?.lowercased() ?? ""
-                let impact = (inc["impact"] as? String)?.lowercased() ?? ""
-                if st == "resolved" || st == "postmortem" || st == "completed" { continue }
-                if impact == "critical" || impact == "major" {
-                    level = max(level, .outage)
-                } else {
-                    level = max(level, .degraded)
-                }
-            }
+        guard !matched.isEmpty else {
+            // None of our components on the page (renamed?): judge the page as a whole.
+            var level = levelFromIndicator(indicator)
+            for inc in open { level = max(level, incidentLevel(inc)) }
+            return VendorServiceSnapshot(
+                level: level,
+                summary: "\(vendorLabel): \(description)",
+                fetchedAt: now,
+                sourceURL: sourceURL
+            )
         }
 
-        let summary = "\(vendorLabel): \(description)"
+        // Only our components, and incidents that name one of them. The page-wide
+        // indicator also rises for unrelated products (Sora, Ads API), so skip it here.
+        var level = ServiceLevel.operational
+        var worst: String?
+        for c in matched {
+            let st = (c["status"] as? String)?.lowercased() ?? "operational"
+            let compLevel = levelFromComponentStatus(st)
+            if compLevel > level {
+                level = compLevel
+                worst = "\(c["name"] as? String ?? "") \(st.replacingOccurrences(of: "_", with: " "))"
+            }
+        }
+        let ids = Set(matched.compactMap { $0["id"] as? String })
+        let names = Set(matched.compactMap { ($0["name"] as? String)?.lowercased() })
+        var headline: String?
+        for inc in open {
+            let touched = (inc["components"] as? [[String: Any]] ?? []).contains { c in
+                (c["id"] as? String).map { ids.contains($0) } == true
+                    || (c["name"] as? String).map { names.contains($0.lowercased()) } == true
+            }
+            guard touched else { continue }
+            level = max(level, incidentLevel(inc))
+            if headline == nil { headline = inc["name"] as? String }
+        }
+
+        let summary: String
+        if let headline {
+            summary = "\(vendorLabel): \(headline)"
+        } else if let worst {
+            summary = "\(vendorLabel): \(worst)"
+        } else if levelFromIndicator(indicator) <= .operational {
+            summary = "\(vendorLabel): \(description)"
+        } else {
+            summary = "\(vendorLabel): no issue on used services (\(description) elsewhere)"
+        }
         return VendorServiceSnapshot(
             level: level,
             summary: summary,
