@@ -102,6 +102,36 @@ enum AgyAdapterSuite {
             try assertTrue(snap.error != nil)
         }
 
+        failures += check("no quotas are not reported, never a real 0%") {
+            let snap = AgyAdapter.parseAvailableModelsResponse(data: Data(#"{"models":{}}"#.utf8))
+            try assertEqual(snap.error, nil as UsageError?)
+            try assertTrue(!snap.primary.isReported)
+        }
+
+        failures += check("daily or unlabeled quota is not a 5h window") {
+            let json = """
+            {"models":{
+              "a":{"quotaInfo":{"remainingFraction":0.5,"windowLabel":"daily"}},
+              "b":{"quotaInfo":{"remainingFraction":0.9}}
+            }}
+            """
+            let snap = AgyAdapter.parseAvailableModelsResponse(data: Data(json.utf8))
+            try assertEqual(snap.primary.kind, UsageWindowKind.unknown)
+            try assertTrue(snap.secondary?.kind != .fiveHour && snap.tertiary?.kind != .fiveHour)
+        }
+
+        failures += check("omitted remainingFraction with a reset time is exhausted") {
+            // proto3 JSON drops zero values: the empty model is the important one.
+            let json = """
+            {"models":{"pro":{"displayName":"Pro","quotaInfo":{"resetTime":"2026-08-18T12:00:00Z"}},
+                       "flash":{"quotaInfo":{}}}}
+            """
+            let snap = AgyAdapter.parseAvailableModelsResponse(data: Data(json.utf8))
+            try assertEqual(snap.primary.usedFraction, 1.0, accuracy: 0.0001)
+            try assertEqual(snap.primary.displayLabel, "Pro")
+            try assertTrue(snap.secondary == nil && snap.tertiary == nil, "no reading → no ring")
+        }
+
         failures += check("reauth rejects leftover access or refresh") {
             let leftover = AgyAdapter.AgyCreds(
                 accessToken: "old-access",

@@ -563,11 +563,10 @@ struct AgyAdapter: VendorAdapter {
         }
         windows.sort { $0.usedFraction > $1.usedFraction }
         guard let primary = windows.first else {
-            return UsageSnapshot(
-                primary: WindowUsage(usedFraction: 0, kind: .unknown),
-                plan: "agy",
-                fetchedAt: fetchedAt
-            )
+            // No quota at all is "not reported", never a real 0%.
+            var empty = WindowUsage(usedFraction: 0, kind: .unknown)
+            empty.reported = false
+            return UsageSnapshot(primary: empty, plan: "agy", fetchedAt: fetchedAt)
         }
         let extras = Array(windows.dropFirst())
         let weekly = extras.first(where: { $0.kind == .weekly })
@@ -829,10 +828,12 @@ struct AgyAdapter: VendorAdapter {
         return out
     }
 
+    /// proto3 JSON omits zero values: a quota with a reset time but no
+    /// fraction is spent — the one model that matters most.
     private static func remainingFraction(_ quota: [String: Any]) -> Double? {
         if let n = quota["remainingFraction"] as? Double { return n }
         if let n = quota["remainingFraction"] as? Int { return Double(n) }
-        return nil
+        return quota["resetTime"] != nil ? 0 : nil
     }
 
     private static func windowKind(_ quota: [String: Any]) -> UsageWindowKind {
@@ -845,10 +846,9 @@ struct AgyAdapter: VendorAdapter {
         .lowercased()
         if source.contains("week") || source.contains("7d") { return .weekly }
         if source.contains("month") { return .monthly }
-        if source.contains("day") || source.contains("daily") || source.contains("24h") {
-            return .fiveHour
-        }
-        return .fiveHour
+        // Daily or unlabeled windows are not 5h: a "5h" label and 5h burn
+        // pace were wrong for them. `.unknown` has no domain kind to lie with.
+        return .unknown
     }
 
     private static func parseResetTime(_ raw: Any?) -> Date? {

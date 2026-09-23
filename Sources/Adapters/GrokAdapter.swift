@@ -645,9 +645,11 @@ struct GrokAdapter: VendorAdapter {
                 error: nil
             )
         }
-        // No weekly — caller may try monthly fallback. Surface as soft empty for pure parse tests.
+        // No weekly — caller may try monthly fallback. "Not reported", never a real 0%.
+        var empty = WindowUsage(usedFraction: 0, kind: .unknown)
+        empty.reported = false
         return UsageSnapshot(
-            primary: WindowUsage(usedFraction: 0, kind: .unknown),
+            primary: empty,
             secondary: nil,
             plan: plan,
             fetchedAt: fetchedAt,

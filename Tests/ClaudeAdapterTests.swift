@@ -54,12 +54,34 @@ enum ClaudeAdapterSuite {
             try assertEqual(snap.primary.usedFraction, 0.005, accuracy: 0.00001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.01, accuracy: 0.00001)
         }
-        failures += check("missing windows → zero primary, nil secondary") {
+        failures += check("missing windows are not reported, never a real 0%") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("{}".utf8), plan: nil)
             try assertEqual(snap.error, nil as UsageError?)
-            try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
+            try assertTrue(!snap.primary.isReported, "no windows → placeholder, not last-good")
             try assertEqual(snap.primary.kind, UsageWindowKind.fiveHour)
             try assertTrue(snap.secondary == nil)
+            let nulls = ClaudeAdapter.parseUsageResponse(
+                data: Data(#"{"five_hour":null,"seven_day":null}"#.utf8),
+                plan: nil
+            )
+            try assertTrue(!nulls.primary.isReported)
+            try assertTrue(nulls.secondary == nil)
+        }
+        failures += check("null seven_day is no weekly ring, not a 0% one") {
+            let json = #"{"five_hour":{"utilization":12},"seven_day":null}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.12, accuracy: 0.0001)
+            try assertTrue(snap.secondary == nil, "JSON null must not become a 0% week")
+            let noNumber = #"{"five_hour":{"utilization":12},"seven_day":{"resets_at":null}}"#
+            try assertTrue(ClaudeAdapter.parseUsageResponse(data: Data(noNumber.utf8), plan: nil).secondary == nil)
+        }
+        failures += check("idle 5h window next to a real week reads 0% (reported)") {
+            // Ambiguous on purpose: a null five_hour beside a live week is an idle window.
+            let json = #"{"five_hour":null,"seven_day":{"utilization":30}}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertTrue(snap.primary.isReported)
+            try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
+            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.30, accuracy: 0.0001)
         }
         failures += check("invalid JSON → parse error") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("not-json".utf8), plan: nil)

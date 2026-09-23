@@ -108,6 +108,12 @@ enum GrokAdapterSuite {
             )
         }
 
+        failures += check("config without weekly % is not reported") {
+            let snap = GrokAdapter.parseCreditsResponse(data: Data(#"{"config":{"subscriptionTier":"Free"}}"#.utf8))
+            try assertEqual(snap.error, nil as UsageError?)
+            try assertTrue(!snap.primary.isReported)
+        }
+
         failures += check("no config → unavailable") {
             let snap = GrokAdapter.parseCreditsResponse(data: Data("{}".utf8))
             try assertEqual(

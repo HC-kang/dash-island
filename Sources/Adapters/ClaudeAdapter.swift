@@ -1394,11 +1394,14 @@ struct ClaudeAdapter: VendorAdapter {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return errorSnapshot(.parse("parse error"), fetchedAt: fetchedAt)
         }
-        let primary = parseWindow(obj["five_hour"], kind: .fiveHour)
-        let secondary: WindowUsage? = {
-            guard obj["seven_day"] != nil else { return nil }
-            return parseWindow(obj["seven_day"], kind: .weekly)
-        }()
+        // JSON null / no reading is "not reported", never a real 0% (a null
+        // `seven_day` used to paint a 0% week and overwrite last-good).
+        let fiveHour = parseWindow(obj["five_hour"], kind: .fiveHour)
+        let secondary = parseWindow(obj["seven_day"], kind: .weekly)
+        var primary = fiveHour ?? WindowUsage(usedFraction: 0, kind: .fiveHour)
+        // No 5h beside a live week is an idle 5h window: keep 0%. No window at
+        // all is a placeholder that never replaces real rings.
+        if fiveHour == nil, secondary == nil { primary.reported = false }
         let scoped = parseScopedLimitExtras(obj["limits"])
         let tertiary = UsageRingLayout.preferredTertiary(from: scoped)
         let extras = UsageRingLayout.remainingExtras(extras: scoped, tertiary: tertiary)
@@ -1465,10 +1468,9 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Anthropic returns `utilization` / `used_percentage` in [0, 100] (may be fractional).
     /// Prefer absolute token counters when present — finer burn Δ than whole-percent ticks.
-    static func parseWindow(_ obj: Any?, kind: UsageWindowKind) -> WindowUsage {
-        guard let d = obj as? [String: Any] else {
-            return WindowUsage(usedFraction: 0, kind: kind)
-        }
+    /// `nil` when the window is absent, JSON null, or carries no reading.
+    static func parseWindow(_ obj: Any?, kind: UsageWindowKind) -> WindowUsage? {
+        guard let d = obj as? [String: Any] else { return nil }
         let usedTok = jsonInt64(d["used_tokens"])
             ?? jsonInt64(d["tokens_used"])
             ?? jsonInt64(d["used"])
@@ -1478,14 +1480,14 @@ struct ClaudeAdapter: VendorAdapter {
         let raw = jsonNumber(d["utilization"])
             ?? jsonNumber(d["used_percentage"])
             ?? jsonNumber(d["used_percent"])
-            ?? 0
         // API percent is always [0, 100] (0.5 = half a percent, not 50%).
-        let fromPercent = raw / 100.0
+        let fromPercent = raw.map { $0 / 100.0 }
         let fromAbs: Double? = {
             guard let u = usedTok, let lim = limitTok, lim > 0 else { return nil }
             return min(1, max(0, Double(u) / Double(lim)))
         }()
-        let normalized = min(1, max(0, fromAbs ?? fromPercent))
+        guard let fraction = fromAbs ?? fromPercent, fraction.isFinite else { return nil }
+        let normalized = min(1, max(0, fraction))
         let resetAt = parseResetsAt(d["resets_at"])
         return WindowUsage(
             usedFraction: normalized,
