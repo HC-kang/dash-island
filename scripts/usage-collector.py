@@ -59,7 +59,39 @@ def integer(value):
     return int(number)
 
 
-def parse_record(record, resource):
+RATE_KEYS = ("inputPerMillion", "outputPerMillion", "cacheCreationPerMillion", "cacheReadPerMillion")
+
+
+def load_prices(path):
+    """The app's cached UsagePriceCatalog as {model: rates}; None when missing or invalid."""
+    try:
+        catalog = json.loads(path.read_bytes())
+        if catalog["schemaVersion"] != 1 or not catalog["models"]:
+            return None
+        prices = {}
+        for model, price in catalog["models"].items():
+            rates = [float(price[key]) for key in RATE_KEYS]
+            if not all(math.isfinite(rate) and 0 <= rate <= 100_000 for rate in rates):
+                return None  # Same rule as UsagePriceCatalog.valid: one bad row rejects the file.
+            prices[model] = rates
+        return prices
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def estimate(prices, model, tokens):
+    """Mirror UsagePriceCatalog.price(for:).estimate: exact model, else drop a -YYYYMMDD suffix."""
+    prices = prices or {}
+    rates = prices.get(model)
+    suffix = model[-9:]
+    if rates is None and len(suffix) == 9 and suffix[0] == "-" and suffix[1:].isascii() and suffix[1:].isdigit():
+        rates = prices.get(model[:-9])
+    if rates is None:
+        return None
+    return sum(count * rate for count, rate in zip(tokens, rates)) / 1_000_000
+
+
+def parse_record(record, resource, prices=None):
     a = dict(resource)
     a.update(attributes(record.get("attributes")))
     if a.get("dash_island.purpose") == "auth_refresh":
@@ -107,7 +139,7 @@ def parse_record(record, resource):
         if not session:
             return None
         event_id = str(session) + ":" + str(stamp)
-        dollars = None
+        dollars = None  # Priced below, once the model is known.
     else:
         return None
     if not owner or not isinstance(event_id, str) or not 0 < len(event_id) <= 1024:
@@ -117,17 +149,23 @@ def parse_record(record, resource):
         return None
     if not math.isfinite(timestamp) or timestamp <= 0 or sum(tokens) == 0:
         return None
+    if provider == "codex":
+        # Codex reports no cost. Store the API-equivalent price the detail panel would show,
+        # so projection learns from Codex too. Unknown models stay NULL (read-time pricing).
+        dollars = estimate(prices, model, tokens)
+        if dollars is not None and not 0 <= dollars <= 1e6:
+            dollars = None
     return (provider, owner, event_id, timestamp, model, *tokens, dollars)
 
 
-def ingest(db, payload):
+def ingest(db, payload, prices=None):
     accepted = 0
     for resource in payload.get("resourceLogs", []):
         common = attributes(resource.get("resource", {}).get("attributes"))
         for scope in resource.get("scopeLogs", []):
             for record in scope.get("logRecords", []):
                 try:
-                    row = parse_record(record, common)
+                    row = parse_record(record, common, prices)
                 except (ValueError, TypeError, KeyError, OverflowError, AttributeError):
                     continue
                 if row:
@@ -158,6 +196,17 @@ def serve(directory, port):
     # Keep lastBatchAt across restarts; version/startedAt say which copy is running.
     status.update(version=VERSION, startedAt=time.time())
     write_status(directory, status)
+    catalog = directory.parent / "usage-prices.json"  # Written by the app (LocalUsageStore).
+    cached = {"stamp": None, "prices": None}
+
+    def current_prices():
+        try:
+            stamp = catalog.stat().st_mtime_ns
+        except OSError:
+            return None
+        if stamp != cached["stamp"]:
+            cached.update(stamp=stamp, prices=load_prices(catalog))
+        return cached["prices"]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -185,7 +234,7 @@ def serve(directory, port):
                 payload = json.loads(raw)
                 if not isinstance(payload, dict):
                     raise ValueError("object required")
-                accepted = ingest(db, payload)
+                accepted = ingest(db, payload, current_prices())
                 status.update(lastBatchAt=time.time(), accepted=accepted)
                 write_status(directory, status)
             except (ValueError, TypeError, KeyError, AttributeError, TimeoutError):

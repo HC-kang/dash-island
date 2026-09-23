@@ -76,6 +76,31 @@ for vendor, variable in [('codex','CODEX_HOME'),('claude','CLAUDE_CONFIG_DIR'),(
     assert 'OPENAI_API_KEY' not in env and 'ANTHROPIC_API_KEY' not in env
 print('PASS: account isolation, duplicates, cache/reasoning, malformed events, Claude cost, safe/idempotent config merge')
 
+# Codex reports no cost. Price it at ingest from the app's cached catalog so projection has dollars.
+rates = {'inputPerMillion': 1, 'outputPerMillion': 10, 'cacheCreationPerMillion': 2, 'cacheReadPerMillion': 0.1}
+with tempfile.TemporaryDirectory() as temporary:
+    catalog = Path(temporary) / 'usage-prices.json'
+    assert c.load_prices(catalog) is None
+    catalog.write_text(json.dumps({'schemaVersion': 1, 'generatedAt': 'x', 'models': {'gpt-test': rates}}))
+    prices = c.load_prices(catalog)
+    for invalid in [{'schemaVersion': 2, 'models': {'gpt-test': rates}}, {'schemaVersion': 1, 'models': {}},
+                    {'schemaVersion': 1, 'models': {'gpt-test': dict(rates, outputPerMillion=-1)}}, []]:
+        catalog.write_text(json.dumps(invalid))
+        assert c.load_prices(catalog) is None, invalid
+expected = (60 * 1 + 20 * 10 + 10 * 2 + 30 * 0.1) / 1e6
+assert c.estimate(prices, 'gpt-test', [60, 20, 10, 30]) == expected
+assert c.estimate(prices, 'gpt-test-20260101', [1_000_000, 0, 0, 0]) == 1
+assert c.estimate(prices, 'gpt-other', [1, 1, 1, 1]) is None and c.estimate(None, 'gpt-test-20260101', [1, 1, 1, 1]) is None
+priced = sqlite3.connect(':memory:')
+priced.executescript(c.SCHEMA)
+unpriced_claude = record('unused', **{'event.name': 'api_request', 'user.account_uuid': 'claude-b', 'model': 'gpt-test',
+    'input_tokens': 5, 'output_tokens': 6, 'request_id': 'req-b'})
+logs = [record('priced', model='gpt-test'), record('unknown-model', model='other'), unpriced_claude]
+assert c.ingest(priced, {'resourceLogs': [{'scopeLogs': [{'logRecords': logs}]}]}, prices) == 3
+assert dict(priced.execute('select provider || model, dollars from usage_events')) == {
+    'codexgpt-test': expected, 'codexother': None, 'claudegpt-test': None}
+print('PASS: Codex rows are priced from the cached catalog; unknown models and Claude stay as reported')
+
 
 def quiet(function, *args):
     with contextlib.redirect_stdout(io.StringIO()):
@@ -115,13 +140,16 @@ print('PASS: connector installs the repo collector unless the installed copy is 
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:
-    directory = Path(temporary)
+    # Same layout as the app: tracking/ sits next to the cached usage-prices.json.
+    directory = Path(temporary) / 'tracking'
+    directory.mkdir()
     (directory / 'collector-token').write_text('test-token')
+    (Path(temporary) / 'usage-prices.json').write_text(json.dumps({'schemaVersion': 1, 'models': {'gpt-test': rates}}))
     with socket.socket() as reserved:
         reserved.bind(('127.0.0.1', 0))
         port = reserved.getsockname()[1]
     process = subprocess.Popen([sys.executable, str(Path(__file__).with_name('usage-collector.py')),
-                                '--directory', temporary, '--port', str(port)],
+                                '--directory', str(directory), '--port', str(port)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     idle = None
     client = http.client.HTTPConnection('127.0.0.1', port, timeout=8)
@@ -134,13 +162,13 @@ with tempfile.TemporaryDirectory() as temporary:
             except OSError:
                 assert time.monotonic() < deadline, 'collector did not start'
                 time.sleep(0.05)
-        payload = json.dumps({'resourceLogs': [{'scopeLogs': [{'logRecords': [record('http')]}]}]})
+        payload = json.dumps({'resourceLogs': [{'scopeLogs': [{'logRecords': [record('http', model='gpt-test')]}]}]})
         client.request('POST', '/v1/logs', body=payload,
                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'})
         response = client.getresponse()
         assert response.status == 200 and response.read() == b'{}'
         with sqlite3.connect(directory / 'account-usage.sqlite') as captured:
-            assert captured.execute('SELECT COUNT(*) FROM usage_events').fetchone()[0] == 1
+            assert captured.execute('SELECT COUNT(*), SUM(dollars) FROM usage_events').fetchone() == (1, expected)
         status = json.loads((directory / 'collector-status.json').read_text())
         assert status['version'] == c.VERSION and status['startedAt'] <= status['lastBatchAt']
     finally:
