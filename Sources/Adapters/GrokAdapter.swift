@@ -74,7 +74,7 @@ struct GrokAdapter: VendorAdapter {
         let ref = accountID.uuidString
         do {
             let dir = try CredentialStore.createDirectory(for: ref)
-            try await ensureCredentials(grokHome: dir)
+            try await runLogin(grokHome: dir)
             let session = try Self.requireSession(grokHome: dir)
             let short = String(ref.prefix(8))
             let label = Self.suggestedLabel(email: session.email, short: short)
@@ -148,26 +148,11 @@ struct GrokAdapter: VendorAdapter {
         return snap
     }
 
-    // MARK: - Login / seed credentials
-
-    /// Prefer interactive `grok login` under managed `GROK_HOME`. If the binary
-    /// is missing, fall back to copying a usable default `~/.grok/auth.json`
-    /// only for **first add** (`forceLogin == false`) — never on reauth.
-    private func ensureCredentials(grokHome: URL, forceLogin: Bool = false) async throws {
-        if !forceLogin, Self.readSession(grokHome: grokHome) != nil {
-            return
-        }
-        if Self.locateGrokBinary() != nil {
-            try await runLogin(grokHome: grokHome)
-            _ = try Self.requireSession(grokHome: grokHome)
-            return
-        }
-        // beginAdd only: seed from default home when CLI is absent.
-        if !forceLogin, try Self.copyDefaultAuthIfPresent(into: grokHome) {
-            return
-        }
-        throw GrokAdapterError.grokBinaryNotFound
-    }
+    // MARK: - Login
+    //
+    // Add never copies the user's global `~/.grok/auth.json` any more: that
+    // clone shared one refresh-token family, so our rotation logged the user's
+    // own `grok` out (and theirs broke ours). No CLI found → install it.
 
     /// `$GROK_HOME/auth.json`, plus the nested copy a HOME-isolated login writes.
     static func authFiles(grokHome: URL) -> [URL] {
@@ -242,24 +227,6 @@ struct GrokAdapter: VendorAdapter {
             }
             throw GrokAdapterError.loginTimeout(grokHome: grokHome.path)
         }
-    }
-
-    /// Copy `~/.grok/auth.json` into managed home when it already has a token.
-    @discardableResult
-    static func copyDefaultAuthIfPresent(into grokHome: URL) throws -> Bool {
-        let defaultAuth = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".grok", isDirectory: true)
-            .appendingPathComponent(authFileName, isDirectory: false)
-        guard FileManager.default.fileExists(atPath: defaultAuth.path),
-              let data = try? Data(contentsOf: defaultAuth),
-              parseAuthJSON(data) != nil
-        else { return false }
-        let dest = grokHome.appendingPathComponent(authFileName, isDirectory: false)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
-        }
-        try data.write(to: dest, options: .atomic)
-        return true
     }
 
     private static func requireSession(grokHome: URL) throws -> GrokSession {
@@ -861,6 +828,9 @@ struct GrokAdapter: VendorAdapter {
             "/usr/local/bin/grok",
             "\(home)/.npm-global/bin/grok",
             "\(home)/.bun/bin/grok",
+            "\(home)/.volta/bin/grok",
+            "\(home)/.local/share/mise/shims/grok",
+            "\(home)/.asdf/shims/grok",
         ]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path
