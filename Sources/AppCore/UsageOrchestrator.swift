@@ -913,8 +913,9 @@ final class UsageOrchestrator: ObservableObject {
         }
         guard !queries.isEmpty else { return }
 
-        let reads = await Task.detached(priority: .utility) { () -> [AccountID: (learn: Double?, since: Double?)] in
-            var out: [AccountID: (learn: Double?, since: Double?)] = [:]
+        typealias Read = (learn: Double?, since: Double?, anchorAt: Date, learnFrom: Date?)
+        let reads = await Task.detached(priority: .utility) { () -> [AccountID: Read] in
+            var out: [AccountID: Read] = [:]
             for query in queries {
                 let learn = query.learnFrom.flatMap {
                     AccountUsageReader.capturedDollars(
@@ -930,7 +931,7 @@ final class UsageOrchestrator: ObservableObject {
                     from: query.anchorAt,
                     to: now
                 )
-                out[query.id] = (learn: learn, since: since)
+                out[query.id] = (learn: learn, since: since, anchorAt: query.anchorAt, learnFrom: query.learnFrom)
             }
             return out
         }.value
@@ -938,12 +939,15 @@ final class UsageOrchestrator: ObservableObject {
         var changed = false
         for (id, read) in reads {
             guard var projection = projectionByAccount[id] else { continue }
-            if let learn = read.learn { projection.learn(dollarsBetween: learn) }
             let before = projection.projected
-            projection.spentSinceAnchor = read.since ?? 0
-            projection.projected = read.since.flatMap {
-                projection.projectedFraction(spentSinceAnchor: $0, now: now)
-            }
+            // A poll may have re-anchored during the await; then this read is stale.
+            guard projection.applyRead(
+                learn: read.learn,
+                since: read.since,
+                anchorAt: read.anchorAt,
+                learnFrom: read.learnFrom,
+                now: now
+            ) else { continue }
             projectionByAccount[id] = projection
             if abs((projection.projected ?? 0) - (before ?? 0)) > 1e-6 { changed = true }
         }
