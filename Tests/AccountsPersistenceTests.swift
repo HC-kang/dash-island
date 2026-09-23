@@ -64,6 +64,39 @@ enum AccountsPersistenceSuite {
             try assertEqual(loaded.count, 0)
         }
 
+        failures += check("one bad accounts.json row is skipped and backed up, not the whole list") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let fileURL = dir.appendingPathComponent("accounts.json")
+            // Row 2 lacks vendorID; row 3 carries a future field and omits an optional one.
+            let json = """
+            [
+              {"id":"AAAAAAAA-0000-0000-0000-000000000001","vendorID":"fake","label":"Kept A",
+               "credentialRef":"a","sortIndex":0,"createdAt":"2026-01-01T00:00:00Z"},
+              {"id":"BBBBBBBB-0000-0000-0000-000000000002","label":"Broken",
+               "credentialRef":"b","sortIndex":1,"createdAt":"2026-01-01T00:00:00Z"},
+              {"id":"CCCCCCCC-0000-0000-0000-000000000003","vendorID":"fake","label":"Kept C",
+               "credentialRef":"c","sortIndex":2,"createdAt":"2026-01-01T00:00:00Z","futureField":true}
+            ]
+            """
+            try Data(json.utf8).write(to: fileURL)
+            let loaded = try AccountsPersistence(fileURL: fileURL).load()
+            try assertEqual(loaded.map(\.label), ["Kept A", "Kept C"])
+            let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            try assertTrue(names.contains { $0.hasPrefix("accounts.corrupt.") }, "backup missing: \(names)")
+            try assertEqual(try String(contentsOf: fileURL, encoding: .utf8), json)
+        }
+
+        failures += check("accounts.json with no readable row still throws") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let fileURL = dir.appendingPathComponent("accounts.json")
+            try Data(#"[{"label":"only garbage"}]"#.utf8).write(to: fileURL)
+            var threw = false
+            do { _ = try AccountsPersistence(fileURL: fileURL).load() } catch { threw = true }
+            try assertTrue(threw, "an all-bad list must let AccountStore fall back")
+        }
+
         failures += check("AccountStore rejects add beyond maxAccounts") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }

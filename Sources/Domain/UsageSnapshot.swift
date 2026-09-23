@@ -125,6 +125,26 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+extension UsageSnapshot {
+    /// A synthesized decoder ignores property defaults and throws `keyNotFound`, so a
+    /// last-good file saved before a defaulted field existed would silently vanish.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            primary: try c.decode(WindowUsage.self, forKey: .primary),
+            secondary: try c.decodeIfPresent(WindowUsage.self, forKey: .secondary),
+            tertiary: try c.decodeIfPresent(WindowUsage.self, forKey: .tertiary),
+            extras: try c.decodeIfPresent([WindowUsage].self, forKey: .extras) ?? [],
+            plan: try c.decodeIfPresent(String.self, forKey: .plan),
+            fetchedAt: try c.decode(Date.self, forKey: .fetchedAt),
+            error: try c.decodeIfPresent(UsageError.self, forKey: .error),
+            notice: try c.decodeIfPresent(String.self, forKey: .notice),
+            retryAt: try c.decodeIfPresent(Date.self, forKey: .retryAt),
+            resetCreditsAvailable: try c.decodeIfPresent(Int.self, forKey: .resetCreditsAvailable)
+        )
+    }
+}
+
 /// Pure helpers for promoting model-scoped windows onto the third ring.
 enum UsageRingLayout {
     /// Prefer a window labeled "Fable" (Claude), else the first scoped extra.

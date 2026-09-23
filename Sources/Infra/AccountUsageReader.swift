@@ -37,18 +37,21 @@ enum AccountUsageReader {
     }
 
     /// Captured spend for one identity in a half-open range, or nil when the
-    /// database is missing or unreadable. Kept as a single indexed SUM because the
+    /// database is missing or unreadable. Kept as a single indexed query because the
     /// between-poll projection calls it on every scheduler tick — never reuse the
     /// 30-day event read for that.
     ///
-    /// Rows the collector stored without a price are skipped, so this is a lower
-    /// bound. The projection depends on that being a lower bound, not an estimate.
+    /// The collector prices Claude rows itself but stores Codex rows without a price.
+    /// Those are priced here from `catalog` by model, the same way the detail panel
+    /// prices them. A row whose model has no catalog price is skipped, never guessed,
+    /// so a missing price only makes the projection lag.
     static func capturedDollars(
         provider: String,
         identity: String,
         from: Date,
         to: Date,
-        directory: URL = directory
+        directory: URL = directory,
+        catalog: @autoclosure () -> UsagePriceCatalog? = prices
     ) -> Double? {
         guard to > from else { return 0 }
         let file = directory.appendingPathComponent("account-usage.sqlite")
@@ -63,8 +66,12 @@ enum AccountUsageReader {
         sqlite3_busy_timeout(db, 500)
         var statement: OpaquePointer?
         let sql = """
-        SELECT SUM(dollars) FROM usage_events
-        WHERE provider=? AND identity=? AND timestamp>? AND timestamp<=? AND dollars IS NOT NULL
+        SELECT model, SUM(dollars),
+               SUM(CASE WHEN dollars IS NULL THEN input END), SUM(CASE WHEN dollars IS NULL THEN output END),
+               SUM(CASE WHEN dollars IS NULL THEN cache_write END), SUM(CASE WHEN dollars IS NULL THEN cache_read END)
+        FROM usage_events
+        WHERE provider=? AND identity=? AND timestamp>? AND timestamp<=?
+        GROUP BY model
         """
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -73,11 +80,43 @@ enum AccountUsageReader {
         sqlite3_bind_text(statement, 2, identity, -1, transient)
         sqlite3_bind_double(statement, 3, from.timeIntervalSince1970)
         sqlite3_bind_double(statement, 4, to.timeIntervalSince1970)
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        if sqlite3_column_type(statement, 0) == SQLITE_NULL { return 0 }
-        let total = sqlite3_column_double(statement, 0)
+        var total = 0.0
+        var rates: UsagePriceCatalog?
+        var ratesLoaded = false
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { return nil }
+            if sqlite3_column_type(statement, 1) != SQLITE_NULL {
+                total += sqlite3_column_double(statement, 1)
+            }
+            guard sqlite3_column_type(statement, 2) != SQLITE_NULL, let model = sqlite3_column_text(statement, 0) else { continue }
+            let tokens = UsageTokens(input: sqlite3_column_int64(statement, 2), output: sqlite3_column_int64(statement, 3),
+                                     cacheWrite: sqlite3_column_int64(statement, 4), cacheRead: sqlite3_column_int64(statement, 5))
+            if !ratesLoaded { rates = catalog(); ratesLoaded = true }
+            if tokens.valid, let price = rates?.price(for: String(cString: model), at: to) {
+                total += price.estimate(tokens)
+            }
+        }
         guard total.isFinite, total >= 0 else { return nil }
         return total
+    }
+
+    /// Prices for rows stored without one: the downloaded catalog, else the bundled copy.
+    /// Loaded once; the projection needs prices that stay consistent, not the newest.
+    static let prices: UsagePriceCatalog? = loadPrices()
+
+    static var priceCacheURL: URL { CredentialStore.appSupportURL.appendingPathComponent("usage-prices.json") }
+
+    static func loadPrices(from files: [URL] = [priceCacheURL,
+        Bundle.main.url(forResource: "usage-prices", withExtension: "json")].compactMap { $0 }) -> UsagePriceCatalog? {
+        for file in files {
+            if let data = try? Data(contentsOf: file),
+               let value = try? JSONDecoder().decode(UsagePriceCatalog.self, from: data), value.valid {
+                return value
+            }
+        }
+        return nil
     }
 
     // Read all identities in one SQLite snapshot so account and total views agree.

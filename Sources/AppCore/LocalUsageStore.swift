@@ -11,16 +11,8 @@ final class LocalUsageStore: ObservableObject {
     private var priceTask: Task<Void, Never>?
     private var priceCheckedAt: Date?
     static let catalogURL = URL(string: "https://ericjypark.github.io/codex-island-model-catalog/v1/models.json")!
-    private static var catalogCache: URL { CredentialStore.appSupportURL.appendingPathComponent("usage-prices.json") }
-
     private init() {
-        let candidates = [Self.catalogCache, Bundle.main.url(forResource: "usage-prices", withExtension: "json")].compactMap { $0 }
-        for file in candidates {
-            if let data = try? Data(contentsOf: file), let value = try? JSONDecoder().decode(UsagePriceCatalog.self, from: data), value.valid {
-                catalog = value
-                break
-            }
-        }
+        catalog = AccountUsageReader.loadPrices()
     }
 
     nonisolated static func sourceKey(provider: String, accountID: AccountID?, transcriptHistory: Bool = false) -> String {
@@ -134,7 +126,7 @@ final class LocalUsageStore: ObservableObject {
                   (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 2_000_000,
                   let value = try? JSONDecoder().decode(UsagePriceCatalog.self, from: data), value.valid else { return }
             catalog = value
-            try? data.write(to: Self.catalogCache, options: .atomic)
+            try? data.write(to: AccountUsageReader.priceCacheURL, options: .atomic)
         }
     }
 }

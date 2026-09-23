@@ -3,17 +3,26 @@
 import Foundation
 
 enum UsageLogLines {
-    static func streamLines(at url: URL, maxLineBytes: Int = 16_777_216, onLine: (Data) -> Void) throws {
+    /// Streams lines starting at byte `start`. Returns the offset just past the last
+    /// `\n`, where an append-only reader resumes. `includeTail: false` leaves an
+    /// unterminated last line (a writer mid-append) for that next read.
+    @discardableResult
+    static func streamLines(at url: URL, from start: Int = 0, includeTail: Bool = true,
+                            maxLineBytes: Int = 16_777_216, onLine: (Data) -> Void) throws -> Int {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        if start > 0 { try handle.seek(toOffset: UInt64(start)) }
 
         let chunkSize = 64 * 1024
         var pending = Data()          // partial line carried across chunk reads
         var skippingLongLine = false  // discarding an over-cap line until its '\n'
+        var chunkStart = start
+        var lineEnd = start
 
         while true {
             let chunk = try handle.read(upToCount: chunkSize) ?? Data()
             if chunk.isEmpty { break }
+            defer { chunkStart += chunk.count }
 
             var lineStart = 0
             while let nl = firstNewline(in: chunk, from: lineStart) {
@@ -34,6 +43,7 @@ enum UsageLogLines {
                     pending.removeAll(keepingCapacity: true)
                 }
                 lineStart = nl + 1
+                lineEnd = chunkStart + lineStart
             }
 
             // Bytes after the last newline form (the start of) the next line.
@@ -45,7 +55,8 @@ enum UsageLogLines {
                 }
             }
         }
-        if !skippingLongLine, !pending.isEmpty { onLine(pending) }
+        if includeTail, !skippingLongLine, !pending.isEmpty { onLine(pending) }
+        return lineEnd
     }
 
     /// Offset of the first 0x0A at or after `start` within `data`, or nil.

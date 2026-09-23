@@ -101,31 +101,53 @@ final class LogFile: @unchecked Sendable {
     let url: URL
     private let maxBytes: Int
     private let keep: Int
+    private let report: (String) -> Void
     private let lock = NSLock()
     private var handle: FileHandle?
 
-    init?(url: URL, maxBytes: Int, keep: Int) {
+    /// `report` hears once when the sink turns off. The default writes to the unified
+    /// log only — never back into this file, which is what failed.
+    init?(url: URL, maxBytes: Int, keep: Int, report: @escaping (String) -> Void = LogFile.reportToUnifiedLog) {
         self.url = url
         self.maxBytes = maxBytes
         self.keep = keep
-        guard let handle = try? Self.open(url) else { return nil }
-        self.handle = handle
+        self.report = report
+        do {
+            handle = try Self.open(url)
+        } catch {
+            report(Self.sinkOff(error))
+            return nil
+        }
     }
 
     func append(_ line: String) {
         lock.lock()
         defer { lock.unlock() }
-        guard let handle else { return }
+        guard var current = handle else { return }
         do {
-            // Seek every write: a second app instance may have appended since.
-            // ponytail: not atomic across processes; O_APPEND fd if interleaving ever shows up.
-            try handle.seekToEnd()
-            try handle.write(contentsOf: Data((line + "\n").utf8))
-            if try handle.offset() > UInt64(maxBytes) { try rotate() }
+            // A dev build and the installed app share this file. When the other one
+            // rotated, our fd still points at the moved `.1`; follow the path instead.
+            if !Self.isCurrent(current, at: url) {
+                try? current.close()
+                current = try Self.open(url)
+                handle = current
+            }
+            try current.write(contentsOf: Data((line + "\n").utf8))
+            if try current.offset() > UInt64(maxBytes) { try rotate() }
         } catch {
             // Disk full / file gone: stop writing, never crash. Unified log still works.
-            self.handle = nil
+            handle = nil
+            report(Self.sinkOff(error))
         }
+    }
+
+    static func reportToUnifiedLog(_ message: String) {
+        os_log("%{public}@", log: Log.app.osLog, type: LogLevel.warn.osType, message)
+    }
+
+    private static func sinkOff(_ error: Error) -> String {
+        let ns = error as NSError
+        return "log file sink off domain=\(ns.domain) code=\(ns.code)"
     }
 
     private func rotate() throws {
@@ -142,17 +164,19 @@ final class LogFile: @unchecked Sendable {
         handle = try Self.open(url)
     }
 
+    /// O_APPEND: every write lands at the current end, even with a second writer.
     private static func open(_ url: URL) throws -> FileHandle {
-        let fm = FileManager.default
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: url.path) {
-            guard fm.createFile(atPath: url.path, contents: nil) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-        }
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.seekToEnd()
-        return handle
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fd = Darwin.open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    private static func isCurrent(_ handle: FileHandle, at url: URL) -> Bool {
+        var held = stat()
+        var onDisk = stat()
+        guard fstat(handle.fileDescriptor, &held) == 0, stat(url.path, &onDisk) == 0 else { return false }
+        return held.st_ino == onDisk.st_ino && held.st_dev == onDisk.st_dev
     }
 }
 

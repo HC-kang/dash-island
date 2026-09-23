@@ -9,6 +9,42 @@ enum UsageFailureKind: Equatable, Sendable {
     case hard
 }
 
+/// Why an `.unavailable` poll failed. Adapters still report free text; it is
+/// classified here once so severity, stale notice and captions cannot disagree.
+enum UnavailableReason: Equatable, Sendable {
+    /// Scope / login-family failure — only a browser login for this account helps.
+    case needsLogin
+    /// Token host quiet (oauth/token 429) — keep rings, retry later.
+    case tokenQuiet
+    /// Our own refresh spacing — a retry is already scheduled.
+    case refreshPending
+    /// Anything else transient.
+    case temporary
+
+    init(message: String) {
+        let lower = message.lowercased()
+        if ["setup-token", "user:profile", "need browser", "reauthenticate", "invalid_grant", "token family"]
+            .contains(where: lower.contains)
+        {
+            self = .needsLogin
+        } else if ["token quiet", "rate limit", "rate-limit", "ratelimit"].contains(where: lower.contains) {
+            // Not a bare "rate": that also matches "generate" and "separate".
+            self = .tokenQuiet
+        } else if lower.contains("refresh pending") {
+            self = .refreshPending
+        } else {
+            self = .temporary
+        }
+    }
+}
+
+extension UsageError {
+    var unavailableReason: UnavailableReason? {
+        if case .unavailable(let message) = self { return UnavailableReason(message: message) }
+        return nil
+    }
+}
+
 enum UsageSnapshotMerge {
     /// Classify a vendor error for retention / UX.
     static func failureKind(_ error: UsageError) -> UsageFailureKind {
@@ -20,19 +56,9 @@ enum UsageSnapshotMerge {
         case .network, .parse:
             return .soft
         case .unavailable(let message):
-            let lower = message.lowercased()
-            // Scope / login-family failures — user must reconnect this account.
-            if lower.contains("setup-token")
-                || lower.contains("user:profile")
-                || lower.contains("need browser")
-                || lower.contains("reauthenticate")
-                || lower.contains("invalid_grant")
-                || lower.contains("token family")
-            {
-                return .hard
-            }
-            // token quiet / hard-expired / transient refresh — keep rings.
-            return .soft
+            // Login-family failures — user must reconnect this account. Token quiet,
+            // hard-expired access and transient refresh failures keep rings.
+            return UnavailableReason(message: message) == .needsLogin ? .hard : .soft
         }
     }
 
@@ -46,14 +72,11 @@ enum UsageSnapshotMerge {
         case .parse:
             return "stale · bad response (last-good rings)"
         case .unavailable(let message):
-            let lower = message.lowercased()
-            if lower.contains("token quiet") || lower.contains("rate") {
-                return "stale · token host quiet (last-good rings)"
+            switch UnavailableReason(message: message) {
+            case .tokenQuiet: return "stale · token host quiet (last-good rings)"
+            case .refreshPending: return "stale · refresh scheduled (last-good rings)"
+            case .needsLogin, .temporary: return "stale · temporary (last-good rings)"
             }
-            if lower.contains("refresh pending") {
-                return "stale · refresh scheduled (last-good rings)"
-            }
-            return "stale · temporary (last-good rings)"
         case .authRequired:
             return "reconnect this account"
         }
