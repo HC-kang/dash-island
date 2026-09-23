@@ -211,7 +211,10 @@ final class UsageOrchestrator: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in self?.systemAsleep = true }
+                Task { @MainActor in
+                    Log.poll.info("power event=sleep")
+                    self?.systemAsleep = true
+                }
             }
         )
         powerObservers.append(
@@ -221,6 +224,7 @@ final class UsageOrchestrator: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
+                    Log.poll.info("power event=wake")
                     self?.systemAsleep = false
                     await self?.pollDueAccounts(mode: .background, forceActive: true)
                 }
@@ -233,7 +237,10 @@ final class UsageOrchestrator: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in self?.screenLocked = true }
+                Task { @MainActor in
+                    Log.poll.info("power event=lock")
+                    self?.screenLocked = true
+                }
             }
         )
         powerObservers.append(
@@ -242,7 +249,10 @@ final class UsageOrchestrator: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in self?.screenLocked = false }
+                Task { @MainActor in
+                    Log.poll.info("power event=unlock")
+                    self?.screenLocked = false
+                }
             }
         )
     }
@@ -377,14 +387,8 @@ final class UsageOrchestrator: ObservableObject {
         if result.ratio > before + 0.02 || (before < 0.03 && result.ratio > 0.05) {
             mergeBurnSource(accountID: accountID, api: true)
         }
-        NSLog(
-            "DashIsland: burn account=%@ kind=%@ u=%.4f abs=%@ ratio=%.3f samples=%d",
-            String(accountID.uuidString.prefix(8)),
-            burnWin.kind.rawValue,
-            burnWin.usedFraction,
-            burnWin.hasAbsoluteCounters ? "y" : "n",
-            result.ratio,
-            result.sampleCount
+        Log.burn.debug(
+            "sample account=\(accountID.short) kind=\(burnWin.kind.rawValue) u=\(String(format: "%.4f", burnWin.usedFraction)) abs=\(burnWin.hasAbsoluteCounters ? "y" : "n") ratio=\(String(format: "%.3f", result.ratio)) samples=\(result.sampleCount)"
         )
     }
 
@@ -406,6 +410,7 @@ final class UsageOrchestrator: ObservableObject {
 
     /// Reload error-free rings from disk so restart + soft quiet keeps gauges.
     private func restoreLastGoodSnapshots() {
+        var restored = 0
         for account in accountStore.accounts where lastGood[account.id] == nil {
             let url = CredentialStore.lastGoodUsageURL(for: account.credentialRef)
             guard let snapshot = Self.loadLastGood(from: url) else { continue }
@@ -413,15 +418,19 @@ final class UsageOrchestrator: ObservableObject {
             lastSuccessAt[account.id] = snapshot.fetchedAt
             lastNotice[account.id] = "saved last-good · checking live usage"
             lastUpdated = max(lastUpdated ?? .distantPast, snapshot.fetchedAt)
+            restored += 1
         }
+        if restored > 0 { Log.accounts.info("lastGood restore count=\(restored)") }
     }
 
     private func persistLastGood(accountID: AccountID, snapshot: UsageSnapshot) {
         guard let account = accountStore.accounts.first(where: { $0.id == accountID }) else { return }
-        _ = Self.saveLastGood(
+        if !Self.saveLastGood(
             snapshot,
             to: CredentialStore.lastGoodUsageURL(for: account.credentialRef)
-        )
+        ) {
+            Log.accounts.warn("lastGood persist failed account=\(accountID.short)")
+        }
     }
 
     nonisolated static func encodeLastGood(_ snapshot: UsageSnapshot) -> Data? {
@@ -458,9 +467,15 @@ final class UsageOrchestrator: ObservableObject {
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
         // Coalesce overlapping ticks (timer may fire while a slow adapter runs).
-        guard !polling else { return }
+        guard !polling else {
+            Log.poll.debug("tick skip reason=inflight mode=\(mode)")
+            return
+        }
         // While asleep, never hit vendor APIs (wake handler resumes).
-        if systemAsleep, !forceActive { return }
+        if systemAsleep, !forceActive {
+            Log.poll.debug("tick skip reason=asleep mode=\(mode)")
+            return
+        }
 
         polling = true
         loading = true
@@ -490,6 +505,7 @@ final class UsageOrchestrator: ObservableObject {
                 let lastOK = lastSuccessAt[account.id]
                 let veryStale = lastOK.map { now.timeIntervalSince($0) >= 2 * 3600 } ?? true
                 if !(mode == .expand && veryStale) {
+                    Log.poll.debug("skip account=\(account.id.short) reason=cooldown in=\(Int(until.timeIntervalSince(now)))s")
                     continue
                 }
             }
@@ -517,6 +533,8 @@ final class UsageOrchestrator: ObservableObject {
                 minPoll: minPoll
             ) {
                 due.append(account)
+            } else {
+                Log.poll.debug("skip account=\(account.id.short) reason=interval every=\(Int(interval))s")
             }
         }
 
@@ -525,6 +543,7 @@ final class UsageOrchestrator: ObservableObject {
             return
         }
 
+        Log.poll.info("tick mode=\(mode) due=\(due.count)/\(accounts.count) locked=\(inactive)")
         let results = await fetchAccounts(due)
 
         let applyAt = Date()
@@ -554,19 +573,31 @@ final class UsageOrchestrator: ObservableObject {
                     let vendorID = account.vendorID
                     let id = account.id
                     group.addTask {
+                        let started = Date()
+                        let snapshot: UsageSnapshot
                         if let adapter = VendorRegistry.adapter(for: vendorID) {
-                            return (id, await adapter.fetchUsage(ref))
-                        }
-                        return (
-                            id,
-                            UsageSnapshot(
+                            snapshot = await adapter.fetchUsage(ref)
+                        } else {
+                            snapshot = UsageSnapshot(
                                 primary: WindowUsage(usedFraction: 0, kind: .unknown),
                                 secondary: nil,
                                 plan: nil,
                                 fetchedAt: Date(),
                                 error: .unavailable("unknown vendor")
                             )
-                        )
+                        }
+                        let ms = Int(Date().timeIntervalSince(started) * 1000)
+                        let outcome: String
+                        switch snapshot.error {
+                        case nil: outcome = "ok"
+                        case .rateLimited?: outcome = "rateLimited"
+                        case .authRequired?: outcome = "authRequired"
+                        case .network?: outcome = "network"
+                        case .parse?: outcome = "parse"
+                        case .unavailable?: outcome = "unavailable"
+                        }
+                        Log.fetch.info("usage vendor=\(vendorID) account=\(id.short) ms=\(ms) outcome=\(outcome)")
+                        return (id, snapshot)
                     }
                 }
                 for await item in group {
@@ -590,15 +621,11 @@ final class UsageOrchestrator: ObservableObject {
                 rateLimitStreak[accountID] = streak
                 let wait = Self.rateLimitWait(streak: streak, retryAfter: retryAfter, now: now)
                 cooldownUntil[accountID] = now.addingTimeInterval(wait)
-                NSLog(
-                    "DashIsland: rate-limit quiet account=%@ streak=%d wait=%.0fm",
-                    String(accountID.uuidString.prefix(8)),
-                    streak,
-                    wait / 60
-                )
+                Log.poll.info("cooldown account=\(accountID.short) kind=429 streak=\(streak) wait=\(Int(wait / 60))m")
             case .authRequired:
                 // Stop overnight 401 loops; user reauth / manual refresh clears this.
                 cooldownUntil[accountID] = now.addingTimeInterval(Self.authFailureCooldown)
+                Log.poll.info("cooldown account=\(accountID.short) kind=auth wait=\(Int(Self.authFailureCooldown / 60))m")
             case .unavailable where kind == .soft:
                 // Retry exactly when the token gate opens; otherwise short spacing
                 // so we do not thrash oauth/token.
@@ -606,6 +633,9 @@ final class UsageOrchestrator: ObservableObject {
                     cooldownUntil[accountID] = retryAt
                 } else if cooldownUntil[accountID] == nil {
                     cooldownUntil[accountID] = now.addingTimeInterval(30 * 60)
+                }
+                if let until = cooldownUntil[accountID] {
+                    Log.poll.info("cooldown account=\(accountID.short) kind=soft wait=\(Int(until.timeIntervalSince(now) / 60))m")
                 }
             default:
                 break
