@@ -11,6 +11,7 @@ import hmac
 import json
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 import sqlite3
@@ -20,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # VERSION, and collector-status.json reports which copy is running.
 VERSION = 2
 MAX_BODY = 4 * 1024 * 1024
+RETENTION_DAYS = 400  # The app reads at most 30 days; keep a year for comparisons.
+LOG_LIMIT = 1024 * 1024  # launchd appends stderr to collector-errors.log forever otherwise.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_events (
  provider TEXT NOT NULL, identity TEXT NOT NULL, event_id TEXT NOT NULL,
@@ -28,6 +31,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
  cache_write INTEGER NOT NULL, cache_read INTEGER NOT NULL,
  dollars REAL, PRIMARY KEY(provider, identity, event_id)
 );
+CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(provider, timestamp);
 """
 
 
@@ -175,6 +179,26 @@ def ingest(db, payload, prices=None):
     return accepted
 
 
+def prune(db, now, days=RETENTION_DAYS):
+    newest = db.execute("SELECT MAX(timestamp) FROM usage_events").fetchone()[0]
+    if newest is None:
+        return 0
+    # Age counts from the newest row too, so a clock set far ahead cannot erase history.
+    cursor = db.execute("DELETE FROM usage_events WHERE timestamp < ?", (min(now, newest) - days * 86400,))
+    db.commit()
+    return cursor.rowcount
+
+
+def trim_log(path, limit=LOG_LIMIT):
+    # launchd holds the file open with O_APPEND, so truncating in place is safe.
+    try:
+        if path.stat().st_size > limit:
+            shutil.copyfile(path, path.with_name(path.name + ".1"))
+            os.truncate(path, 0)
+    except OSError:
+        pass
+
+
 def write_status(directory, status):
     temp = directory / "collector-status.tmp"
     temp.write_text(json.dumps(status))
@@ -252,6 +276,20 @@ def serve(directory, port):
             self.wfile.write(b"{}")
 
     class CollectorServer(HTTPServer):
+        maintained = 0
+
+        def service_actions(self):
+            # serve_forever calls this between requests (about every 0.5 s); hourly is enough.
+            now = time.time()
+            if now - self.maintained < 3600:
+                return
+            self.maintained = now
+            try:
+                prune(db, now)
+            except sqlite3.Error:
+                db.rollback()
+            trim_log(directory / "collector-errors.log")
+
         def get_request(self):
             connection, address = super().get_request()
             # Apply before BaseHTTPRequestHandler reads the request line/headers.

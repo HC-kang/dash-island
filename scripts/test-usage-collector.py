@@ -129,6 +129,31 @@ assert dict(priced.execute('select provider || model, dollars from usage_events'
     'codexgpt-test': expected, 'codexother': None, 'claudegpt-test': None}
 print('PASS: Codex rows are priced from the cached catalog; unknown models and Claude stay as reported')
 
+# The app reads by provider and time range; old rows are pruned; the stderr log stays bounded.
+plan = ' '.join(str(row) for row in db.execute(
+    'EXPLAIN QUERY PLAN SELECT event_id FROM usage_events WHERE provider=? AND timestamp>=? AND timestamp<=?', ('codex', 0, 1)))
+assert 'usage_events_time' in plan, plan
+aged = sqlite3.connect(':memory:')
+aged.executescript(c.SCHEMA)
+now = 1_800_000_000
+for name, days in [('old', c.RETENTION_DAYS + 1), ('kept', c.RETENTION_DAYS - 1), ('new', 0)]:
+    aged.execute("INSERT INTO usage_events VALUES ('codex','id',?,?,'m',1,0,0,0,NULL)", (name, now - days * 86400))
+assert c.prune(aged, now + 1000 * 86400) == 1, 'age counts from the newest row, so a clock jump cannot erase history'
+assert sorted(row[0] for row in aged.execute('SELECT event_id FROM usage_events')) == ['kept', 'new']
+empty = sqlite3.connect(':memory:')
+empty.executescript(c.SCHEMA)
+assert c.prune(aged, now) == 0 and c.prune(empty, now) == 0
+with tempfile.TemporaryDirectory() as temporary:
+    log = Path(temporary) / 'collector-errors.log'
+    c.trim_log(log, 100)
+    log.write_bytes(b'x' * 100)
+    c.trim_log(log, 100)
+    assert log.read_bytes() == b'x' * 100
+    log.write_bytes(b'y' * 101)
+    c.trim_log(log, 100)
+    assert log.read_bytes() == b'' and (Path(temporary) / 'collector-errors.log.1').read_bytes() == b'y' * 101
+print('PASS: time index, 400-day retention, bounded error log')
+
 
 def quiet(function, *args):
     with contextlib.redirect_stdout(io.StringIO()):
@@ -253,6 +278,12 @@ with tempfile.TemporaryDirectory() as temporary:
     directory.mkdir()
     (directory / 'collector-token').write_text('test-token')
     (Path(temporary) / 'usage-prices.json').write_text(json.dumps({'schemaVersion': 1, 'models': {'gpt-test': rates}}))
+    seeded = sqlite3.connect(directory / 'account-usage.sqlite')
+    seeded.executescript(c.SCHEMA)
+    seeded.executemany("INSERT INTO usage_events VALUES ('claude','id',?,?,'m',1,0,0,0,NULL)",
+                       [('expired', time.time() - (c.RETENTION_DAYS + 1) * 86400), ('recent', time.time())])
+    seeded.commit()
+    seeded.close()
     with socket.socket() as reserved:
         reserved.bind(('127.0.0.1', 0))
         port = reserved.getsockname()[1]
@@ -276,7 +307,9 @@ with tempfile.TemporaryDirectory() as temporary:
         response = client.getresponse()
         assert response.status == 200 and response.read() == b'{}'
         with sqlite3.connect(directory / 'account-usage.sqlite') as captured:
-            assert captured.execute('SELECT COUNT(*), SUM(dollars) FROM usage_events').fetchone() == (1, expected)
+            assert captured.execute("SELECT COUNT(*), SUM(dollars) FROM usage_events WHERE provider='codex'").fetchone() == (1, expected)
+            # Maintenance ran between the idle connection and this export.
+            assert [row[0] for row in captured.execute("SELECT event_id FROM usage_events WHERE provider='claude'")] == ['recent']
         status = json.loads((directory / 'collector-status.json').read_text())
         assert status['version'] == c.VERSION and status['startedAt'] <= status['lastBatchAt']
     finally:
