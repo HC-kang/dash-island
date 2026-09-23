@@ -274,6 +274,37 @@ enum LocalUsageSuite {
             try assertTrue(LocalUsageStore.sourceKey(provider: "codex", accountID: nil)
                 != LocalUsageStore.sourceKey(provider: "codex", accountID: nil, transcriptHistory: true))
         }
+        failures += check("captured spend prices rows stored without a price from the catalog") {
+            let directory = root.appendingPathComponent("tracking-unpriced")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            var db: OpaquePointer?
+            try assertEqual(sqlite3_open(directory.appendingPathComponent("account-usage.sqlite").path, &db), SQLITE_OK)
+            defer { sqlite3_close(db) }
+            let t = now.timeIntervalSince1970
+            // Codex rows arrive with dollars NULL; the collector prices Claude rows itself.
+            let sql = """
+            CREATE TABLE usage_events(provider TEXT,identity TEXT,event_id TEXT,timestamp REAL,model TEXT,input INTEGER,output INTEGER,cache_write INTEGER,cache_read INTEGER,dollars REAL);
+            INSERT INTO usage_events VALUES('codex','a','e1',\(t - 10),'known',1000000,0,0,0,NULL);
+            INSERT INTO usage_events VALUES('codex','a','e2',\(t - 10),'known',0,500000,0,2000000,NULL);
+            INSERT INTO usage_events VALUES('codex','a','e3',\(t - 10),'known',0,0,0,0,0.25);
+            INSERT INTO usage_events VALUES('codex','a','e4',\(t - 10),'unpriced-model',1000000,0,0,0,NULL);
+            INSERT INTO usage_events VALUES('codex','b','e5',\(t - 10),'known',1000000,0,0,0,NULL);
+            INSERT INTO usage_events VALUES('codex','a','e6',\(t - 1000),'known',1000000,0,0,0,NULL);
+            """
+            try assertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+            let rates = ModelPrice(displayName: nil, inputPerMillion: 1, outputPerMillion: 2,
+                                   cacheCreationPerMillion: 3, cacheReadPerMillion: 0.1)
+            let catalog = UsagePriceCatalog(schemaVersion: 1, generatedAt: "test", models: ["known": rates])
+            func spend(_ catalog: UsagePriceCatalog?) -> Double? {
+                AccountUsageReader.capturedDollars(provider: "codex", identity: "a", from: now.addingTimeInterval(-60),
+                                                   to: now, directory: directory, catalog: catalog)
+            }
+            // 1.00 input + (1.00 output + 0.20 cache read) + 0.25 recorded; unknown model stays out.
+            try assertEqual(spend(catalog) ?? -1, 2.45, accuracy: 1e-9)
+            // Without a catalog only recorded prices count: still a lower bound, never a guess.
+            try assertEqual(spend(nil) ?? -1, 0.25, accuracy: 1e-9)
+        }
+
         return failures
     }
 
