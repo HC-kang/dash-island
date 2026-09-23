@@ -640,3 +640,10 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Tests must never call real `launchctl` or use the real HOME/env: `install(home, environ, run)` and `disconnect(...)` take a fake `run`, and `environ={}` (CODEX_HOME is often set in agent shells).
 - `agy` has no home variable other than `$HOME` (checked the binary strings), so account-cli must replace HOME. It sets `GIT_CONFIG_GLOBAL` to the user's git config; other `~` configs are not available inside that session (README documents this).
 - DB: index `(provider, timestamp)`; hourly prune of rows older than 400 days, counted from min(now, newest row); `collector-errors.log` copied to `.1` and truncated above 1 MB.
+
+## Phase 1 integration (2026-09-23, branch feat/improve-phase1)
+
+- Merge order: auth → polling → ui → data → scripts. Conflicts only in this file, `Tests/TestMain.swift` (suite lines, keep all) and the `ClaudeAdapter` CLI ping region.
+- `ClaudeAdapter` resolution: the polling background ping (`startBackgroundCLIPing` + `CLIPingRegistry`) stays; the child ends through `LoginProcess.waitForExit`; the `refreshPingSpawner` hook is gone (auth removed it as dead). Constraint: no test may drive the Claude oauth/token refresh to a 429/5xx. That path starts a real `claude -p` and a `security` Keychain read in the background. Inject a spawner first if such a test is needed.
+- Verified: 284 Swift tests pass (two runs), `python3 scripts/test-usage-collector.py` passes, `./build.sh` passes with only the old `kSecUseAuthenticationUI*` deprecation warnings. The app was not launched.
+- Left for later: `clearCreds` logs in all four adapters still print the absolute folder path (`dir=`). `UsageOrchestrator.caption/detailCaption` still match substrings instead of `error.unavailableReason`. Not checked live: the island collapses while the Agy Terminal login has the focus (ui dialog release).
