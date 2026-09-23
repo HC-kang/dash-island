@@ -557,3 +557,10 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Known under-counts, all in the same direction (the projection lags, it cannot overshoot): processes started before telemetry was installed, claude.ai web/mobile use, rows stored without a price. Live check found 0 null-price rows in 6h of Claude data.
 - The estimate is drawn as a faint thin arc past the measured one and labelled in the tip. Never the centre number. Reason: an estimate presented as a reading costs more trust than a stale number does.
 - Pre-existing flake fixed on the way: `ClaudeRefreshGate` dates round-trip through UserDefaults as doubles, so exact `Date` equality in `runGate` failed about one run in three. Compare with tolerance.
+
+## Internal logging overhaul — designed, not built (2026-09-23)
+
+- Baseline: 53 `NSLog("DashIsland: …")` across 10 files, unified log only, no file/level/category. Poll due/skip, per-fetch http/ms, mode transitions, sleep/wake, add/reauth stages are not logged at all — the reason past incidents (overnight 429, 4h lock, stale needle) were hard to trace.
+- Approved design: `docs/superpowers/specs/2026-09-23-internal-logging-design.md`. One `Sources/Infra/Log.swift`, file sink `Application Support/DashIsland/logs/dashisland.log` (2 MB × 3) + os_log mirror, categories `app accounts poll fetch auth burn local window`, level via `DASHISLAND_LOG` env / `DashIsland.logLevel` default. No Prefs UI. `scripts/logs.sh` for tailing.
+- Handoff for the implementing session: `docs/superpowers/handoffs/2026-09-23-internal-logging-handoff.md` (call-site inventory, insertion points, TDD order, secrets rule).
+- Never log tokens / auth headers / response bodies at any level; `Log.redact` and `UUID.short` only.
