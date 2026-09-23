@@ -75,9 +75,17 @@ struct NotchBandChrome: View {
                 }
             }
             .buttonStyle(.plain)
-            .onHover { h in
-                syncHot = h
-                if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            // set(), not push/pop: a missed exit (window passthrough flips) must not
+            // leave the cursor stack unbalanced.
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    syncHot = true
+                    NSCursor.pointingHand.set()
+                case .ended:
+                    syncHot = false
+                    NSCursor.arrow.set()
+                }
             }
             .help("Per-account fetch status")
             .popover(isPresented: $statusOpen, arrowEdge: .bottom) {
@@ -100,6 +108,10 @@ struct NotchBandChrome: View {
         }
         .frame(height: notchHeight)
         .onDisappear {
+            if syncHot {
+                syncHot = false
+                NSCursor.arrow.set()
+            }
             if statusOpen {
                 statusOpen = false
                 NotificationCenter.default.post(
