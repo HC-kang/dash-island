@@ -33,10 +33,9 @@ enum IslandGeometrySuite {
             try assertEqual(G.compactSize(notchWidth: 185, notchHeight: 32, hasNotch: true), CGSize(width: 191, height: 35))
             try assertEqual(G.compactSize(notchWidth: 40, notchHeight: 32, hasNotch: true).width, 80)
         }
-        f += check("compact on a non-notch display is a thin top handle, not a fake notch") {
-            let handle = G.compactSize(notchWidth: 180, notchHeight: 24, hasNotch: false)
-            try assertTrue(handle.height <= 8, "handle height \(handle.height) covers the menu bar")
-            try assertTrue(handle.width < 180, "handle width \(handle.width) is a fake notch")
+        f += check("compact on a non-notch display keeps the same visible pill as a notch") {
+            try assertEqual(G.compactSize(notchWidth: 180, notchHeight: 29, hasNotch: false),
+                            G.compactSize(notchWidth: 180, notchHeight: 29, hasNotch: true))
         }
         f += check("hit: compact equals the drawn pill; hidden compact has none") {
             let pill = G.compactSize(notchWidth: 185, notchHeight: 32, hasNotch: true)

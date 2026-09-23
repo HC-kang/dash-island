@@ -27,9 +27,6 @@ enum IslandGeometry {
     static let compactMinWidth: CGFloat = 80
     /// Strip under the expanded body that keeps hover while reaching a tip.
     static let expandedHitPad: CGFloat = 20
-    /// Non-notch displays: a thin top-edge handle instead of a fake notch, so the
-    /// compact island leaves the menu bar center clickable.
-    static let handleSize = CGSize(width: 64, height: 4)
 
     /// Pointer hit test in AppKit global coordinates. A pointer pushed against
     /// the top of a display reports y == maxY, which `CGRect.contains` excludes.
@@ -93,15 +90,10 @@ enum IslandGeometry {
         return expandedSize(bodyWidth: widest, notchHeight: notchHeight)
     }
 
-    /// Drawn compact footprint: notch pill, or the thin handle without a notch.
+    /// Drawn compact footprint: the same pill with or without a physical notch
+    /// (a 64x4 handle on non-notch displays was too easy to lose; see context.md).
     static func compactSize(notchWidth: CGFloat, notchHeight: CGFloat, hasNotch: Bool) -> CGSize {
-        guard hasNotch else {
-            return CGSize(
-                width: handleSize.width + compactRimPad * 2,
-                height: handleSize.height + compactRimPad
-            )
-        }
-        return CGSize(
+        CGSize(
             width: max(notchWidth + compactRimPad * 2, compactMinWidth),
             height: notchHeight + compactRimPad
         )

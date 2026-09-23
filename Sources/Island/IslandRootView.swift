@@ -173,11 +173,9 @@ struct IslandRootView: View {
     /// expanded panel height, so hover in/out must not move it vertically.
     private var compactNotchBase: some View {
         let notch = model.notch
-        // No notch: a thin top-edge handle, so the menu bar center stays clickable.
-        let handle = IslandGeometry.handleSize
-        let bodyW = notch.hasNotch ? notch.width + bodyOutset * 2 : handle.width
-        let bodyH = notch.hasNotch ? notch.height + bodyOutset : handle.height
-        let radius = notch.hasNotch ? cornerRadius(forHeight: bodyH) : bodyH / 2
+        let bodyW = notch.width + bodyOutset * 2
+        let bodyH = notch.height + bodyOutset
+        let radius = cornerRadius(forHeight: bodyH)
 
         return ZStack {
             IslandShape(bottomRadius: radius)
