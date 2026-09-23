@@ -274,6 +274,44 @@ enum AgyAdapterSuite {
             try assertTrue(timedOut, "old session must not finish a reauth")
         }
 
+        // Reauth keeps the session only on `.failed`. A refused client is not a
+        // busy host: no retry fixes it, so reauth must go on to sign-in.
+        failures += await checkAsync("a refused OAuth client is not a busy token host") {
+            let refused = await StubHTTP.with(status: 401, body: #"{"error":"invalid_client"}"#) {
+                await AgyAdapter.refreshAccessToken("1//r", ids: ["1-a.apps.googleusercontent.com"], secrets: ["s"])
+            }
+            try assertEqual(refused, .clientRejected)
+            let unauthorized = await StubHTTP.with(status: 400, body: #"{"error":"unauthorized_client"}"#) {
+                await AgyAdapter.refreshAccessToken("1//r", ids: ["1-a", "2-b"], secrets: ["s", "t"])
+            }
+            try assertEqual(unauthorized, .clientRejected)
+            let none = await AgyAdapter.refreshAccessToken("1//r", ids: [], secrets: [])
+            try assertEqual(none, .clientRejected)
+            let busy = await StubHTTP.with(status: 503, body: "") {
+                await AgyAdapter.refreshAccessToken("1//r", ids: ["1-a"], secrets: ["s"])
+            }
+            try assertEqual(busy, .failed)
+            let dead = await StubHTTP.with(status: 400, body: #"{"error":"invalid_grant"}"#) {
+                await AgyAdapter.refreshAccessToken("1//r", ids: ["1-a"], secrets: ["s"])
+            }
+            try assertEqual(dead, .invalidGrant)
+        }
+
+        // Timeout ends the Terminal `agy`; a failed Add deletes the folder.
+        failures += check("login timeout copy names only steps that still exist") {
+            let add = AgyAdapterError.loginTimeout(reauth: false).errorDescription ?? ""
+            let reauth = AgyAdapterError.loginTimeout(reauth: true).errorDescription ?? ""
+            for text in [add, reauth] {
+                try assertTrue(!text.contains("HOME="), "names a folder that may be gone: \(text)")
+                try assertTrue(!text.contains("Terminal"), "the Terminal login was ended: \(text)")
+            }
+            try assertTrue(add.contains("not added"), add)
+            try assertTrue(reauth.contains("Reauthenticate"), reauth)
+            let mapped = AgyAdapter.reauthError(AgyAdapterError.loginTimeout(reauth: false))
+            try assertEqual(mapped as? AgyAdapterError, .loginTimeout(reauth: true))
+            try assertTrue(AgyAdapter.reauthError(CancellationError()) is CancellationError)
+        }
+
         failures += check("reauth moves every session file aside so agy starts signed out") {
             let home = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: home) }

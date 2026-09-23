@@ -4,7 +4,8 @@ import os
 enum AgyAdapterError: Error, Equatable, LocalizedError {
     case agyBinaryNotFound
     case spawnFailed(String)
-    case loginTimeout(home: String)
+    /// The wait ends the Terminal `agy`; a failed Add also deletes the folder.
+    case loginTimeout(reauth: Bool)
     case reauthFailed(String)
 
     var errorDescription: String? {
@@ -17,14 +18,10 @@ enum AgyAdapterError: Error, Equatable, LocalizedError {
             """
         case .spawnFailed(let message):
             return "Failed to start Antigravity login: \(message)"
-        case .loginTimeout(let home):
-            return """
-            Antigravity login timed out. Finish sign-in in the Terminal window, or run:
-
-              HOME='\(home)' agy
-
-            Then choose Reauthenticate (or remove and re-add).
-            """
+        case .loginTimeout(let reauth):
+            return reauth
+                ? "Antigravity sign-in timed out. The stored session was kept. Choose Reauthenticate to try again."
+                : "Antigravity sign-in timed out. The account was not added. Add it again to retry."
         case .reauthFailed(let message):
             return message
         }
@@ -93,6 +90,9 @@ struct AgyAdapter: VendorAdapter {
                     return ref
                 case .invalidGrant:
                     Log.auth.info("reauth vendor=agy step=login reason=invalidGrant")
+                case .clientRejected:
+                    // No known client extends this session; only a new sign-in helps.
+                    Log.auth.info("reauth vendor=agy step=login reason=clientRejected")
                 }
             }
             // A stored session makes `agy` start signed in, so the user could
@@ -112,10 +112,17 @@ struct AgyAdapter: VendorAdapter {
                 throw error
             }
         } catch {
-            if error is CancellationError { throw error }
-            if let error = error as? AgyAdapterError { throw error }
-            throw AgyAdapterError.reauthFailed(error.localizedDescription)
+            throw Self.reauthError(error)
         }
+    }
+
+    /// Reauth failure as shown to the user. Reauth keeps the stored session,
+    /// so its timeout copy is not Add's.
+    static func reauthError(_ error: Error) -> Error {
+        if error is CancellationError { return error }
+        if case AgyAdapterError.loginTimeout = error { return AgyAdapterError.loginTimeout(reauth: true) }
+        if let error = error as? AgyAdapterError { return error }
+        return AgyAdapterError.reauthFailed(error.localizedDescription)
     }
 
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
@@ -281,7 +288,8 @@ struct AgyAdapter: VendorAdapter {
                 return creds
             }
             if Date() >= deadline {
-                throw AgyAdapterError.loginTimeout(home: home.path)
+                // Reauth turns this into its own copy (`reauthError`).
+                throw AgyAdapterError.loginTimeout(reauth: false)
             }
             try await Task.sleep(nanoseconds: pollNanos)
         }
@@ -612,25 +620,50 @@ struct AgyAdapter: VendorAdapter {
             return .ok(creds)
         case .invalidGrant:
             return .needsReauth
-        case .failed:
+        case .failed, .clientRejected:
+            // A refused client stays soft here: Reauthenticate signs in again.
             return .retryLater
         }
     }
 
-    enum TokenRefreshResult {
+    enum TokenRefreshResult: Equatable {
         case success(access: String, refresh: String?, expiresIn: Int?)
         case invalidGrant
+        /// Every known client id / secret was refused, or `agy` had none.
+        /// No retry extends this session.
+        case clientRejected
+        /// Network, 429, 5xx: the session may still be fine.
         case failed
     }
 
     private static func refreshAccessToken(_ refreshToken: String) async -> TokenRefreshResult {
-        let ids = oauthClientIDsFromAgyBinary()
-        let secrets = oauthSecretsFromAgyBinary()
-        guard !ids.isEmpty, !secrets.isEmpty else {
-            Log.auth.warn("refresh vendor=agy outcome=failed reason=oauthClientNotFound")
-            return .failed
+        if let working = oauthCache.withLock({ $0.working }) {
+            let result = await refreshAccessToken(
+                refreshToken,
+                clientID: working.id,
+                clientSecret: working.secret
+            )
+            // The cached pair is the last account's; this one may use another.
+            guard result == .clientRejected else { return result }
         }
-        var last: TokenRefreshResult = .failed
+        let binary = loadBinaryOAuth()
+        return await refreshAccessToken(refreshToken, ids: binary.ids, secrets: binary.secrets)
+    }
+
+    /// Try each embedded pair. A dead grant wins over a busy host, and a busy
+    /// host over a refused client: only when every pair refused the client is
+    /// the session beyond HTTP refresh.
+    static func refreshAccessToken(
+        _ refreshToken: String,
+        ids: [String],
+        secrets: [String]
+    ) async -> TokenRefreshResult {
+        guard !ids.isEmpty, !secrets.isEmpty else {
+            Log.auth.warn("refresh vendor=agy outcome=clientRejected reason=oauthClientNotFound")
+            return .clientRejected
+        }
+        var sawDeadGrant = false
+        var sawBusyHost = false
         for id in ids {
             for secret in secrets {
                 let result = await refreshAccessToken(
@@ -643,13 +676,16 @@ struct AgyAdapter: VendorAdapter {
                     oauthCache.withLock { $0.working = OAuthClient(id: id, secret: secret) }
                     return result
                 case .invalidGrant:
-                    last = .invalidGrant
+                    sawDeadGrant = true
                 case .failed:
+                    sawBusyHost = true
+                case .clientRejected:
                     continue
                 }
             }
         }
-        return last
+        if sawDeadGrant { return .invalidGrant }
+        return sawBusyHost ? .failed : .clientRejected
     }
 
     private static func refreshAccessToken(
@@ -686,12 +722,16 @@ struct AgyAdapter: VendorAdapter {
                 return .success(access: access, refresh: rotated, expiresIn: expiresIn)
             }
             // Wrong client pair (invalid_client) tries the next one; a busy host
-            // retries later. Only a dead grant asks for a new sign-in.
+            // retries later. A dead grant, or a client that no pair replaces,
+            // needs a new sign-in.
             switch TokenHostFailure.classify(status: status, body: data, retryAfter: nil) {
             case .rejected:
                 Log.auth.warn("refresh vendor=agy outcome=invalid_grant http=\(status)")
                 return .invalidGrant
-            case .badClient, .unavailable:
+            case .badClient:
+                Log.auth.warn("refresh vendor=agy outcome=badClient http=\(status)")
+                return .clientRejected
+            case .unavailable:
                 Log.auth.warn("refresh vendor=agy http=\(status)")
                 return .failed
             }
@@ -852,16 +892,6 @@ struct AgyAdapter: VendorAdapter {
 
     /// Installed-app OAuth clients embedded in `agy`. The binary has more than
     /// one googleusercontent id; the first hit is often the wrong one.
-    static func oauthClientIDsFromAgyBinary() -> [String] {
-        if let working = oauthCache.withLock({ $0.working }) { return [working.id] }
-        return loadBinaryOAuth().ids
-    }
-
-    static func oauthSecretsFromAgyBinary() -> [String] {
-        if let working = oauthCache.withLock({ $0.working }) { return [working.secret] }
-        return loadBinaryOAuth().secrets
-    }
-
     private static func loadBinaryOAuth() -> BinaryOAuth {
         if let cached = oauthCache.withLock({ $0.binary }) { return cached }
         guard let path = locateAgyBinary(),
