@@ -418,6 +418,50 @@ enum OrchestratorDueSuite {
             )
         }
 
+        failures += check("active cadence holds 60s on the fixed 20s tick grid") {
+            // Ticks come from a repeating timer: a fixed grid plus run-loop jitter,
+            // not "lastFetch + k·tick" as the test above assumes. The fetch starts
+            // a little after its tick when earlier accounts hold both slots.
+            let tick = UsageOrchestrator.schedulerTickSeconds
+            let interval = UsageOrchestrator.activePollSeconds
+            let origin = Date(timeIntervalSince1970: 1_700_000_000)
+            let jitter: [TimeInterval] = [0.004, 0.2, 0.01, 0.35, 0.0, 0.12, 0.3, 0.05]
+            let startLag: [TimeInterval] = [0.4, 2.5, 0, 4, 1]
+            var lastFetch: Date?
+            var fires: [Date] = []
+            for k in 0..<60 {
+                let now = origin.addingTimeInterval(tick * Double(k) + jitter[k % jitter.count])
+                if UsageOrchestrator.isDue(
+                    lastFetch: lastFetch,
+                    now: now,
+                    userInterval: interval,
+                    minPoll: 60,
+                    tolerance: UsageOrchestrator.dueTolerance
+                ) {
+                    fires.append(now)
+                    lastFetch = now.addingTimeInterval(startLag[fires.count % startLag.count])
+                }
+            }
+            try assertTrue(fires.count >= 19, "got \(fires.count) fires in 20 min")
+            for (a, b) in zip(fires, fires.dropFirst()) {
+                try assertEqual(b.timeIntervalSince(a), interval, accuracy: 1)
+            }
+        }
+
+        failures += check("due tolerance never pulls a poll a whole tick early") {
+            let last = Date(timeIntervalSince1970: 1_700_000_000)
+            let tol = UsageOrchestrator.dueTolerance
+            try assertTrue(tol > 0 && tol < UsageOrchestrator.schedulerTickSeconds)
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60 - UsageOrchestrator.schedulerTickSeconds),
+                userInterval: 60, minPoll: 60, tolerance: tol
+            ))
+            try assertTrue(UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60 - tol),
+                userInterval: 60, minPoll: 60, tolerance: tol
+            ))
+        }
+
         failures += check("network errors retry on a short backoff, capped below idle") {
             let now = Date(timeIntervalSince1970: 1_700_000_000)
             try assertEqual(UsageOrchestrator.transientRetryWait(streak: 1), 60, accuracy: 0)

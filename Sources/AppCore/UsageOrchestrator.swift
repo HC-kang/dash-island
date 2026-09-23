@@ -34,8 +34,9 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let postResetGrace: TimeInterval = 120
     /// Scheduler tick. Deliberately shorter than the shortest poll interval —
     /// `isDue` enforces the real per-account spacing. A tick equal to the interval
-    /// aliased to ~2×: `lastFetchAt` is stamped *after* the HTTP round trip, so the
-    /// next tick was always a few hundred ms early and skipped the account.
+    /// aliased to ~2×: `lastFetchAt` was stamped *after* the HTTP round trip, so the
+    /// next tick was always a few hundred ms early and skipped the account. Now the
+    /// stamp is the fetch start and `isDue` allows `dueTolerance` of slack.
     nonisolated static let schedulerTickSeconds: TimeInterval = 20
     /// Expand/lazy floor — never more often than this even if minPoll is lower.
     nonisolated static let expandDebounceFloor: TimeInterval = 120
@@ -273,18 +274,25 @@ final class UsageOrchestrator: ObservableObject {
 
     /// Whether an account should be fetched at `now`.
     ///
-    /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll)`.
+    /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll) - tolerance`.
     nonisolated static func isDue(
         lastFetch: Date?,
         now: Date,
         userInterval: TimeInterval,
-        minPoll: TimeInterval
+        minPoll: TimeInterval,
+        tolerance: TimeInterval = 0
     ) -> Bool {
         guard let lastFetch else { return true }
         let interval = max(userInterval, minPoll)
         guard interval > 0 else { return true }
-        return now.timeIntervalSince(lastFetch) >= interval
+        return now.timeIntervalSince(lastFetch) >= interval - tolerance
     }
+
+    /// Slack for `isDue`. Ticks land on a fixed grid with run-loop jitter, and a
+    /// fetch may start a few seconds after its tick; an exact comparison missed
+    /// the 60s slot by milliseconds and polled at 80s. Half a tick can never
+    /// pull a poll a whole tick early.
+    nonisolated static let dueTolerance: TimeInterval = schedulerTickSeconds / 2
 
     /// Interval used for expand lazy-refresh: never below `expandDebounceFloor`
     /// or the vendor's `minPollSeconds`.
@@ -561,7 +569,8 @@ final class UsageOrchestrator: ObservableObject {
                 lastFetch: lastFetchAt[account.id],
                 now: now,
                 userInterval: interval,
-                minPoll: minPoll
+                minPoll: minPoll,
+                tolerance: Self.dueTolerance
             ) {
                 due.append(account)
             } else {
@@ -588,17 +597,24 @@ final class UsageOrchestrator: ObservableObject {
         await Self.forEachBounded(
             accounts,
             limit: Self.maxFetchConcurrency,
-            start: { account -> Account? in account },
-            work: { account in await Self.fetchOne(account) },
-            finish: { account, snapshot in
+            start: { account -> FetchJob? in FetchJob(account: account, startedAt: Date()) },
+            work: { job in await Self.fetchOne(job.account) },
+            finish: { job, snapshot in
                 let applyAt = Date()
-                self.apply(accountID: account.id, snapshot: snapshot, now: applyAt)
+                self.apply(accountID: job.account.id, snapshot: snapshot, startedAt: job.startedAt, now: applyAt)
                 if snapshot.error == nil || self.lastUpdated == nil {
                     self.lastUpdated = applyAt
                 }
                 self.rebuildWidgets()
             }
         )
+    }
+
+    private struct FetchJob: Sendable {
+        let account: Account
+        /// Spacing is measured start to start. Stamping after the round trip
+        /// made every interval one fetch longer than asked.
+        let startedAt: Date
     }
 
     nonisolated private static func fetchOne(_ account: Account) async -> UsageSnapshot {
@@ -656,8 +672,8 @@ final class UsageOrchestrator: ObservableObject {
         }
     }
 
-    private func apply(accountID: AccountID, snapshot: UsageSnapshot, now: Date) {
-        lastFetchAt[accountID] = now
+    private func apply(accountID: AccountID, snapshot: UsageSnapshot, startedAt: Date, now: Date) {
+        lastFetchAt[accountID] = startedAt
 
         // Any answer from the vendor, good or bad, ends a network outage.
         if case .network = snapshot.error {
