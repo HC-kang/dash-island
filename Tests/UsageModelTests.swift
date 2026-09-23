@@ -10,12 +10,12 @@ enum UsageModelSuite {
         let keys = ["DashIsland.displayMode", "DashIsland.rimAccent"]
         let standardBefore = keys.map { UserDefaults.standard.object(forKey: $0) }
         let suite = "UsageModelTests-\(UUID().uuidString)"
-        let injected = UserDefaults(suiteName: suite)!
         await MainActor.run {
-            let prefs = PreferencesStore(defaults: injected)
+            let prefs = PreferencesStore(defaults: UserDefaults(suiteName: suite)!)
             prefs.displayMode = .remaining
             prefs.rimAccent = .magma
         }
+        let injected = UserDefaults(suiteName: suite)!
         let standardAfter = keys.map { UserDefaults.standard.object(forKey: $0) as? String }
         let injectedAfter = keys.map { injected.string(forKey: $0) }
         for (key, value) in zip(keys, standardBefore) { UserDefaults.standard.set(value, forKey: key) }

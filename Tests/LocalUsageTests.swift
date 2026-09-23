@@ -263,7 +263,7 @@ enum LocalUsageSuite {
         let firstLength = grokPrompt("p1").utf8.count
         if let handle = try? FileHandle(forWritingTo: growing) {
             try? handle.write(contentsOf: Data(("{\"modelUsage\"" + String(repeating: "x", count: firstLength - 14) + "\n").utf8))
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: Data(grokPrompt("p2").utf8))
             try? handle.close()
         }
