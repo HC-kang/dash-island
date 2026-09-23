@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import secrets
 import shutil
 import subprocess
@@ -56,12 +57,12 @@ def claude_config(text, token):
     return json.dumps(obj, ensure_ascii=False, indent=2) + '\n'
 
 
-def configurations(home):
+def configurations(home, environ):
     support = home / 'Library/Application Support'
     codex = {home / '.codex'}
     claude = {home / '.claude'}
     for key, roots in [('CODEX_HOME', codex), ('CLAUDE_CONFIG_DIR', claude)]:
-        for value in os.environ.get(key, '').split(','):
+        for value in environ.get(key, '').split(','):
             if value.strip():
                 roots.add(Path(value.strip()))
     orca = support / 'orca'
@@ -92,22 +93,32 @@ def atomic_write(path, data):
     os.replace(temp, path)
 
 
-def install():
-    home = Path.home()
+def collector_version(text):
+    match = re.search(r'^VERSION = (\d+)$', text, re.MULTILINE)
+    return int(match.group(1)) if match else 0
+
+
+def install(home, environ, run):
     directory = home / 'Library/Application Support/DashIsland/tracking'
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     token_path = directory / 'collector-token'
     token = token_path.read_text().strip() if token_path.exists() else secrets.token_hex(32)
     # Prepare and validate every config before any mutation.
     edits = []
-    for path, transform in configurations(home):
+    for path, transform in configurations(home, environ):
         original = path.read_bytes() if path.exists() else None
         updated = transform((original or b'').decode(), token).encode()
         if original != updated:
             edits.append((path, original, updated))
     atomic_write(token_path, token.encode())
     script = directory / 'usage-collector.py'
-    atomic_write(script, Path(__file__).with_name('usage-collector.py').read_bytes())
+    collector = Path(__file__).with_name('usage-collector.py').read_bytes()
+    installed = script.read_bytes() if script.exists() else b''
+    ours, theirs = collector_version(collector.decode()), collector_version(installed.decode(errors='replace'))
+    if theirs > ours:
+        print('Kept the installed collector (version %d); this copy is version %d.' % (theirs, ours))
+    else:
+        atomic_write(script, collector)
     launcher = directory / 'account-cli'
     source = Path(__file__).with_name('account-cli.py').read_text().split('\n', 1)[1]
     atomic_write(launcher, ('#!' + sys.executable + '\n' + source).encode())
@@ -142,12 +153,12 @@ def install():
         'StandardErrorPath': str(directory / 'collector-errors.log'),
     }))
     domain = 'gui/' + str(os.getuid())
-    subprocess.run(['launchctl', 'bootout', domain + '/' + label], capture_output=True)
-    subprocess.run(['launchctl', 'bootstrap', domain, str(plist)], check=True)
+    run(['launchctl', 'bootout', domain + '/' + label], capture_output=True)
+    run(['launchctl', 'bootstrap', domain, str(plist)], check=True)
     print('Connected %d configurations. New Codex/Claude processes export account usage locally.' % len(edits))
     print('Collector: 127.0.0.1:%d; config backups: %s' % (PORT, backup))
 
 
 if __name__ == '__main__':
     os.umask(0o077)
-    install()
+    install(Path.home(), os.environ, subprocess.run)

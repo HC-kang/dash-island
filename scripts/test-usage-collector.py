@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import sqlite3
 import json
@@ -74,6 +76,42 @@ for vendor, variable in [('codex','CODEX_HOME'),('claude','CLAUDE_CONFIG_DIR'),(
     assert 'OPENAI_API_KEY' not in env and 'ANTHROPIC_API_KEY' not in env
 print('PASS: account isolation, duplicates, cache/reasoning, malformed events, Claude cost, safe/idempotent config merge')
 
+
+def quiet(function, *args):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return function(*args)
+
+
+def launchctl(calls, fail=False, before=None):
+    # Tests never run the real launchctl: it would stop the user's installed collector.
+    def run(args, **_):
+        assert args[0] == 'launchctl'
+        calls.append(args[1])
+        if before:
+            before(args)
+        failed = fail and args[1] == 'bootstrap'
+        return subprocess.CompletedProcess(args, 5 if failed else 0, b'', b'boom' if failed else b'')
+    return run
+
+
+source_collector = Path(c.__file__).read_bytes()
+assert i.collector_version('x = 1\nVERSION = 7\n') == 7 and i.collector_version('') == 0
+assert i.collector_version(source_collector.decode()) == c.VERSION > 1
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    tracking = home / 'Library/Application Support/DashIsland/tracking'
+    calls = []
+    quiet(i.install, home, {}, launchctl(calls))
+    installed = tracking / 'usage-collector.py'
+    assert installed.read_bytes() == source_collector and calls == ['bootout', 'bootstrap']
+    installed.write_text('VERSION = %d\n' % (c.VERSION + 1))
+    quiet(i.install, home, {}, launchctl(calls))
+    assert installed.read_text() == 'VERSION = %d\n' % (c.VERSION + 1), 'a newer installed collector is kept'
+    installed.write_text('VERSION = 1\n')
+    quiet(i.install, home, {}, launchctl(calls))
+    assert installed.read_bytes() == source_collector, 'an older installed collector is replaced'
+print('PASS: connector installs the repo collector unless the installed copy is newer')
+
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:
@@ -103,6 +141,8 @@ with tempfile.TemporaryDirectory() as temporary:
         assert response.status == 200 and response.read() == b'{}'
         with sqlite3.connect(directory / 'account-usage.sqlite') as captured:
             assert captured.execute('SELECT COUNT(*) FROM usage_events').fetchone()[0] == 1
+        status = json.loads((directory / 'collector-status.json').read_text())
+        assert status['version'] == c.VERSION and status['startedAt'] <= status['lastBatchAt']
     finally:
         client.close()
         if idle:

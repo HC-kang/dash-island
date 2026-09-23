@@ -16,6 +16,9 @@ from pathlib import Path
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Bump on every behavior change: connect-usage.py replaces an installed copy with a lower
+# VERSION, and collector-status.json reports which copy is running.
+VERSION = 2
 MAX_BODY = 4 * 1024 * 1024
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -134,12 +137,27 @@ def ingest(db, payload):
     return accepted
 
 
+def write_status(directory, status):
+    temp = directory / "collector-status.tmp"
+    temp.write_text(json.dumps(status))
+    temp.replace(directory / "collector-status.json")
+
+
 def serve(directory, port):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     token = (directory / "collector-token").read_text().strip()
     db = sqlite3.connect(directory / "account-usage.sqlite")
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    try:
+        status = json.loads((directory / "collector-status.json").read_text())
+    except (OSError, ValueError):
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    # Keep lastBatchAt across restarts; version/startedAt say which copy is running.
+    status.update(version=VERSION, startedAt=time.time())
+    write_status(directory, status)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -168,10 +186,8 @@ def serve(directory, port):
                 if not isinstance(payload, dict):
                     raise ValueError("object required")
                 accepted = ingest(db, payload)
-                status = {"lastBatchAt": time.time(), "accepted": accepted}
-                temp = directory / "collector-status.tmp"
-                temp.write_text(json.dumps(status))
-                temp.replace(directory / "collector-status.json")
+                status.update(lastBatchAt=time.time(), accepted=accepted)
+                write_status(directory, status)
             except (ValueError, TypeError, KeyError, AttributeError, TimeoutError):
                 db.rollback()
                 self.send_error(400)
