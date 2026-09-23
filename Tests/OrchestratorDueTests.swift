@@ -418,6 +418,50 @@ enum OrchestratorDueSuite {
             )
         }
 
+        failures += check("network errors retry on a short backoff, capped below idle") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 1), 60, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 2), 120, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 3), 240, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 4), 480, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 40), 480, accuracy: 0)
+            try assertTrue(
+                UsageOrchestrator.transientRetryWait(streak: 40) < UsageOrchestrator.backgroundPollSeconds
+            )
+            // An idle account that just lost the network looks again in 1m, not 15m …
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: nil, lastPrimaryDelta: nil,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 1, now: now
+                ),
+                60, accuracy: 0
+            )
+            // … also behind a locked screen (a wake with Wi-Fi still joining) …
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: nil, screenLocked: true, networkFailures: 1, now: now
+                ),
+                60, accuracy: 0
+            )
+            // … and a long outage backs a busy account off instead of hammering.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0.5, lastPrimaryDelta: 0.03,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 3, now: now
+                ),
+                240, accuracy: 0
+            )
+            // No failures: unchanged cadence.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: nil, lastPrimaryDelta: nil,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 0, now: now
+                ),
+                UsageOrchestrator.backgroundPollSeconds, accuracy: 0
+            )
+        }
+
         failures += check("scheduler ticks far below the poll interval") {
             // A tick equal to the interval skipped every other slot, because the
             // lastFetch stamp lands after the HTTP round trip.

@@ -52,6 +52,12 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static let authFailureCooldown: TimeInterval = 30 * 60
     /// While the Mac is asleep / screen locked, floor poll spacing.
     nonisolated static let inactivePollFloor: TimeInterval = 30 * 60
+    /// First retry after a network error, then doubling. Without it an idle
+    /// account waited the full 15m after one DNS blip or a wake before Wi-Fi.
+    nonisolated static let transientRetryBase: TimeInterval = 60
+    /// Backoff cap; stays below `backgroundPollSeconds` so a failure never
+    /// makes an account slower than idle.
+    nonisolated static let transientRetryMax: TimeInterval = 8 * 60
 
     enum PollMode: Equatable, Sendable {
         /// Timer / wake: `backgroundPollSeconds` × minPoll.
@@ -89,6 +95,8 @@ final class UsageOrchestrator: ObservableObject {
     private var cooldownUntil: [AccountID: Date] = [:]
     /// Consecutive rate-limit hits → longer quiet windows (1×, 2×, 3× base… capped).
     private var rateLimitStreak: [AccountID: Int] = [:]
+    /// Consecutive network errors → short retry backoff (`transientRetryWait`).
+    private var networkFailureStreak: [AccountID: Int] = [:]
     /// Soft notices (token expiring soon).
     private var lastNotice: [AccountID: String] = [:]
     /// Between-poll ring extension learned from captured local spend.
@@ -301,6 +309,12 @@ final class UsageOrchestrator: ObservableObject {
         return max(60, max(local, vendor))
     }
 
+    /// Spacing after `streak` network errors in a row: 1m, 2m, 4m, then 8m.
+    nonisolated static func transientRetryWait(streak: Int) -> TimeInterval {
+        let steps = max(0, min(streak, 4) - 1)
+        return min(transientRetryMax, transientRetryBase * pow(2, Double(steps)))
+    }
+
     // MARK: - Polling
 
     private func rescheduleTimer() {
@@ -423,6 +437,7 @@ final class UsageOrchestrator: ObservableObject {
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
         rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
+        networkFailureStreak = networkFailureStreak.filter { live.contains($0.key) }
         projectionByAccount = projectionByAccount.filter { live.contains($0.key) }
         projectionIdentity = projectionIdentity.filter { live.contains($0.key) }
         lastPrimaryDelta = lastPrimaryDelta.filter { live.contains($0.key) }
@@ -644,6 +659,15 @@ final class UsageOrchestrator: ObservableObject {
     private func apply(accountID: AccountID, snapshot: UsageSnapshot, now: Date) {
         lastFetchAt[accountID] = now
 
+        // Any answer from the vendor, good or bad, ends a network outage.
+        if case .network = snapshot.error {
+            let streak = (networkFailureStreak[accountID] ?? 0) + 1
+            networkFailureStreak[accountID] = streak
+            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(Self.transientRetryWait(streak: streak)))s")
+        } else {
+            networkFailureStreak[accountID] = nil
+        }
+
         if let error = snapshot.error {
             lastError[accountID] = error
             let kind = UsageSnapshotMerge.failureKind(error)
@@ -729,8 +753,11 @@ final class UsageOrchestrator: ObservableObject {
         lastPrimaryDelta: Double?,
         windowResetAt: Date?,
         screenLocked: Bool,
+        networkFailures: Int = 0,
         now: Date
     ) -> TimeInterval {
+        // A failing network is its own schedule: sooner than idle, later than busy.
+        if networkFailures > 0 { return transientRetryWait(streak: networkFailures) }
         if let windowResetAt, now >= windowResetAt,
            now.timeIntervalSince(windowResetAt) <= postResetGrace
         {
@@ -752,6 +779,7 @@ final class UsageOrchestrator: ObservableObject {
             lastPrimaryDelta: lastPrimaryDelta[account.id],
             windowResetAt: lastGood[account.id]?.primary.resetAt,
             screenLocked: screenLocked,
+            networkFailures: networkFailureStreak[account.id] ?? 0,
             now: now
         )
     }
