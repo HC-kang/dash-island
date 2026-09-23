@@ -119,14 +119,14 @@ Then add, at minimum:
 | poll | debug | tick skipped whole: `reason=inflight` (coalesced) or `reason=asleep` | `pollDueAccounts` guards |
 | poll | debug | per account: `skip reason=cooldown in=…s` or `skip reason=interval` | `pollDueAccounts` loop |
 | poll | info | tick that fetches: `mode`, `due` count, `locked` flag | `pollDueAccounts` before `fetchAccounts` |
-| poll | info | cooldown set: kind (`429`/`auth`/`soft`), streak, wait | `apply` error branch |
+| poll | info | cooldown set (only when a new value is assigned): kind (`429`/`auth`/`soft`), streak, wait | `apply` error branch |
 | poll | info | power: sleep / wake / lock / unlock | `installPowerObservers` |
 | fetch | info | one line per usage call: vendor, account, ms, outcome (`ok`/`rateLimited`/`authRequired`/`network`/`parse`/`unavailable`) | `fetchAccounts` task body |
 | auth | info/warn | existing Claude/Codex/Grok/Agy refresh, harvest, recovery lines, moved to `auth` | adapters |
 | accounts | info | load (count, rebuilt-from-folders), add, remove, rename, reorder, corrupt backup | `AccountStore`, `AccountsPersistence` |
 | accounts | info/warn | last-good restore (count) / persist failure | `restoreLastGoodSnapshots` / `persistLastGood` |
 | burn | debug | existing burn line | `pushBurn` |
-| local | info | load: provider, rows, ms | `LocalUsageStore.load` |
+| local | debug | load: provider, scope, account (short), rows, ms | `LocalUsageStore.load` |
 | window | info | notch geometry at init and on refresh (existing lines) | `IslandWindowController` |
 
 HTTP status stays in the adapter lines that already print it. The orchestrator
@@ -181,3 +181,4 @@ must run sequentially — `build.sh` wipes `build/`.
   `init`/`refreshNotchGeometry` already cover display changes.
 - `#fileID`/`#line` parameters dropped (not printed).
 - Per-tick state snapshot moved to out of scope.
+- (post-merge, PR #16) `local` load line → `debug`: the detail panel reloads every ~15 s, about 240 info lines/hour buried poll/fetch lines. Its `scope=` no longer prints the full account UUID; `account=` uses `UUID.short`. Soft cooldown line prints only when a cooldown is newly set.

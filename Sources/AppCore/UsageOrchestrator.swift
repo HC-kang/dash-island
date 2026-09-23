@@ -629,13 +629,13 @@ final class UsageOrchestrator: ObservableObject {
             case .unavailable where kind == .soft:
                 // Retry exactly when the token gate opens; otherwise short spacing
                 // so we do not thrash oauth/token.
+                // Log only when a cooldown is actually set, not when one already runs.
                 if let retryAt = snapshot.retryAt {
                     cooldownUntil[accountID] = retryAt
+                    Log.poll.info("cooldown account=\(accountID.short) kind=soft wait=\(Int(retryAt.timeIntervalSince(now) / 60))m source=retryAt")
                 } else if cooldownUntil[accountID] == nil {
                     cooldownUntil[accountID] = now.addingTimeInterval(30 * 60)
-                }
-                if let until = cooldownUntil[accountID] {
-                    Log.poll.info("cooldown account=\(accountID.short) kind=soft wait=\(Int(until.timeIntervalSince(now) / 60))m")
+                    Log.poll.info("cooldown account=\(accountID.short) kind=soft wait=30m source=default")
                 }
             default:
                 break
