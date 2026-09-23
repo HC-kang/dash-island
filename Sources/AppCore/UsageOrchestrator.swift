@@ -9,7 +9,8 @@ import Foundation
 /// - Background: fixed 15m seed (no user interval picker).
 /// - Expand: lazy refresh after dwell, debounced by max(120s, vendor minPoll).
 /// - Prefer last-good snapshot over aggressive 429.
-/// - Sleep: no network; lock: floor 30m; launch: one seed poll.
+/// - Sleep: no network; wake: one poll after a 60s grace; lock: floor 30m;
+///   launch: one seed poll.
 @MainActor
 final class UsageOrchestrator: ObservableObject {
     static let shared = UsageOrchestrator(
@@ -148,6 +149,13 @@ final class UsageOrchestrator: ObservableObject {
     private var systemAsleep = false
     /// Screen locked (optional extra inactive floor when awake).
     private var screenLocked = false
+    /// Network polls wait until this instant after a wake (`WakeScheduling`).
+    private var wakeGraceUntil: Date?
+    /// The one poll scheduled for the end of the wake grace.
+    private var wakePollTask: Task<Void, Never>?
+    /// When the repeating scheduler timer should fire next; a much later fire
+    /// is the catch-up fire of a sleep.
+    private var nextExpectedTick: Date?
 
     /// How often to re-read local Claude session logs for the needle.
     nonisolated static let localBurnSeconds: TimeInterval = 60
@@ -218,6 +226,9 @@ final class UsageOrchestrator: ObservableObject {
         started = false
         polling = false
         pendingPoll = nil
+        wakePollTask?.cancel()
+        wakePollTask = nil
+        wakeGraceUntil = nil
     }
 
     /// Force a poll. Optionally mark one account immediately due (e.g. after reauth).
@@ -277,6 +288,38 @@ final class UsageOrchestrator: ObservableObject {
         Task { await pollDueAccounts(mode: .expand, forceActive: true) }
     }
 
+    /// Hold network polls for `WakeScheduling.graceDelay`, then poll once.
+    /// Called by the wake notification and by an overdue scheduler tick;
+    /// whichever comes second restarts the same grace.
+    private func beginWakeGrace(now: Date) {
+        wakeGraceUntil = now.addingTimeInterval(WakeScheduling.graceDelay)
+        wakePollTask?.cancel()
+        wakePollTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(WakeScheduling.graceDelay * 1_000_000_000))
+            guard !Task.isCancelled, let self, !self.systemAsleep else { return }
+            self.wakePollTask = nil
+            // The sleep clock and the wall clock can disagree by a hair.
+            self.wakeGraceUntil = nil
+            await self.pollDueAccounts(mode: .background, forceActive: true)
+        }
+    }
+
+    private func schedulerTick() async {
+        let now = Date()
+        let expected = nextExpectedTick
+        nextExpectedTick = now.addingTimeInterval(Self.schedulerTickSeconds)
+        // The run loop delivers one catch-up fire right at wake, sometimes before
+        // (or without) the wake notification. A timer that fired at all means
+        // the Mac is awake.
+        if WakeScheduling.isOverdueFire(now: now, expected: expected) {
+            Log.poll.info("power event=wake source=overdueTick late=\(Int(now.timeIntervalSince(expected ?? now)))s")
+            systemAsleep = false
+            beginWakeGrace(now: now)
+            return
+        }
+        await pollDueAccounts(mode: .background)
+    }
+
     private func installPowerObservers() {
         let wsnc = NSWorkspace.shared.notificationCenter
         powerObservers.append(
@@ -288,6 +331,8 @@ final class UsageOrchestrator: ObservableObject {
                 Task { @MainActor in
                     Log.poll.info("power event=sleep")
                     self?.systemAsleep = true
+                    self?.wakePollTask?.cancel()
+                    self?.wakePollTask = nil
                 }
             }
         )
@@ -300,7 +345,7 @@ final class UsageOrchestrator: ObservableObject {
                 Task { @MainActor in
                     Log.poll.info("power event=wake")
                     self?.systemAsleep = false
-                    await self?.pollDueAccounts(mode: .background, forceActive: true)
+                    self?.beginWakeGrace(now: Date())
                 }
             }
         )
@@ -391,11 +436,12 @@ final class UsageOrchestrator: ObservableObject {
         let seconds = Self.schedulerTickSeconds
         let t = Timer(timeInterval: max(1, seconds), repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.pollDueAccounts(mode: .background)
+                await self?.schedulerTick()
             }
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        nextExpectedTick = Date().addingTimeInterval(max(1, seconds))
     }
 
     private func rescheduleBurnTimer() {
@@ -588,12 +634,20 @@ final class UsageOrchestrator: ObservableObject {
             Log.poll.debug("tick skip reason=asleep mode=\(mode)")
             return
         }
+        // Just woke: the wake poll at the end of the grace covers everyone.
+        if WakeScheduling.holdsPoll(now: Date(), graceUntil: wakeGraceUntil, manual: mode == .force) {
+            Log.poll.debug("tick skip reason=wakeGrace mode=\(mode)")
+            return
+        }
 
         polling = true
         defer { polling = false }
         await runPoll(mode: mode, forceActive: forceActive)
         while let next = pendingPoll {
             pendingPoll = nil
+            if WakeScheduling.holdsPoll(now: Date(), graceUntil: wakeGraceUntil, manual: next == .force) {
+                continue
+            }
             await runPoll(mode: next, forceActive: true)
         }
     }

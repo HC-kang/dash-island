@@ -64,6 +64,27 @@ enum PollingPathSuite {
             try assertEqual(gens.current(a), 0)
         }
 
+        failures += check("wake: an overdue timer fire means the Mac slept through it") {
+            try assertTrue(!WakeScheduling.isOverdueFire(now: t0, expected: nil))
+            // Run-loop jitter and a busy main thread cost seconds, not minutes.
+            try assertTrue(!WakeScheduling.isOverdueFire(now: t0.addingTimeInterval(30), expected: t0))
+            try assertTrue(!WakeScheduling.isOverdueFire(
+                now: t0.addingTimeInterval(WakeScheduling.overdueSlack), expected: t0
+            ))
+            try assertTrue(WakeScheduling.isOverdueFire(
+                now: t0.addingTimeInterval(WakeScheduling.overdueSlack + 1), expected: t0
+            ))
+        }
+
+        failures += check("wake: polls wait out the 60s grace, a manual refresh does not") {
+            let grace = t0.addingTimeInterval(WakeScheduling.graceDelay)
+            try assertEqual(WakeScheduling.graceDelay, 60, accuracy: 0)
+            try assertTrue(!WakeScheduling.holdsPoll(now: t0, graceUntil: nil, manual: false))
+            try assertTrue(WakeScheduling.holdsPoll(now: t0.addingTimeInterval(5), graceUntil: grace, manual: false))
+            try assertTrue(!WakeScheduling.holdsPoll(now: t0.addingTimeInterval(5), graceUntil: grace, manual: true))
+            try assertTrue(!WakeScheduling.holdsPoll(now: grace, graceUntil: grace, manual: false))
+        }
+
         failures += check("reauth drops last-good rings only for a proven identity change") {
             try assertTrue(UsageOrchestrator.reauthDropsLastGood(oldIdentity: "a", newIdentity: "b"))
             try assertTrue(!UsageOrchestrator.reauthDropsLastGood(oldIdentity: "a", newIdentity: "a"))
