@@ -297,9 +297,9 @@ struct ClaudeAdapter: VendorAdapter {
             return
         case .softKeep:
             if case .rateLimited = snap.error {
-                NSLog("DashIsland: Claude token smoke-test rate-limited (keeping)")
+                Log.auth.info("smoke-test vendor=claude outcome=rateLimited action=keep")
             } else {
-                NSLog("DashIsland: Claude token smoke-test soft error %@", String(describing: snap.error))
+                Log.auth.info("smoke-test vendor=claude outcome=soft error=\(String(describing: snap.error))")
             }
         case .reject:
             throw ClaudeAdapterError.reauthFailed(
@@ -334,10 +334,7 @@ struct ClaudeAdapter: VendorAdapter {
                 fetchedAt: now
             )
             if case .authRequired = snap.error {
-                NSLog(
-                    "DashIsland: Claude long-lived token lacks usage scopes ref=%@",
-                    String(ref.prefix(8))
-                )
+                Log.auth.warn("token vendor=claude outcome=missingUsageScopes ref=\(String(ref.prefix(8)))")
                 return Self.errorSnapshot(
                     .unavailable(
                         "setup-token can’t read usage (no user:profile). Reauthenticate → browser login"
@@ -395,7 +392,7 @@ struct ClaudeAdapter: VendorAdapter {
             failedAccessToken: failedAccessToken
         ) {
         case .success(let refreshed), .adopted(let refreshed):
-            NSLog("DashIsland: Claude recovery ok ref=%@", String(ref.prefix(8)))
+            Log.auth.info("recovery vendor=claude outcome=ok ref=\(String(ref.prefix(8)))")
             return await probeUsage(
                 token: refreshed.accessToken,
                 plan: refreshed.subscriptionType,
@@ -416,10 +413,10 @@ struct ClaudeAdapter: VendorAdapter {
                 message: "refresh pending", retryAt: until
             )
         case .rejected:
-            NSLog("DashIsland: Claude refresh rejected ref=%@", String(ref.prefix(8)))
+            Log.auth.warn("refresh vendor=claude outcome=rejected ref=\(String(ref.prefix(8)))")
             return errorSnapshot(.authRequired, fetchedAt: Date())
         case .unavailable(let message):
-            NSLog("DashIsland: Claude refresh unavailable ref=%@ %@", String(ref.prefix(8)), message)
+            Log.auth.warn("refresh vendor=claude outcome=unavailable ref=\(String(ref.prefix(8))) reason=\(message)")
             if fallback.error != nil {
                 return errorSnapshot(
                     .unavailable("token quiet — \(message)"),
@@ -431,7 +428,7 @@ struct ClaudeAdapter: VendorAdapter {
             // No refresh token (or unreadable file): nothing left to recover with
             // internally. Only this case earns the reconnect warning.
             if fallback.error != nil {
-                NSLog("DashIsland: Claude refresh impossible ref=%@", String(ref.prefix(8)))
+                Log.auth.warn("refresh vendor=claude outcome=impossible ref=\(String(ref.prefix(8)))")
                 return errorSnapshot(.authRequired, fetchedAt: Date())
             }
             return fallback
@@ -455,7 +452,7 @@ struct ClaudeAdapter: VendorAdapter {
             if live.error == nil { return live }
             if case .rateLimited = live.error { return live }
         }
-        NSLog("DashIsland: Claude refresh quiet ref=%@ %@", String(ref.prefix(8)), message)
+        Log.auth.info("refresh vendor=claude outcome=quiet ref=\(String(ref.prefix(8))) reason=\(message)")
         var quiet = errorSnapshot(.unavailable(message), fetchedAt: Date())
         quiet.retryAt = retryAt
         return quiet
@@ -583,7 +580,7 @@ struct ClaudeAdapter: VendorAdapter {
         do {
             try task.run()
         } catch {
-            NSLog("DashIsland: Claude CLI ping failed %@", error.localizedDescription)
+            Log.auth.warn("cliPing vendor=claude outcome=failed error=\(error.localizedDescription)")
             return false
         }
         let deadline = Date().addingTimeInterval(45)
@@ -591,7 +588,7 @@ struct ClaudeAdapter: VendorAdapter {
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
         if task.isRunning { task.terminate() }
-        NSLog("DashIsland: Claude CLI ping finished dir=%@", configDir.path)
+        Log.auth.info("cliPing vendor=claude outcome=finished dir=\(configDir.path)")
         return true
     }
 
@@ -602,12 +599,9 @@ struct ClaudeAdapter: VendorAdapter {
             let t = snap.tertiary.map { Int(($0.usedFraction * 100).rounded()) }
             let tLabel = snap.tertiary?.displayLabel ?? "-"
             let extraN = snap.extras.count
-            NSLog(
-                "DashIsland: Claude usage ok ref=%@ 5h=%d%% wk=%d%% tert=%@ %d%% extras=%d",
-                String(ref.prefix(8)), p, w, tLabel, t ?? -1, extraN
-            )
+            Log.fetch.debug("usage vendor=claude outcome=ok ref=\(String(ref.prefix(8))) 5h=\(p)% wk=\(w)% tert=\(tLabel) \(t ?? -1)% extras=\(extraN)")
         } else if let err = snap.error {
-            NSLog("DashIsland: Claude usage error ref=%@ %@", String(ref.prefix(8)), String(describing: err))
+            Log.fetch.warn("usage vendor=claude outcome=error ref=\(String(ref.prefix(8))) error=\(String(describing: err))")
         }
         return snap
     }
@@ -623,7 +617,7 @@ struct ClaudeAdapter: VendorAdapter {
         try? FileManager.default.removeItem(at: credFile)
         CredentialStore.removeLastGoodUsage(inDirectory: configDir)
         deleteScopedKeychainItem(configDir: configDir)
-        NSLog("DashIsland: cleared Claude managed creds at %@", configDir.path)
+        Log.auth.info("clearCreds vendor=claude dir=\(configDir.path)")
     }
 
     /// Best-effort CLI logout so the next login cannot reuse the scoped session.
@@ -921,11 +915,7 @@ struct ClaudeAdapter: VendorAdapter {
             rawJSON: nil
         )
         persistCredentialsFile(creds: creds, configDir: configDir, overwrite: true)
-        NSLog(
-            "DashIsland: installed Claude setup-token len=%d at %@",
-            token.count,
-            configDir.path
-        )
+        Log.auth.info("setupToken vendor=claude outcome=installed len=\(token.count) dir=\(configDir.path)")
     }
 
     /// Near expiry (within buffer) or unknown expiry — candidate for refresh.
@@ -1119,52 +1109,26 @@ struct ClaudeAdapter: VendorAdapter {
                         }
                         try? updated.write(to: path, options: .atomic)
                         await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
-                        NSLog(
-                            "DashIsland: Claude refresh ok host=%@ type=%@",
-                            tokenURL.host ?? "",
-                            contentType
-                        )
+                        Log.auth.info("refresh vendor=claude outcome=ok host=\(tokenURL.host ?? "") type=\(contentType)")
                         return .success(next)
                     case 429:
                         saw429 = true
                         hostRateLimited = true
                         retry429 = cappedTokenRetryDate(retryAfterDate(from: http))
-                        NSLog(
-                            "DashIsland: Claude refresh HTTP 429 host=%@ — trying next token host",
-                            tokenURL.host ?? ""
-                        )
+                        Log.auth.info("refresh vendor=claude http=429 host=\(tokenURL.host ?? "") action=nextHost")
                     case 400, 401, 403:
                         let errBody = String(data: respData, encoding: .utf8) ?? ""
                         if isFatalOAuthRefreshError(status: http.statusCode, body: errBody) {
                             await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
-                            NSLog(
-                                "DashIsland: Claude refresh rejected HTTP %d %@ %@",
-                                http.statusCode,
-                                tokenURL.host ?? "",
-                                errBody
-                            )
+                            Log.auth.warn("refresh vendor=claude outcome=rejected http=\(http.statusCode) host=\(tokenURL.host ?? "")")
                             return .rejected
                         }
-                        NSLog(
-                            "DashIsland: Claude refresh HTTP %d host=%@ type=%@ — trying next",
-                            http.statusCode,
-                            tokenURL.host ?? "",
-                            contentType
-                        )
+                        Log.auth.info("refresh vendor=claude http=\(http.statusCode) host=\(tokenURL.host ?? "") type=\(contentType) action=nextHost")
                     default:
-                        NSLog(
-                            "DashIsland: Claude refresh HTTP %d host=%@ type=%@",
-                            http.statusCode,
-                            tokenURL.host ?? "",
-                            contentType
-                        )
+                        Log.auth.warn("refresh vendor=claude http=\(http.statusCode) host=\(tokenURL.host ?? "") type=\(contentType)")
                     }
                 } catch {
-                    NSLog(
-                        "DashIsland: Claude refresh failed host=%@ %@",
-                        tokenURL.host ?? "",
-                        error.localizedDescription
-                    )
+                    Log.auth.warn("refresh vendor=claude outcome=failed host=\(tokenURL.host ?? "") error=\(error.localizedDescription)")
                 }
                 if hostRateLimited { break }
             }

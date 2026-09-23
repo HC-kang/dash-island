@@ -111,7 +111,7 @@ struct GrokAdapter: VendorAdapter {
             switch await Self.refreshManagedSession(grokHome: dir) {
             case .success(let next):
                 session = next
-                NSLog("DashIsland: Grok proactive refresh ok ref=%@", String(ref.prefix(8)))
+                Log.auth.info("refresh vendor=grok outcome=ok trigger=proactive ref=\(String(ref.prefix(8)))")
             case .rateLimited(let retry):
                 return Self.errorSnapshot(
                     .rateLimited(retryAfter: retry),
@@ -134,7 +134,7 @@ struct GrokAdapter: VendorAdapter {
             case .success(let next):
                 snap = await Self.probeUsage(session: next, fetchedAt: Date())
                 if snap.error == nil {
-                    NSLog("DashIsland: Grok reactive refresh ok ref=%@", String(ref.prefix(8)))
+                    Log.auth.info("refresh vendor=grok outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
                 }
             case .rateLimited(let retry):
                 snap = Self.errorSnapshot(
@@ -182,7 +182,7 @@ struct GrokAdapter: VendorAdapter {
         for path in paths where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
-        NSLog("DashIsland: cleared Grok managed creds at %@", grokHome.path)
+        Log.auth.info("clearCreds vendor=grok dir=\(grokHome.path)")
     }
 
     private func runLogin(grokHome: URL) async throws {
@@ -428,14 +428,13 @@ struct GrokAdapter: VendorAdapter {
             case 200..<300:
                 break
             case 429:
-                NSLog("DashIsland: Grok refresh HTTP 429")
+                Log.auth.warn("refresh vendor=grok http=429")
                 return .rateLimited(retryAfterDate(from: http))
             case 400, 401, 403:
-                let body = String(data: data, encoding: .utf8) ?? ""
-                NSLog("DashIsland: Grok refresh rejected HTTP %d %@", http.statusCode, body)
+                Log.auth.warn("refresh vendor=grok outcome=rejected http=\(http.statusCode)")
                 return .rejected
             default:
-                NSLog("DashIsland: Grok refresh HTTP %d", http.statusCode)
+                Log.auth.warn("refresh vendor=grok http=\(http.statusCode)")
                 return .unavailable("token refresh HTTP \(http.statusCode)")
             }
 
@@ -470,7 +469,7 @@ struct GrokAdapter: VendorAdapter {
             session.filePath = path
             return .success(session)
         } catch {
-            NSLog("DashIsland: Grok refresh failed: %@", error.localizedDescription)
+            Log.auth.warn("refresh vendor=grok outcome=failed error=\(error.localizedDescription)")
             return .unavailable("token refresh: \(error.localizedDescription)")
         }
     }
