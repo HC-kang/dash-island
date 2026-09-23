@@ -317,6 +317,9 @@ struct ClaudeAdapter: VendorAdapter {
         let now = Date()
         let dir = CredentialStore.directoryURL(for: ref)
 
+        // A background CLI ping may be rewriting this folder right now.
+        if let pending = Self.pingPendingSnapshot(configDir: dir, now: now) { return pending }
+
         // File is SoT. Drop the CLI’s hashed Keychain copy if we already
         // persisted — otherwise each account UUID leaves a new item behind.
         Self.discardCLIKeychainCopy(configDir: dir)
@@ -379,8 +382,8 @@ struct ClaudeAdapter: VendorAdapter {
 
     /// Gated recover + re-probe. Soft outcomes keep orchestrator last-good rings.
     /// This managed dir is ours: extend from the file's refresh_token via
-    /// oauth/token. Do **not** spawn `claude -p` on the poll path — that hits
-    /// Keychain and pops a password sheet every expiry.
+    /// oauth/token. When the token host fails, the `claude -p` ping runs
+    /// detached (`startBackgroundCLIPing`); this path never waits for it.
     private static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
@@ -458,6 +461,47 @@ struct ClaudeAdapter: VendorAdapter {
         return quiet
     }
 
+    /// Background CLI refresh pings, keyed by managed folder.
+    static let cliPings = CLIPingRegistry()
+    /// Ping spawn (45s) + `security` harvest (4s) + slack.
+    static let cliPingBudget: TimeInterval = 60
+
+    /// While a CLI ping runs, the CLI may delete `.credentials.json` and write
+    /// Keychain. A poll in that gap would read "no credentials" (red reauth) or
+    /// drop the Keychain copy before the harvest. Wait for the ping instead.
+    static func pingPendingSnapshot(configDir: URL, now: Date = Date()) -> UsageSnapshot? {
+        guard let until = cliPings.runningUntil(configDir.path, now: now) else { return nil }
+        var pending = errorSnapshot(.unavailable("refresh pending"), fetchedAt: now)
+        pending.retryAt = until
+        return pending
+    }
+
+    /// Run `pingCLIThenAdopt` detached: it can take ~50s and must not hold a
+    /// poll. Its harvest lands in the managed file; the next poll adopts it.
+    /// Returns when that poll should look again, or nil when no ping runs
+    /// (spawned too recently).
+    static func startBackgroundCLIPing(configDir: URL, failedAccessToken: String?, now: Date = Date()) -> Date? {
+        let key = configDir.path
+        if let running = cliPings.runningUntil(key, now: now) { return running }
+        guard !pingRecentlyAttempted(configDir: configDir, now: now, gap: cliPingGap(configDir: configDir)) else {
+            return nil
+        }
+        let slot = cliPings.reserve(key, until: now.addingTimeInterval(cliPingBudget), now: now)
+        guard slot.started else { return slot.end }
+        Task.detached(priority: .utility) {
+            _ = await pingCLIThenAdopt(configDir: configDir, failedAccessToken: failedAccessToken)
+            cliPings.finish(key)
+        }
+        return slot.end
+    }
+
+    /// Access ~8h; CLI login is not. Dead access retries every 15m, not 6h.
+    static func cliPingGap(configDir: URL) -> TimeInterval {
+        let expired = readCredentials(configDir: configDir)
+            .map { isExpired($0) } ?? true
+        return expired ? 15 * 60 : 6 * 3600
+    }
+
     /// Unused on the poll path (Keychain spam). Kept for tests / last-resort.
     static var refreshPingSpawner: ((URL) -> Bool)?
 
@@ -465,10 +509,7 @@ struct ClaudeAdapter: VendorAdapter {
         configDir: URL,
         failedAccessToken: String?
     ) async -> ClaudeCreds? {
-        let expired = readCredentials(configDir: configDir)
-            .map { isExpired($0) } ?? true
-        // Access ~8h; CLI login is not. Dead access retries every 15m, not 6h.
-        let gap: TimeInterval = expired ? 15 * 60 : 6 * 3600
+        let gap = cliPingGap(configDir: configDir)
         if pingRecentlyAttempted(configDir: configDir, gap: gap) { return nil }
         markPingAttempted(configDir: configDir)
         let before = readCredentialsFile(configDir: configDir)?.accessToken
@@ -856,7 +897,10 @@ struct ClaudeAdapter: VendorAdapter {
     /// If we already have a file, drop the CLI leftover. Silent (`Fail`) —
     /// never a password sheet.
     static func discardCLIKeychainCopy(configDir: URL) {
-        guard readCredentialsFile(configDir: configDir) != nil else { return }
+        // A running CLI ping owns the Keychain item until its harvest commits.
+        guard cliPings.runningUntil(configDir.path) == nil,
+              readCredentialsFile(configDir: configDir) != nil
+        else { return }
         deleteScopedKeychainItem(configDir: configDir)
     }
 
@@ -1133,21 +1177,20 @@ struct ClaudeAdapter: VendorAdapter {
                 if hostRateLimited { break }
             }
         }
-        if saw429 || lastStatus > 0 {
-            // HTTP oauth/token 429s for days; the Claude CLI still refreshes.
-            if let recovered = await pingCLIThenAdopt(
-                configDir: configDir,
-                failedAccessToken: failedAccessToken ?? creds.accessToken
-            ) {
-                return .success(recovered)
-            }
-        }
+        // HTTP oauth/token 429s for days; the Claude CLI still refreshes. The
+        // ping runs in the background; look again once it could have landed.
+        let pingEnd = (saw429 || lastStatus > 0)
+            ? startBackgroundCLIPing(configDir: configDir, failedAccessToken: failedAccessToken ?? creds.accessToken)
+            : nil
         if saw429 {
             let retry = retry429 ?? Date().addingTimeInterval(globalRefresh429Quiet)
             await refreshGate.noteRateLimited(until: retry)
-            return .rateLimited(retry)
+            return .rateLimited(min(retry, pingEnd ?? retry))
         }
         await refreshGate.noteAttempt(key: gateKey, gap: globalRefreshMinGap)
+        if let pingEnd {
+            return .deferred(pingEnd)
+        }
         if lastStatus > 0 {
             return .unavailable("token refresh HTTP \(lastStatus)")
         }
@@ -1353,6 +1396,8 @@ struct ClaudeAdapter: VendorAdapter {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // Anthropic gates this endpoint on a CLI User-Agent.
         req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
+        // Default is 60s; a stalled host held a poll slot that long.
+        req.timeoutInterval = 20
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -1592,6 +1637,36 @@ struct ClaudeAdapter: VendorAdapter {
 }
 
 // MARK: - Process-wide Claude OAuth refresh gate
+
+/// Managed folders with a CLI refresh ping running in the background.
+/// Synchronous (lock, not actor) so a poll can reserve and check in one step.
+final class CLIPingRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var until: [String: Date] = [:]
+
+    init() {}
+
+    /// Reserve `key` until `date`. When a ping already runs there, keep it and
+    /// return its end with `started == false`.
+    func reserve(_ key: String, until date: Date, now: Date = Date()) -> (end: Date, started: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if let running = until[key], running > now { return (running, false) }
+        until[key] = date
+        return (date, true)
+    }
+
+    /// End of the ping running for `key`. A ping past its budget no longer counts.
+    func runningUntil(_ key: String, now: Date = Date()) -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        guard let end = until[key], end > now else { return nil }
+        return end
+    }
+
+    func finish(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        until[key] = nil
+    }
+}
 
 /// Spaces oauth/token POSTs **per account** so one account's refresh never
 /// starves another; a token-host 429 quiets every account. Survives restart.
