@@ -116,6 +116,9 @@ final class UsageOrchestrator: ObservableObject {
     private var lastError: [AccountID: UsageError] = [:]
     /// Per-account 429 / auth cooldown end times.
     private var cooldownUntil: [AccountID: Date] = [:]
+    /// Retry time a soft failure named (`UsageSnapshot.retryAt`). The account
+    /// is due then, not one idle interval later (`isDue`).
+    private var retryDueAt: [AccountID: Date] = [:]
     /// Consecutive rate-limit hits → longer quiet windows (1×, 2×, 3× base… capped).
     private var rateLimitStreak: [AccountID: Int] = [:]
     /// Consecutive network errors → short retry backoff (`transientRetryWait`).
@@ -145,6 +148,8 @@ final class UsageOrchestrator: ObservableObject {
     private var pendingPoll: PollMode?
     /// Guards against applying a result fetched with replaced credentials.
     private var generations = PollGenerations()
+    /// Accounts with a fetch running right now (`beginReauth` waits for them).
+    private var fetchingNow: Set<AccountID> = []
     /// True between willSleep and didWake — skip network polls.
     private var systemAsleep = false
     /// Screen locked (optional extra inactive floor when awake).
@@ -237,6 +242,7 @@ final class UsageOrchestrator: ObservableObject {
         if let accountID {
             lastFetchAt[accountID] = nil
             cooldownUntil[accountID] = nil
+            retryDueAt[accountID] = nil
             // Reauth: a fetch still running used the old credentials; drop its result.
             generations.bump(accountID)
             resetIdentityState(accountID)
@@ -244,6 +250,7 @@ final class UsageOrchestrator: ObservableObject {
             for id in accountStore.accounts.map(\.id) {
                 lastFetchAt[id] = nil
                 cooldownUntil[id] = nil
+                retryDueAt[id] = nil
             }
         }
         rebuildWidgets()
@@ -280,6 +287,36 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static func reauthDropsLastGood(oldIdentity: String?, newIdentity: String?) -> Bool {
         guard let oldIdentity, let newIdentity else { return false }
         return oldIdentity != newIdentity
+    }
+
+    /// Longest wait for a fetch that was already running when reauth started.
+    nonisolated static let reauthFetchWait: TimeInterval = 30
+
+    /// Reauthenticate is about to start. The adapter moves the session files
+    /// aside while the sign-in runs; a poll then read "no credentials" and left
+    /// a false red reauth with a 30m cooldown after Cancel. Hold this account
+    /// until `endReauth`, and let a fetch already running finish first: its
+    /// token refresh could write a file the login wait takes for the new sign-in.
+    func beginReauth(accountID: AccountID) async {
+        generations.hold(accountID)
+        Log.poll.info("hold account=\(accountID.short) reason=reauth")
+        let deadline = Date().addingTimeInterval(Self.reauthFetchWait)
+        while fetchingNow.contains(accountID), Date() < deadline, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Reauth ended, with any outcome. After a success the files hold a new
+    /// session: poll it now. After Cancel or a failure the old files are back
+    /// and no poll ran on the gap, so the normal schedule goes on.
+    func endReauth(accountID: AccountID, succeeded: Bool) {
+        generations.release(accountID)
+        Log.poll.info("release account=\(accountID.short) reason=reauth succeeded=\(succeeded)")
+        if succeeded {
+            refresh(accountID: accountID)
+        } else {
+            rebuildWidgets()
+        }
     }
 
     /// Island became expanded (caller should dwell ~400ms first). Lazy refresh
@@ -381,14 +418,23 @@ final class UsageOrchestrator: ObservableObject {
     /// Whether an account should be fetched at `now`.
     ///
     /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll) - tolerance`.
+    /// `retryAt` is the retry time a soft failure named (token gate, CLI ping).
+    /// It is due then, even when the idle interval is longer; `minPoll` stays
+    /// the floor.
     nonisolated static func isDue(
         lastFetch: Date?,
         now: Date,
         userInterval: TimeInterval,
         minPoll: TimeInterval,
-        tolerance: TimeInterval = 0
+        tolerance: TimeInterval = 0,
+        retryAt: Date? = nil
     ) -> Bool {
         guard let lastFetch else { return true }
+        if let retryAt, now >= retryAt,
+           now.timeIntervalSince(lastFetch) >= minPoll - tolerance
+        {
+            return true
+        }
         let interval = max(userInterval, minPoll)
         guard interval > 0 else { return true }
         return now.timeIntervalSince(lastFetch) >= interval - tolerance
@@ -551,6 +597,7 @@ final class UsageOrchestrator: ObservableObject {
         lastError = lastError.filter { live.contains($0.key) }
         lastNotice = lastNotice.filter { live.contains($0.key) }
         cooldownUntil = cooldownUntil.filter { live.contains($0.key) }
+        retryDueAt = retryDueAt.filter { live.contains($0.key) }
         rateLimitStreak = rateLimitStreak.filter { live.contains($0.key) }
         networkFailureStreak = networkFailureStreak.filter { live.contains($0.key) }
         projectionByAccount = projectionByAccount.filter { live.contains($0.key) }
@@ -668,6 +715,10 @@ final class UsageOrchestrator: ObservableObject {
         let inactive = screenLocked && !forceActive && mode == .background
         var due: [Account] = []
         for account in accounts {
+            if generations.isHeld(account.id) {
+                Log.poll.debug("skip account=\(account.id.short) reason=reauth")
+                continue
+            }
             if let until = cooldownUntil[account.id], now < until {
                 // 20h-stale last-good + 4h 429 lock looked dead. Expand/force
                 // retry when the last *success* is older than 2h.
@@ -700,7 +751,8 @@ final class UsageOrchestrator: ObservableObject {
                 now: now,
                 userInterval: interval,
                 minPoll: minPoll,
-                tolerance: Self.dueTolerance
+                tolerance: Self.dueTolerance,
+                retryAt: retryDueAt[account.id]
             ) {
                 due.append(account)
             } else {
@@ -730,14 +782,18 @@ final class UsageOrchestrator: ObservableObject {
             start: { queued -> FetchJob? in
                 // Read the account again: it may have been removed or reauthed
                 // (new credentialRef) while it waited for a slot.
-                guard let account = self.accountStore.accounts.first(where: { $0.id == queued.id }) else {
+                guard let account = self.accountStore.accounts.first(where: { $0.id == queued.id }),
+                      !self.generations.isHeld(account.id)
+                else {
                     return nil
                 }
+                self.fetchingNow.insert(account.id)
                 return FetchJob(account: account, startedAt: Date(), generation: self.generations.current(account.id))
             },
             work: { job in await Self.fetchOne(job.account) },
             finish: { job, snapshot in
                 let id = job.account.id
+                self.fetchingNow.remove(id)
                 let live = Set(self.accountStore.accounts.map(\.id))
                 guard self.generations.accepts(id, generation: job.generation, live: live) else {
                     Log.poll.info("discard account=\(id.short) reason=stale")
@@ -826,6 +882,7 @@ final class UsageOrchestrator: ObservableObject {
 
     private func apply(accountID: AccountID, snapshot: UsageSnapshot, startedAt: Date, now: Date) {
         lastFetchAt[accountID] = startedAt
+        retryDueAt[accountID] = nil
 
         // Any answer from the vendor, good or bad, ends a network outage.
         if case .network = snapshot.error {
@@ -857,6 +914,7 @@ final class UsageOrchestrator: ObservableObject {
                 // Log only when a cooldown is actually set, not when one already runs.
                 if let retryAt = snapshot.retryAt {
                     cooldownUntil[accountID] = retryAt
+                    retryDueAt[accountID] = retryAt
                     Log.poll.info("cooldown account=\(accountID.short) kind=soft wait=\(Int(retryAt.timeIntervalSince(now) / 60))m source=retryAt")
                 } else if cooldownUntil[accountID] == nil {
                     cooldownUntil[accountID] = now.addingTimeInterval(30 * 60)
@@ -1103,7 +1161,7 @@ final class UsageOrchestrator: ObservableObject {
             if let cool, cool > now {
                 nextDue = cool
             } else if let attempt {
-                nextDue = attempt.addingTimeInterval(interval)
+                nextDue = min(attempt.addingTimeInterval(interval), retryDueAt[account.id] ?? .distantFuture)
             } else {
                 nextDue = now
             }
@@ -1510,19 +1568,38 @@ final class UsageOrchestrator: ObservableObject {
 /// Per-account counter bumped when an account's credentials change under a
 /// running poll (reauth). A result is applied only when the generation it
 /// started under is still current and the account still exists.
+///
+/// A hold covers a running Reauthenticate: the adapter moves the session
+/// files aside, so a poll would read "no credentials". Held accounts are not
+/// polled and take no result. Holds count, so overlapping reauths nest.
 struct PollGenerations: Equatable {
     private var values: [AccountID: Int] = [:]
+    private var holds: [AccountID: Int] = [:]
 
     func current(_ id: AccountID) -> Int { values[id] ?? 0 }
 
     mutating func bump(_ id: AccountID) { values[id] = current(id) + 1 }
 
+    func isHeld(_ id: AccountID) -> Bool { (holds[id] ?? 0) > 0 }
+
+    /// Drops results already in flight and stops new polls for `id`.
+    mutating func hold(_ id: AccountID) {
+        holds[id, default: 0] += 1
+        bump(id)
+    }
+
+    mutating func release(_ id: AccountID) {
+        let left = (holds[id] ?? 0) - 1
+        holds[id] = left > 0 ? left : nil
+    }
+
     func accepts(_ id: AccountID, generation: Int, live: Set<AccountID>) -> Bool {
-        live.contains(id) && current(id) == generation
+        live.contains(id) && !isHeld(id) && current(id) == generation
     }
 
     mutating func prune(live: Set<AccountID>) {
         values = values.filter { live.contains($0.key) }
+        holds = holds.filter { live.contains($0.key) }
     }
 }
 

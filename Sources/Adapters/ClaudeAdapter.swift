@@ -349,12 +349,19 @@ struct ClaudeAdapter: VendorAdapter {
     /// (`pingCLIThenAdopt`: 15m while access is dead, else 6h) runs detached
     /// (`startBackgroundCLIPing`) and harvests via `/usr/bin/security`, never
     /// `SecItem`. This path never waits for it.
-    private static func refreshThenProbe(
+    static func refreshThenProbe(
         configDir: URL,
         ref: CredentialRef,
         failedAccessToken: String?,
         fallback: UsageSnapshot
     ) async -> UsageSnapshot {
+        // The proactive refresh of this poll met a busy token host and started a
+        // ping. A second refresh meets the gate that step closed and asks for a
+        // retry 15m out; the ping lands within its budget. Retry at its end.
+        if let pending = pingPendingSnapshot(configDir: configDir) {
+            Log.auth.info("refresh vendor=claude outcome=pingPending ref=\(String(ref.prefix(8)))")
+            return pending
+        }
         switch await refreshManagedCredentialsDetailed(
             configDir: configDir,
             failedAccessToken: failedAccessToken

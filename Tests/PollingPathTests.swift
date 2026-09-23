@@ -64,6 +64,28 @@ enum PollingPathSuite {
             try assertEqual(gens.current(a), 0)
         }
 
+        failures += check("reauth hold: no poll result lands while the session files are moved aside") {
+            let a = UUID(), b = UUID()
+            var gens = PollGenerations()
+            let before = gens.current(a)
+            gens.hold(a)
+            try assertTrue(gens.isHeld(a))
+            try assertTrue(!gens.isHeld(b))
+            // A fetch that started before the hold read the files the adapter moves.
+            try assertTrue(!gens.accepts(a, generation: before, live: [a, b]))
+            try assertTrue(!gens.accepts(a, generation: gens.current(a), live: [a, b]))
+            try assertTrue(gens.accepts(b, generation: gens.current(b), live: [a, b]))
+            // Overlapping reauths: the first one to end does not release the other.
+            gens.hold(a)
+            gens.release(a)
+            try assertTrue(gens.isHeld(a))
+            gens.release(a)
+            try assertTrue(!gens.isHeld(a))
+            try assertTrue(gens.accepts(a, generation: gens.current(a), live: [a, b]))
+            gens.release(a)
+            try assertTrue(!gens.isHeld(a), "an extra release is harmless")
+        }
+
         failures += check("wake: an overdue timer fire means the Mac slept through it") {
             try assertTrue(!WakeScheduling.isOverdueFire(now: t0, expected: nil))
             // Run-loop jitter and a busy main thread cost seconds, not minutes.
@@ -159,6 +181,43 @@ enum PollingPathSuite {
         )
         failures += check("bounded fetch: skipped items do not run") {
             try assertEqual(ran, [0, 2])
+        }
+
+        // The proactive refresh met a busy token host and started a CLI ping.
+        // A second refresh now meets the gate that step closed (+15m) and set
+        // the retry there; the ping lands within its budget.
+        failures += await checkAsync("recovery waits for a running CLI ping instead of refreshing again") {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("di-ping-recover-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let expired = Int(Date().addingTimeInterval(-3600).timeIntervalSince1970 * 1000)
+            try Data(#"{"claudeAiOauth":{"accessToken":"at-old","refreshToken":"rt","subscriptionType":"max","expiresAt":\#(expired)}}"#.utf8)
+                .write(to: dir.appendingPathComponent(".credentials.json"))
+            let end = Date().addingTimeInterval(ClaudeAdapter.cliPingBudget)
+            // Registered ping: the refresh path can never spawn a real `claude`.
+            _ = ClaudeAdapter.cliPings.reserve(dir.path, until: end)
+            defer {
+                ClaudeAdapter.cliPings.finish(dir.path)
+                try? FileManager.default.removeItem(at: dir)
+            }
+            var failed = UsageSnapshot(
+                primary: WindowUsage(usedFraction: 0, kind: .unknown),
+                secondary: nil,
+                plan: nil,
+                fetchedAt: Date()
+            )
+            failed.error = .authRequired
+            let snap = await StubHTTP.with(status: 500, body: "") {
+                await ClaudeAdapter.refreshThenProbe(
+                    configDir: dir,
+                    ref: "test",
+                    failedAccessToken: "at-old",
+                    fallback: failed
+                )
+            }
+            try assertEqual(StubHTTP.requestCount, 0)
+            try assertEqual(snap.error, UsageError.unavailable("refresh pending"))
+            try assertEqual(snap.retryAt, end)
         }
 
         return failures

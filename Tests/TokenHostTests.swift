@@ -166,6 +166,8 @@ enum TokenHostSuite {
 /// Answers every `URLSession.shared` request in-process; tests never reach a vendor.
 final class StubHTTP: URLProtocol {
     nonisolated(unsafe) static var response: (status: Int, body: Data, headers: [String: String])?
+    /// Requests answered since the last `with` began.
+    nonisolated(unsafe) static var requestCount = 0
 
     static func with<T>(
         status: Int,
@@ -174,6 +176,7 @@ final class StubHTTP: URLProtocol {
         _ run: () async -> T
     ) async -> T {
         response = (status, Data(body.utf8), headers)
+        requestCount = 0
         URLProtocol.registerClass(StubHTTP.self)
         defer {
             URLProtocol.unregisterClass(StubHTTP.self)
@@ -186,6 +189,7 @@ final class StubHTTP: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.requestCount += 1
         guard let stub = Self.response, let url = request.url,
               let http = HTTPURLResponse(url: url, statusCode: stub.status, httpVersion: "HTTP/1.1", headerFields: stub.headers)
         else {

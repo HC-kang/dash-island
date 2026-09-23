@@ -187,11 +187,18 @@ enum AccountChromeActions {
         addTask?.cancel()
         addTask = Task {
             defer { IslandDialogController.shared.hideProgress() }
+            // No poll while the adapter has the session files moved aside; a
+            // poll there left a red "reauth" for 30m after Cancel.
+            await UsageOrchestrator.shared.beginReauth(accountID: account.id)
+            var replaced = false
+            defer { UsageOrchestrator.shared.endReauth(accountID: account.id, succeeded: replaced) }
+            if Task.isCancelled { return }
             do {
                 let newRef = try await adapter.reauthenticate(account.credentialRef)
+                // The folder holds the new session now, even if Cancel came late.
+                replaced = true
                 if Task.isCancelled { return }
                 try AccountStore.shared.markAuthenticated(id: account.id, credentialRef: newRef)
-                UsageOrchestrator.shared.refresh(accountID: account.id)
             } catch is CancellationError {
                 // ignored
             } catch {

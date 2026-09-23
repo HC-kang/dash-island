@@ -462,6 +462,28 @@ enum OrchestratorDueSuite {
             ))
         }
 
+        failures += check("a soft retry time makes an idle account due before its 15m interval") {
+            // "refresh pending" until a CLI ping lands (~60s): cooldown ends then,
+            // and the idle interval must not add another 15 minutes.
+            let last = Date(timeIntervalSince1970: 1_700_000_000)
+            let idle = UsageOrchestrator.backgroundPollSeconds
+            let tol = UsageOrchestrator.dueTolerance
+            let retry = last.addingTimeInterval(65)
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60),
+                userInterval: idle, minPoll: 60, tolerance: tol, retryAt: retry
+            ), "not before the retry time")
+            try assertTrue(UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(80),
+                userInterval: idle, minPoll: 60, tolerance: tol, retryAt: retry
+            ), "due once the retry time passed")
+            // The vendor floor still holds.
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(30),
+                userInterval: idle, minPoll: 60, retryAt: last.addingTimeInterval(20)
+            ), "minPoll is still the floor")
+        }
+
         failures += check("network errors retry on a short backoff, capped below idle") {
             let now = Date(timeIntervalSince1970: 1_700_000_000)
             try assertEqual(UsageOrchestrator.transientRetryWait(streak: 1), 60, accuracy: 0)
