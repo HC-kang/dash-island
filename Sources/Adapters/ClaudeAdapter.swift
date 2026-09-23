@@ -488,6 +488,7 @@ struct ClaudeAdapter: VendorAdapter {
         }
         let slot = cliPings.reserve(key, until: now.addingTimeInterval(cliPingBudget), now: now)
         guard slot.started else { return slot.end }
+        Log.auth.info("cliPing vendor=claude outcome=started ref=\(String(configDir.lastPathComponent.prefix(8))) mode=background")
         Task.detached(priority: .utility) {
             _ = await pingCLIThenAdopt(configDir: configDir, failedAccessToken: failedAccessToken)
             cliPings.finish(key)
@@ -629,10 +630,12 @@ struct ClaudeAdapter: VendorAdapter {
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
         if task.isRunning { task.terminate() }
-        Log.auth.info("cliPing vendor=claude outcome=finished dir=\(configDir.path)")
+        // Folder name only: the full path holds the home directory.
+        Log.auth.info("cliPing vendor=claude outcome=finished ref=\(String(configDir.lastPathComponent.prefix(8)))")
         return true
     }
 
+    /// Success detail only; the orchestrator logs every failure once, at warn.
     private static func logUsage(_ snap: UsageSnapshot, ref: CredentialRef) -> UsageSnapshot {
         if snap.error == nil {
             let p = Int((snap.primary.usedFraction * 100).rounded())
@@ -641,8 +644,6 @@ struct ClaudeAdapter: VendorAdapter {
             let tLabel = snap.tertiary?.displayLabel ?? "-"
             let extraN = snap.extras.count
             Log.fetch.debug("usage vendor=claude outcome=ok ref=\(String(ref.prefix(8))) 5h=\(p)% wk=\(w)% tert=\(tLabel) \(t ?? -1)% extras=\(extraN)")
-        } else if let err = snap.error {
-            Log.fetch.warn("usage vendor=claude outcome=error ref=\(String(ref.prefix(8))) error=\(String(describing: err))")
         }
         return snap
     }

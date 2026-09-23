@@ -777,6 +777,7 @@ final class UsageOrchestrator: ObservableObject {
             )
         }
         let ms = Int(Date().timeIntervalSince(started) * 1000)
+        let line = "usage vendor=\(account.vendorID) account=\(account.id.short) ms=\(ms)"
         let outcome: String
         switch snapshot.error {
         case nil: outcome = "ok"
@@ -786,7 +787,13 @@ final class UsageOrchestrator: ObservableObject {
         case .parse?: outcome = "parse"
         case .unavailable?: outcome = "unavailable"
         }
-        Log.fetch.info("usage vendor=\(account.vendorID) account=\(account.id.short) ms=\(ms) outcome=\(outcome)")
+        if let error = snapshot.error {
+            // The one failure line per fetch (adapters no longer log their own).
+            // Error payloads are app-built strings, never response bodies.
+            Log.fetch.warn("\(line) outcome=\(outcome) error=\(String(describing: error))")
+        } else {
+            Log.fetch.info("\(line) outcome=\(outcome)")
+        }
         return snapshot
     }
 
