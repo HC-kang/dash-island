@@ -17,6 +17,7 @@ struct TestMain {
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
         failures += await LocalUsageSuite.run()
+        failures += LogSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")
