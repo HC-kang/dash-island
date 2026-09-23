@@ -179,6 +179,35 @@ with tempfile.TemporaryDirectory() as temporary:
     assert codex_path.read_bytes() == originals[codex_path], 'disconnect is idempotent'
 print('PASS: connector starts the collector first, changes nothing when it fails, and disconnect undoes only its own settings')
 
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary) / 'home'
+    target = Path(temporary) / 'dotfiles/settings.json'
+    target.parent.mkdir()
+    target.write_text('{"env": {"KEEP": "yes"}}')
+    target.chmod(0o644)
+    link = home / '.claude/settings.json'
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    codex_path = home / '.codex/config.toml'
+    quiet(i.install, home, {}, launchctl([]))
+    assert link.is_symlink() and link.resolve() == target.resolve(), 'a dotfile symlink stays a symlink'
+    assert json.loads(target.read_text())['env']['OTEL_LOGS_EXPORTER'] == 'otlp'
+    # Both files now hold the collector token.
+    assert target.stat().st_mode & 0o777 == 0o600 and codex_path.stat().st_mode & 0o777 == 0o600
+    quiet(i.disconnect, home, {}, launchctl([]))
+    assert link.is_symlink() and json.loads(target.read_text()) == {'env': {'KEEP': 'yes'}}
+    assert not codex_path.exists()
+    # A file edited between validation and writing is not overwritten; earlier writes roll back.
+    codex_path.write_text('model="keep"\n')
+    edit = lambda args: args[1] == 'bootstrap' and target.write_text('{"env": {"EDITED": "1"}}')
+    try:
+        quiet(i.install, home, {}, launchctl([], before=edit))
+        raise AssertionError('a config edited during connect must not be overwritten')
+    except RuntimeError as error:
+        assert 'changed' in str(error)
+    assert json.loads(target.read_text()) == {'env': {'EDITED': '1'}} and codex_path.read_text() == 'model="keep"\n'
+print('PASS: connector writes through symlinks, keeps token files 0600, and refuses to overwrite a concurrent edit')
+
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:

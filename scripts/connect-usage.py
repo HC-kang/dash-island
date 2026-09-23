@@ -128,7 +128,13 @@ def configurations(home, environ):
         (p / 'settings.json', claude_config) for p in sorted(claude)]
 
 
+def real(path):
+    # Dotfile managers (stow, chezmoi) link these files; replacing the link would detach it.
+    return path.resolve() if path.is_symlink() else path
+
+
 def atomic_write(path, data):
+    path = real(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp = path.with_name(path.name + '.dash-island-tmp')
     with temp.open('wb') as out:
@@ -159,15 +165,17 @@ def apply(edits, directory):
     changed = []
     try:
         for path, original, updated in edits:
+            if (path.read_bytes() if path.exists() else None) != original:
+                raise RuntimeError('%s changed during this run; earlier changes were rolled back. Run again.' % path)
             if updated is None:
-                path.unlink()
+                real(path).unlink()
             else:
                 atomic_write(path, updated)
             changed.append((path, original))
     except Exception:
         for path, original in reversed(changed):
             if original is None:
-                path.unlink(missing_ok=True)
+                real(path).unlink(missing_ok=True)
             else:
                 atomic_write(path, original)
         raise
