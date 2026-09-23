@@ -32,6 +32,8 @@ final class IslandWindowController {
     /// Follow-cursor hysteresis: candidate screen + pending switch task.
     private var followCandidateStableID: String?
     private var followCandidateTask: Task<Void, Never>?
+    /// Follow-cursor fast path: frame of the display the pointer was last resolved on.
+    private var lastPointerScreenFrame: NSRect?
     /// True while exit-up / enter-down hop is running.
     private var isFollowTransitioning = false
     /// Brief dwell so a bezel graze doesn't hop — keep short; hop animation covers the rest.
@@ -252,6 +254,7 @@ final class IslandWindowController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.lastPointerScreenFrame = nil
                 self?.refreshNotchGeometry()
                 self?.pinCanvas(animate: false)
             }
@@ -479,11 +482,14 @@ final class IslandWindowController {
     }
 
     private func installMouseTracking() {
+        // 60–120 moves/s: run inline on the main thread instead of a Task each.
+        // AppKit does not document the monitor thread, so hop rather than trap.
         let handler: (NSEvent) -> Void = { [weak self] _ in
-            Task { @MainActor in
-                self?.updateMouseEventPassthrough()
-                self?.noteMouseMovedForFollowCursor()
+            guard Thread.isMainThread else {
+                Task { @MainActor in self?.handleMouseMoved() }
+                return
             }
+            MainActor.assumeIsolated { self?.handleMouseMoved() }
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler)
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
@@ -491,6 +497,11 @@ final class IslandWindowController {
             return event
         }
         updateMouseEventPassthrough()
+    }
+
+    private func handleMouseMoved() {
+        updateMouseEventPassthrough()
+        noteMouseMovedForFollowCursor()
     }
 
     private func updateMouseEventPassthrough() {
@@ -530,6 +541,7 @@ final class IslandWindowController {
     /// Cheap: only schedules work when the mouse is on a *different* display.
     private func noteMouseMovedForFollowCursor() {
         guard case .followCursor = TargetDisplayStore.shared.choice else {
+            lastPointerScreenFrame = nil
             if followCandidateTask != nil {
                 followCandidateTask?.cancel()
                 followCandidateTask = nil
@@ -540,7 +552,11 @@ final class IslandWindowController {
         // Don't thrash during space transitions, hops, or widget drags.
         guard window.alphaValue > 0.05, !dragActive, !isFollowTransitioning else { return }
 
+        // Most moves stay on one display: skip the per-screen UUID lookup until
+        // the pointer leaves the display it was last resolved on.
+        if let frame = lastPointerScreenFrame, frame.contains(NSEvent.mouseLocation) { return }
         guard let under = DisplayInfo.infoContainingMouse() else { return }
+        lastPointerScreenFrame = under.screen.frame
         let live = TargetDisplayStore.shared.followLiveStableID
         if under.stableID == live {
             // Settled — clear any pending switch.
