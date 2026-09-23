@@ -114,6 +114,8 @@ private struct UsageDetailView: View {
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
+    @State private var moreBelow = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var activityLoading: Bool { local.loading.contains(liveTracking ? provider : sourceKey) }
 
     private var model: WidgetViewModel { usage.widgets.first { $0.id == initial.id } ?? initial }
@@ -143,19 +145,39 @@ private struct UsageDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    quotas
-                    Divider().overlay(Color.white.opacity(0.05))
-                    activity
+            GeometryReader { viewport in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 22) {
+                            quotas
+                            Divider().overlay(Color.white.opacity(0.05))
+                            activity
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.top, 8)
+                        .padding(.bottom, 24)
+                        .background(GeometryReader { content in
+                            Color.clear.preference(
+                                key: DetailContentBottomKey.self,
+                                value: content.frame(in: .named(Self.scrollSpace)).maxY
+                            )
+                        })
+                        Color.clear.frame(height: 0).id(Self.bottomAnchor)
+                    }
+                    .coordinateSpace(name: Self.scrollSpace)
+                    // A connected mouse makes "Automatic" draw the legacy tracked scroller,
+                    // which clashes with the dark panel. Scrolling still works.
+                    .scrollIndicators(.never)
+                    .onPreferenceChange(DetailContentBottomKey.self) { bottom in
+                        let more = IslandGeometry.hasMoreBelow(contentBottom: bottom, viewportHeight: viewport.size.height)
+                        if more != moreBelow { moreBelow = more }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if moreBelow { scrollCue(proxy) }
+                    }
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: moreBelow)
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
             }
-            // A connected mouse makes "Automatic" draw the legacy tracked scroller,
-            // which clashes with the dark panel. Scrolling still works.
-            .scrollIndicators(.hidden)
         }
         .background(Color(white: 0.045))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -426,5 +448,45 @@ private struct UsageDetailView: View {
     }
     private static func money(_ amount: Double) -> String {
         amount.formatted(.currency(code: "USD").precision(.fractionLength(2)).locale(Locale(identifier: "en_US")))
+    }
+}
+
+private struct DetailContentBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+extension UsageDetailView {
+    fileprivate static let scrollSpace = "usageDetailScroll"
+    fileprivate static let bottomAnchor = "usageDetailBottom"
+
+    /// Soft fade over the last line plus a quiet chevron; click scrolls to the end.
+    /// Static on purpose: no idle animation (see MotionPolicy).
+    @ViewBuilder
+    fileprivate func scrollCue(_ proxy: ScrollViewProxy) -> some View {
+        ZStack(alignment: .bottom) {
+            LinearGradient(
+                colors: [Color(white: 0.045).opacity(0), Color(white: 0.045).opacity(0.92)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 56)
+            .allowsHitTesting(false)
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) {
+                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                }
+            } label: {
+                Image(systemName: "chevron.compact.down")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .frame(width: 44, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 6)
+            .accessibilityLabel("Scroll to more usage details")
+        }
+        .transition(.opacity)
     }
 }

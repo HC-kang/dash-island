@@ -33,6 +33,12 @@ enum IslandGeometrySuite {
             try assertEqual(G.compactSize(notchWidth: 185, notchHeight: 32, hasNotch: true), CGSize(width: 191, height: 35))
             try assertEqual(G.compactSize(notchWidth: 40, notchHeight: 32, hasNotch: true).width, 80)
         }
+        f += check("scroll cue: shown only while content continues below the viewport") {
+            try assertEqual(G.hasMoreBelow(contentBottom: 900, viewportHeight: 600), true)
+            try assertEqual(G.hasMoreBelow(contentBottom: 604, viewportHeight: 600), false)  // within slack
+            try assertEqual(G.hasMoreBelow(contentBottom: 600, viewportHeight: 600), false)  // scrolled to end
+            try assertEqual(G.hasMoreBelow(contentBottom: 400, viewportHeight: 600), false)  // short content
+        }
         f += check("compact on a non-notch display keeps the same visible pill as a notch") {
             try assertEqual(G.compactSize(notchWidth: 180, notchHeight: 29, hasNotch: false),
                             G.compactSize(notchWidth: 180, notchHeight: 29, hasNotch: true))

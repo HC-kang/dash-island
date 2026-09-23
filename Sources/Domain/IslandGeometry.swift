@@ -90,6 +90,13 @@ enum IslandGeometry {
         return expandedSize(bodyWidth: widest, notchHeight: notchHeight)
     }
 
+    /// Detail panel scroll cue: content still continues below the visible area.
+    /// `contentBottom` is the content's maxY in the viewport's coordinates; a few
+    /// points of slack keep the cue from flickering at the very end.
+    static func hasMoreBelow(contentBottom: CGFloat, viewportHeight: CGFloat) -> Bool {
+        contentBottom > viewportHeight + 6
+    }
+
     /// Drawn compact footprint: the same pill with or without a physical notch
     /// (a 64x4 handle on non-notch displays was too easy to lose; see context.md).
     static func compactSize(notchWidth: CGFloat, notchHeight: CGFloat, hasNotch: Bool) -> CGSize {
