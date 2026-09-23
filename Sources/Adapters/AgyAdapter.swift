@@ -5,7 +5,6 @@ enum AgyAdapterError: Error, Equatable, LocalizedError {
     case agyBinaryNotFound
     case spawnFailed(String)
     case loginTimeout(home: String)
-    case credentialsMissing(home: String)
     case reauthFailed(String)
 
     var errorDescription: String? {
@@ -20,17 +19,11 @@ enum AgyAdapterError: Error, Equatable, LocalizedError {
             return "Failed to start Antigravity login: \(message)"
         case .loginTimeout(let home):
             return """
-            Antigravity login timed out. Complete browser sign-in, or run:
+            Antigravity login timed out. Finish sign-in in the Terminal window, or run:
 
               HOME='\(home)' agy
 
             Then choose Reauthenticate (or remove and re-add).
-            """
-        case .credentialsMissing(let home):
-            return """
-            Antigravity login finished but no oauth_creds.json was found. Run:
-
-              HOME='\(home)' agy
             """
         case .reauthFailed(let message):
             return message
@@ -42,8 +35,9 @@ enum AgyAdapterError: Error, Equatable, LocalizedError {
 ///
 /// Usage: `POST daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
 /// (oh-my-pi / Orca-proven). Credentials live under the managed folder as `HOME`
-/// so login writes `$HOME/.gemini/oauth_creds.json`, never the user’s default
-/// `~/.gemini`. Leftover-session guards match Claude.
+/// so login writes `$HOME/.gemini/…`, never the user’s default `~/.gemini`.
+/// Sign-in is a visible `agy` in Terminal; reauth first extends the stored
+/// session over HTTP and, like Claude, only accepts a *new* session from login.
 struct AgyAdapter: VendorAdapter {
     let id: VendorID = "agy"
     let displayName = "Antigravity"
@@ -59,7 +53,6 @@ struct AgyAdapter: VendorAdapter {
     private static let userAgent = "antigravity/hub/2.1.4 darwin/arm64"
     private static let credsFileName = "oauth_creds.json"
     private static let loginTimeout: TimeInterval = 180
-    private static let pollNanos: UInt64 = 1_000_000_000
 
     func beginAdd() async throws -> AddAccountResult {
         let accountID = UUID()
@@ -86,14 +79,40 @@ struct AgyAdapter: VendorAdapter {
         let dir = try CredentialStore.createDirectory(for: ref)
         let prior = Self.readCredentials(home: dir)
         do {
-            try await runLogin(home: dir)
-            try await Self.verifyUsageAccess(home: dir)
-            _ = try Self.requireCredentials(home: dir)
-            return ref
-        } catch {
-            if let prior {
-                try? Self.persistCredentialsFile(prior, home: dir)
+            // Extend the stored session first: no Terminal while its refresh token works.
+            if let prior, let refresh = prior.refreshToken, !refresh.isEmpty {
+                switch await Self.refreshAccessToken(refresh) {
+                case .success(let access, let rotated, let expiresIn):
+                    let next = Self.extended(prior, access: access, rotated: rotated, expiresIn: expiresIn)
+                    try Self.persistCredentialsFile(next, home: dir)
+                    let snap = await Self.probeUsage(token: next.accessToken, home: dir, fetchedAt: Date())
+                    if Self.usageSmokeDecision(snap) != .reject { return ref }
+                    Log.auth.info("reauth vendor=agy step=login reason=usageRejected")
+                case .failed:
+                    // Token host busy: the session is still ours, polls retry.
+                    return ref
+                case .invalidGrant:
+                    Log.auth.info("reauth vendor=agy step=login reason=invalidGrant")
+                }
             }
+            // A stored session makes `agy` start signed in, so the user could
+            // never switch accounts. Keep it aside until the new one is accepted.
+            let stash = CredentialStore.PriorFiles.stash(Self.sessionFiles(home: dir))
+            do {
+                try await runLogin(
+                    home: dir,
+                    priorAccessToken: prior?.accessToken,
+                    priorRefreshToken: prior?.refreshToken
+                )
+                try await Self.verifyUsageAccess(home: dir)
+                stash.discard()
+                return ref
+            } catch {
+                stash.restore()
+                throw error
+            }
+        } catch {
+            if error is CancellationError { throw error }
             if let error = error as? AgyAdapterError { throw error }
             throw AgyAdapterError.reauthFailed(error.localizedDescription)
         }
@@ -170,16 +189,21 @@ struct AgyAdapter: VendorAdapter {
         }
     }
 
-    static func clearManagedCredentials(home: URL) {
-        let fm = FileManager.default
-        let paths = [
+    /// Every file that holds this account's session: ours and the CLI's.
+    static func sessionFiles(home: URL) -> [URL] {
+        [
             home.appendingPathComponent(".gemini", isDirectory: true)
                 .appendingPathComponent(credsFileName, isDirectory: false),
             home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
                 .appendingPathComponent(credsFileName, isDirectory: false),
             home.appendingPathComponent(credsFileName, isDirectory: false),
+            home.appendingPathComponent(cliTokenPath, isDirectory: false),
         ]
-        for path in paths where fm.fileExists(atPath: path.path) {
+    }
+
+    static func clearManagedCredentials(home: URL) {
+        let fm = FileManager.default
+        for path in sessionFiles(home: home) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         CredentialStore.removeLastGoodUsage(inDirectory: home)
@@ -205,71 +229,77 @@ struct AgyAdapter: VendorAdapter {
         return true
     }
 
+    /// Visible `agy` sign-in in Terminal with `HOME` = the managed folder.
+    /// `agy` without a TTY never shows its sign-in UI, and the old hidden
+    /// `agy --print` ran against the *global* session, so Add waited 3 minutes
+    /// for a file that never came. No model request runs on this path.
     private func runLogin(
         home: URL,
-        priorAccessToken _: String? = nil,
-        priorRefreshToken _: String? = nil
+        priorAccessToken: String? = nil,
+        priorRefreshToken: String? = nil
     ) async throws {
-        guard Self.locateAgyBinary() != nil else {
+        guard let binary = Self.locateAgyBinary() else {
             throw AgyAdapterError.agyBinaryNotFound
         }
-        func accept(_ creds: AgyCreds) -> Bool { Self.isFresh(creds) }
+        do {
+            try await Self.launchVisibleLogin(binary: binary, home: home)
+            let creds = try await Self.waitForLogin(
+                home: home,
+                priorAccessToken: priorAccessToken,
+                priorRefreshToken: priorRefreshToken,
+                timeout: Self.loginTimeout
+            )
+            try Self.persistCredentialsFile(creds, home: home)
+            Self.removeLoginScript(home: home)
+        } catch {
+            // Cancel / timeout: end the Terminal `agy` so it cannot finish a
+            // sign-in into a folder we are about to restore or delete.
+            Self.stopVisibleLogin(home: home)
+            throw error
+        }
+    }
 
-        if let file = Self.captureLoginCredentials(home: home, includeKeychain: false) {
-            if accept(file) {
-                try Self.persistCredentialsFile(file, home: home)
-                return
+    /// Poll the managed files until `agy` writes a *new*, unexpired session.
+    /// The prior session (same access or refresh token) never counts.
+    static func waitForLogin(
+        home: URL,
+        priorAccessToken: String?,
+        priorRefreshToken: String?,
+        timeout: TimeInterval,
+        pollNanos: UInt64 = 1_000_000_000
+    ) async throws -> AgyCreds {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let creds = readCredentials(home: home),
+               isFresh(creds),
+               isAcceptableLogin(
+                   creds,
+                   priorAccessToken: priorAccessToken,
+                   priorRefreshToken: priorRefreshToken
+               )
+            {
+                return creds
             }
-            if let refresh = file.refreshToken, !refresh.isEmpty {
-                switch await Self.refreshAccessToken(refresh) {
-                case .success(let access, let rotated, let expiresIn):
-                    var creds = file
-                    creds.accessToken = access
-                    if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
-                    if let expiresIn {
-                        creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
-                    }
-                    try Self.persistCredentialsFile(creds, home: home)
-                    return
-                case .invalidGrant, .failed:
-                    break
-                }
+            if Date() >= deadline {
+                throw AgyAdapterError.loginTimeout(home: home.path)
             }
+            try await Task.sleep(nanoseconds: pollNanos)
         }
+    }
 
-        // Add / truly dead refresh: one CLI login. Do not harvest Keychain first
-        // (that was the extra password sheet before agy itself prompted).
-        _ = await Self.spawnManagedRefreshPing()
-        let deadline = Date().addingTimeInterval(Self.loginTimeout)
-        while Date() < deadline {
-            if Task.isCancelled { throw CancellationError() }
-            if let creds = Self.captureLoginCredentials(home: home, includeKeychain: false),
-               accept(creds)
-            {
-                try Self.persistCredentialsFile(creds, home: home)
-                return
-            }
-            try await Task.sleep(nanoseconds: Self.pollNanos)
+    static func extended(
+        _ creds: AgyCreds,
+        access: String,
+        rotated: String?,
+        expiresIn: Int?
+    ) -> AgyCreds {
+        var next = creds
+        next.accessToken = access
+        if let rotated, !rotated.isEmpty { next.refreshToken = rotated }
+        if let expiresIn {
+            next.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
         }
-        if let file = Self.captureLoginCredentials(home: home, includeKeychain: false) {
-            if accept(file) {
-                try Self.persistCredentialsFile(file, home: home)
-                return
-            }
-            if let refresh = file.refreshToken, !refresh.isEmpty,
-               case .success(let access, let rotated, let expiresIn) = await Self.refreshAccessToken(refresh)
-            {
-                var creds = file
-                creds.accessToken = access
-                if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
-                if let expiresIn {
-                    creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
-                }
-                try Self.persistCredentialsFile(creds, home: home)
-                return
-            }
-        }
-        throw AgyAdapterError.loginTimeout(home: home.path)
+        return next
     }
 
     /// Later expiry wins. CLI login writes `antigravity-oauth-token` and
@@ -368,13 +398,19 @@ struct AgyAdapter: VendorAdapter {
         return parseKeychainBlob(data)
     }
 
+    private static let loginScriptName = ".dash-island-agy-login.command"
+    private static let loginPIDName = ".dash-island-agy-login.pid"
+
     /// TTY login in Terminal.app. Piped `agy` never shows the sign-in UI.
-    static func launchVisibleLogin(binary: String, home: URL) throws {
-        let script = home.appendingPathComponent(".dash-island-agy-login.command")
+    /// The script records its PID (`exec` keeps it) so Cancel can end `agy`.
+    static func launchVisibleLogin(binary: String, home: URL) async throws {
+        let script = home.appendingPathComponent(loginScriptName)
+        let pidFile = home.appendingPathComponent(loginPIDName)
         let body = """
         #!/bin/zsh
         export HOME=\(shellEscape(home.path))
         unset GEMINI_API_KEY GOOGLE_API_KEY
+        echo $$ > \(shellEscape(pidFile.path))
         echo "Dash Island — sign in to Antigravity, then close this window."
         exec \(shellEscape(binary))
         """
@@ -386,22 +422,38 @@ struct AgyAdapter: VendorAdapter {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = ["-a", "Terminal", script.path]
-        try task.run()
-        task.waitUntilExit()
-        if task.terminationStatus != 0 {
-            throw AgyAdapterError.spawnFailed("open Terminal failed (\(task.terminationStatus))")
+        do {
+            try task.run()
+        } catch {
+            throw AgyAdapterError.spawnFailed(error.localizedDescription)
         }
+        guard await LoginProcess.waitForExit(task, timeout: 15),
+              task.terminationStatus == 0
+        else {
+            throw AgyAdapterError.spawnFailed("open Terminal failed")
+        }
+        Log.auth.info("login vendor=agy step=terminal")
+    }
+
+    /// End the Terminal `agy` of a cancelled or failed login.
+    static func stopVisibleLogin(home: URL) {
+        let pidFile = home.appendingPathComponent(loginPIDName)
+        if let raw = try? String(contentsOf: pidFile, encoding: .utf8),
+           let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           pid > 1
+        {
+            kill(pid, SIGTERM)
+        }
+        removeLoginScript(home: home)
+    }
+
+    private static func removeLoginScript(home: URL) {
+        try? FileManager.default.removeItem(at: home.appendingPathComponent(loginPIDName))
+        try? FileManager.default.removeItem(at: home.appendingPathComponent(loginScriptName))
     }
 
     private static func shellEscape(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    static func requireCredentials(home: URL) throws -> AgyCreds {
-        if let creds = readCredentials(home: home) {
-            return creds
-        }
-        throw AgyAdapterError.credentialsMissing(home: home.path)
     }
 
     struct AgyCreds: Equatable {
@@ -435,11 +487,10 @@ struct AgyAdapter: VendorAdapter {
         return nil
     }
 
+    private static let cliTokenPath = ".gemini/antigravity-cli/antigravity-oauth-token"
+
     static func readCLITokenFile(home: URL) -> AgyCreds? {
-        let path = home.appendingPathComponent(
-            ".gemini/antigravity-cli/antigravity-oauth-token",
-            isDirectory: false
-        )
+        let path = home.appendingPathComponent(cliTokenPath, isDirectory: false)
         guard let data = try? Data(contentsOf: path) else { return nil }
         return parseKeychainBlob(data)
     }
@@ -587,11 +638,7 @@ struct AgyAdapter: VendorAdapter {
         }
         switch await refreshAccessToken(refresh) {
         case .success(let access, let rotated, let expiresIn):
-            creds.accessToken = access
-            if let rotated, !rotated.isEmpty { creds.refreshToken = rotated }
-            if let expiresIn {
-                creds.expiryDate = Date().addingTimeInterval(TimeInterval(expiresIn))
-            }
+            creds = extended(creds, access: access, rotated: rotated, expiresIn: expiresIn)
             try? persistCredentialsFile(creds, home: home)
             return .ok(creds)
         case .invalidGrant:
@@ -599,83 +646,6 @@ struct AgyAdapter: VendorAdapter {
         case .failed:
             return .retryLater
         }
-    }
-
-    static var refreshPingSpawner: ((URL) async -> Bool)?
-
-    static func pingCLIThenHarvest(home: URL, failedAccessToken: String?) async -> AgyCreds? {
-        if pingRecentlyAttempted(home: home) { return nil }
-        markPingAttempted(home: home)
-        let beforeExpiry = captureLoginCredentials(home: home, includeKeychain: false)?.expiryDate
-        let spawned: Bool
-        if let refreshPingSpawner {
-            spawned = await refreshPingSpawner(home)
-        } else {
-            spawned = await spawnManagedRefreshPing()
-        }
-        guard spawned else { return nil }
-        let deadline = Date().addingTimeInterval(55)
-        while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            if let creds = captureLoginCredentials(home: home, includeKeychain: false),
-               isFresh(creds)
-            {
-                if creds.accessToken != failedAccessToken { return creds }
-                if let exp = creds.expiryDate, let before = beforeExpiry, exp > before {
-                    return creds
-                }
-                if creds.accessToken != failedAccessToken || beforeExpiry == nil {
-                    return creds
-                }
-            }
-        }
-        if let creds = captureLoginCredentials(home: home, includeKeychain: false),
-           isFresh(creds)
-        {
-            return creds
-        }
-        return nil
-    }
-
-    private static func pingDefaultsKey(home: URL) -> String {
-        "DashIsland.AgyCLIPing.\(home.path)"
-    }
-
-    static func pingRecentlyAttempted(home: URL, now: Date = Date()) -> Bool {
-        let t = UserDefaults.standard.double(forKey: pingDefaultsKey(home: home))
-        guard t > 0 else { return false }
-        return now.timeIntervalSince(Date(timeIntervalSince1970: t)) < 6 * 3600
-    }
-
-    static func markPingAttempted(home: URL, now: Date = Date()) {
-        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: pingDefaultsKey(home: home))
-    }
-
-    /// `agy --print ok` refreshes the global Keychain session (Claude's
-    /// `claude -p` analogue). HOME is *not* overridden so the CLI hits the
-    /// same `gemini`/`antigravity` item we harvest.
-    static func spawnManagedRefreshPing() async -> Bool {
-        guard let path = locateAgyBinary() else { return false }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: path)
-        task.arguments = ["--print", "ok", "--print-timeout", "45s", "--output-format", "text"]
-        var env = ProcessInfo.processInfo.environment
-        env.removeValue(forKey: "GEMINI_API_KEY")
-        env.removeValue(forKey: "GOOGLE_API_KEY")
-        task.environment = env
-        task.currentDirectoryPath = NSHomeDirectory()
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        task.standardInput = FileHandle.nullDevice
-        do {
-            try task.run()
-        } catch {
-            Log.auth.warn("cliPing vendor=agy outcome=failed error=\(error.localizedDescription)")
-            return false
-        }
-        await LoginProcess.waitForExit(task, timeout: 50)
-        Log.auth.info("cliPing vendor=agy outcome=finished")
-        return true
     }
 
     enum TokenRefreshResult {

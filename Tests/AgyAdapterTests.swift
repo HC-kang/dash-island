@@ -193,16 +193,6 @@ enum AgyAdapterSuite {
             try assertTrue(AgyAdapter.isFresh(live))
         }
 
-        failures += check("CLI ping is 6h gated per managed dir") {
-            let dir = URL(fileURLWithPath: "/tmp/dash-island-agy-ping-\(UUID().uuidString)", isDirectory: true)
-            let key = "DashIsland.AgyCLIPing.\(dir.path)"
-            UserDefaults.standard.removeObject(forKey: key)
-            defer { UserDefaults.standard.removeObject(forKey: key) }
-            try assertTrue(!AgyAdapter.pingRecentlyAttempted(home: dir))
-            AgyAdapter.markPingAttempted(home: dir)
-            try assertTrue(AgyAdapter.pingRecentlyAttempted(home: dir))
-        }
-
         failures += check("registry includes agy and still includes codex") {
             try assertTrue(VendorRegistry.adapter(for: "agy")?.id == "agy")
             try assertTrue(VendorRegistry.adapter(for: "codex")?.id == "codex")
@@ -210,6 +200,73 @@ enum AgyAdapterSuite {
         }
 
         return failures
+    }
+
+    /// Login wait: `agy` in Terminal writes its token file into the managed HOME.
+    static func runLogin() async -> Int {
+        print("AgyAdapterSuite (login)")
+        var failures = 0
+
+        failures += await checkAsync("login wait accepts the new session agy writes") {
+            let home = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: home) }
+            let writer = Task {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                try writeCLIToken(home: home, access: "ya29.new", refresh: "1//new")
+            }
+            let creds = try await AgyAdapter.waitForLogin(
+                home: home,
+                priorAccessToken: nil,
+                priorRefreshToken: nil,
+                timeout: 5,
+                pollNanos: 50_000_000
+            )
+            try await writer.value
+            try assertEqual(creds.accessToken, "ya29.new")
+        }
+
+        failures += await checkAsync("reauth login wait never accepts the unchanged session") {
+            let home = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try writeCLIToken(home: home, access: "ya29.old", refresh: "1//old")
+            var timedOut = false
+            do {
+                _ = try await AgyAdapter.waitForLogin(
+                    home: home,
+                    priorAccessToken: "ya29.old",
+                    priorRefreshToken: "1//old",
+                    timeout: 0.3,
+                    pollNanos: 50_000_000
+                )
+            } catch AgyAdapterError.loginTimeout {
+                timedOut = true
+            }
+            try assertTrue(timedOut, "old session must not finish a reauth")
+        }
+
+        failures += check("reauth moves every session file aside so agy starts signed out") {
+            let home = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try writeCLIToken(home: home, access: "ya29.old", refresh: "1//old")
+            try AgyAdapter.persistCredentialsFile(
+                AgyAdapter.AgyCreds(accessToken: "ya29.old", refreshToken: "1//old", expiryDate: nil),
+                home: home
+            )
+            let prior = CredentialStore.PriorFiles.stash(AgyAdapter.sessionFiles(home: home))
+            try assertTrue(AgyAdapter.readCredentials(home: home) == nil)
+            prior.restore()
+            try assertEqual(AgyAdapter.readCredentials(home: home)?.accessToken, "ya29.old")
+        }
+
+        return failures
+    }
+
+    private static func writeCLIToken(home: URL, access: String, refresh: String) throws {
+        let dir = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let json = #"{"token":{"access_token":"\#(access)","refresh_token":"\#(refresh)","expiry":"\#(expiry)"}}"#
+        try Data(json.utf8).write(to: dir.appendingPathComponent("antigravity-oauth-token"))
     }
 
     private static func makeTempDir() throws -> URL {

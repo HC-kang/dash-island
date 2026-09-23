@@ -16,6 +16,7 @@ struct TestMain {
         failures += CodexAdapterSuite.run()
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
+        failures += await AgyAdapterSuite.runLogin()
         failures += await LocalUsageSuite.run()
         failures += LogSuite.run()
         failures += await LoginProcessSuite.run()
