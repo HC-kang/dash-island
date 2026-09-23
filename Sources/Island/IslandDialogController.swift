@@ -45,6 +45,22 @@ final class IslandDialogController: NSWindowController, NSWindowDelegate {
         panel.onCancel = { [weak self] in
             if self?.isOpen == true { self?.finish(.cancelled) }
         }
+        // Dialog panels hide while the app is inactive (e.g. during browser login)
+        // and come back on activation. Release the island meanwhile; a hidden
+        // panel must not hold it expanded over the other app.
+        let center = NotificationCenter.default
+        for (name, visible) in [
+            (NSApplication.didResignActiveNotification, false),
+            (NSApplication.didBecomeActiveNotification, true)
+        ] {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in
+                    let dialogs = IslandDialogController.shared
+                    guard dialogs.isOpen || dialogs.isProgressOpen else { return }
+                    center.post(name: .dashIslandDialogOpenChanged, object: visible)
+                }
+            }
+        }
     }
 
     @available(*, unavailable)

@@ -44,6 +44,18 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
         panel.contentMinSize = NSSize(width: 340, height: 280)
         super.init(window: panel)
         panel.delegate = self
+        // A floating panel hides when the app deactivates, but `isOpen` would stay
+        // true and hold the island expanded. Settings apply live, so just close.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                let prefs = PrefsWindowController.shared
+                if prefs.isOpen { prefs.close() }
+            }
+        }
     }
 
     @available(*, unavailable)

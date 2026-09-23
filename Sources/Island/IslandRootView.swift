@@ -38,7 +38,6 @@ struct IslandRootView: View {
             || statusPanelOpen
             || detailsOpen
             || dragActive
-            || IslandDialogController.shared.isProgressOpen
     }
 
     var body: some View {
