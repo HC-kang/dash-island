@@ -24,17 +24,8 @@ struct GaugeRingView: View {
     /// Desyncs Timeline breath/jitter across widgets (≥0.2s).
     var phaseOffset: TimeInterval = 0
 
-    /// Drawn values (spring toward targets).
-    @State private var drawnPrimary: Double = 0
-    @State private var drawnProjected: Double = 0
-    @State private var drawnHasProjected: Bool = false
-    @State private var drawnSecondary: Double = 0
-    @State private var drawnTertiary: Double = 0
-    @State private var drawnHasSecondary: Bool = false
-    @State private var drawnHasTertiary: Bool = false
-    @State private var drawnBurn: Double = 0
-    @State private var didAppear = false
-    @State private var revealTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.islandMotion) private var islandMotion
 
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
@@ -43,117 +34,65 @@ struct GaugeRingView: View {
     private static let burnRed = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
     private static let burnSoft = Color(red: 0.97, green: 0.44, blue: 0.42)
 
-    /// Rings / % — quiet, quick.
-    private static let ringSettle = Animation.spring(response: 0.55, dampingFraction: 0.88)
-    /// Needle on expand — slow sweep so the user notices motion (rest → target).
-    private static let needleReveal = Animation.spring(response: 1.55, dampingFraction: 0.86)
-    /// Live burn updates — brief ~220–280ms settle, critically damped (no rubber).
-    private static let needleLive = Animation.spring(response: 0.26, dampingFraction: 0.96)
-
-    /// Always breathe while mounted (brief rest floor); FPS drops below cruise.
-    private var timelineInterval: TimeInterval {
-        BurnMotion.energy(ratio: drawnBurn) < 0.35 ? (1.0 / 15.0) : (1.0 / 30.0)
+    /// Breath / jitter frames; `nil` = one static frame (rest, Reduce Motion, hidden, Low Power).
+    private var frameInterval: TimeInterval? {
+        var motion = islandMotion
+        motion.reduceMotion = motion.reduceMotion || reduceMotion
+        return MotionPolicy.gaugeFrameInterval(motion, burnRatio: burnRatio)
     }
 
     var body: some View {
-        // Read ring state in `body`: state touched only inside the Canvas closure
-        // does not invalidate the view, so rings stayed blank (5h at 0%).
+        // Draw the current inputs directly. Canvas is not Animatable: the old
+        // "drawn" springs never interpolated — they only blanked the rings for
+        // 80ms on every expand, then snapped (measured 2026-09-23).
         let rings = DrawnRings(
-            primary: drawnPrimary,
-            projected: drawnHasProjected ? drawnProjected : nil,
-            secondary: drawnHasSecondary ? drawnSecondary : nil,
-            tertiary: drawnHasTertiary ? drawnTertiary : nil
+            primary: primaryFraction,
+            projected: projectedPrimaryFraction,
+            secondary: secondaryFraction,
+            tertiary: tertiaryFraction
         )
-        // Timeline: rest barely alive at 15fps; hot+ at 30fps. Never strobe.
-        TimelineView(.animation(minimumInterval: timelineInterval, paused: !didAppear)) { timeline in
-            ZStack {
-                Canvas { context, canvasSize in
-                    let s = min(canvasSize.width, canvasSize.height)
-                    let c = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-                    let scale = s / 96
-                    let date = timeline.date
-
-                    drawAmbientBloom(context: context, center: c, scale: scale, date: date)
-                    drawSpeedTrack(context: context, center: c, scale: scale)
-                    drawEnergyTrail(context: context, center: c, scale: scale)
-                    drawTicks(context: context, center: c, scale: scale)
-                    drawUsageRings(context: context, center: c, scale: scale, rings: rings)
-                    drawNeedle(
-                        context: context,
-                        center: c,
-                        scale: scale,
-                        date: date
-                    )
+        Group {
+            if let frameInterval {
+                TimelineView(.animation(minimumInterval: frameInterval)) { timeline in
+                    dial(rings: rings, date: timeline.date)
                 }
-
-                VStack(spacing: 1) {
-                    Text("\(centerPercent)")
-                        .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.96))
-                        .tracking(-0.4)
-                    Text("%")
-                        .font(.system(size: size * 0.083, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.36))
-                        .tracking(0.6)
-                }
-                .offset(y: 1)
-                .allowsHitTesting(false)
+            } else {
+                dial(rings: rings, date: nil)
             }
         }
         .frame(width: size, height: size)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(centerPercent) percent")
-        .onAppear {
-            playExpandReveal()
-        }
-        .onDisappear {
-            revealTask?.cancel()
-            revealTask = nil
-            didAppear = false
-            // Next expand starts from rest again.
-            drawnBurn = 0
-        }
-        .onChange(of: didAppear) { appeared in
-            guard appeared else { return }
-            // Read the current view inputs, not values captured before the delay.
-            applyRingTargets(currentTargets, animated: true)
-            withAnimation(Self.needleReveal) { drawnBurn = burnRatio }
-        }
-        // Use the delivered value — this closure captures the previous inputs.
-        .onChange(of: DrawnRings(
-            primary: primaryFraction,
-            projected: projectedPrimaryFraction,
-            secondary: secondaryFraction,
-            tertiary: tertiaryFraction
-        )) { applyRingTargets($0, animated: didAppear) }
-        .onChange(of: burnRatio) { _ in
-            guard didAppear else { return }
-            withAnimation(Self.needleLive) {
-                drawnBurn = burnRatio
-            }
-        }
     }
 
-    /// Compact → expanded: rings settle, needle slowly rises from rest so motion is visible.
-    private func playExpandReveal() {
-        revealTask?.cancel()
-        // Always mount at rest — if we snap to target, expand feels static.
-        drawnBurn = 0
-        drawnPrimary = 0
-        drawnProjected = 0
-        drawnSecondary = 0
-        drawnTertiary = 0
-        drawnHasProjected = projectedPrimaryFraction != nil
-        drawnHasSecondary = secondaryFraction != nil
-        drawnHasTertiary = tertiaryFraction != nil
-        didAppear = false
+    /// `date == nil`: still frame — no jitter, bloom at mid-breath.
+    private func dial(rings: DrawnRings, date: Date?) -> some View {
+        ZStack {
+            Canvas { context, canvasSize in
+                let s = min(canvasSize.width, canvasSize.height)
+                let c = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                let scale = s / 96
 
-        // Brief beat after expand chrome, then animate in.
-        revealTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 80_000_000)
-            guard !Task.isCancelled else { return }
+                drawAmbientBloom(context: context, center: c, scale: scale, date: date)
+                drawSpeedTrack(context: context, center: c, scale: scale)
+                drawEnergyTrail(context: context, center: c, scale: scale)
+                drawTicks(context: context, center: c, scale: scale)
+                drawUsageRings(context: context, center: c, scale: scale, rings: rings)
+                drawNeedle(context: context, center: c, scale: scale, date: date)
+            }
 
-            didAppear = true
+            VStack(spacing: 1) {
+                Text("\(centerPercent)")
+                    .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color(white: 0.96))
+                    .tracking(-0.4)
+                Text("%")
+                    .font(.system(size: size * 0.083, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.36))
+                    .tracking(0.6)
+            }
+            .offset(y: 1)
+            .allowsHitTesting(false)
         }
     }
 
@@ -164,32 +103,6 @@ struct GaugeRingView: View {
         var tertiary: Double?
     }
 
-    private var currentTargets: DrawnRings {
-        DrawnRings(
-            primary: primaryFraction,
-            projected: projectedPrimaryFraction,
-            secondary: secondaryFraction,
-            tertiary: tertiaryFraction
-        )
-    }
-
-    private func applyRingTargets(_ target: DrawnRings, animated: Bool) {
-        let update = {
-            drawnPrimary = target.primary
-            drawnProjected = target.projected ?? 0
-            drawnSecondary = target.secondary ?? 0
-            drawnTertiary = target.tertiary ?? 0
-            drawnHasProjected = target.projected != nil
-            drawnHasSecondary = target.secondary != nil
-            drawnHasTertiary = target.tertiary != nil
-        }
-        if animated {
-            withAnimation(Self.ringSettle, update)
-        } else {
-            update()
-        }
-    }
-
     // MARK: - Drawing
 
     /// Warm center haze past light activity — breath modulates, never blinks off.
@@ -197,17 +110,17 @@ struct GaugeRingView: View {
         context: GraphicsContext,
         center: CGPoint,
         scale: CGFloat,
-        date: Date
+        date: Date?
     ) {
-        let base = BurnMotion.bloomOpacity(ratio: drawnBurn)
+        let base = BurnMotion.bloomOpacity(ratio: burnRatio)
         guard base > 0.004 else { return }
-        let breath = BurnMotion.breath(at: date, ratio: drawnBurn, phaseOffset: phaseOffset)
+        let breath = date.map { BurnMotion.breath(at: $0, ratio: burnRatio, phaseOffset: phaseOffset) } ?? 0.85
         let op = base * breath
-        let r: CGFloat = (22 + BurnMotion.overdrive(ratio: drawnBurn) * 6) * scale
+        let r: CGFloat = (22 + BurnMotion.overdrive(ratio: burnRatio) * 6) * scale
         let rect = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)
         var ctx = context
         // Blur only past cruise — rest/cruise stay cheap hairline chrome.
-        if BurnMotion.energy(ratio: drawnBurn) >= 0.35 {
+        if BurnMotion.energy(ratio: burnRatio) >= 0.35 {
             ctx.addFilter(.blur(radius: 6 * scale))
         }
         ctx.fill(
@@ -234,9 +147,9 @@ struct GaugeRingView: View {
         )
 
         // Active sector highlight: rest → current needle base (no jitter).
-        let highlight = BurnMotion.trackHighlightOpacity(ratio: drawnBurn)
+        let highlight = BurnMotion.trackHighlightOpacity(ratio: burnRatio)
         guard highlight > 0.01 else { return }
-        let unit = BurnRate.needleUnit(ratio: drawnBurn)
+        let unit = BurnRate.needleUnit(ratio: burnRatio)
         let endDeg = Self.needleAngleDegrees(unit: unit)
         var lit = Path()
         lit.addArc(
@@ -255,9 +168,9 @@ struct GaugeRingView: View {
 
     /// Soft fan under the needle from rest → tip — reads as swept energy, not a progress bar.
     private func drawEnergyTrail(context: GraphicsContext, center: CGPoint, scale: CGFloat) {
-        let op = BurnMotion.trailOpacity(ratio: drawnBurn)
+        let op = BurnMotion.trailOpacity(ratio: burnRatio)
         guard op > 0.01 else { return }
-        let unit = BurnRate.needleUnit(ratio: drawnBurn)
+        let unit = BurnRate.needleUnit(ratio: burnRatio)
         let endDeg = Self.needleAngleDegrees(unit: unit)
         // Don't draw a full loop artifact when near rest.
         guard unit > 0.02 else { return }
@@ -277,7 +190,7 @@ struct GaugeRingView: View {
         let outer = context
         outer.stroke(
             ring,
-            with: .color(Self.burnSoft.opacity(BurnMotion.trailOuterOpacity(ratio: drawnBurn))),
+            with: .color(Self.burnSoft.opacity(BurnMotion.trailOuterOpacity(ratio: burnRatio))),
             style: StrokeStyle(lineWidth: (outerR - innerR) * 0.85, lineCap: .round)
         )
 
@@ -294,7 +207,7 @@ struct GaugeRingView: View {
         let innerR: CGFloat = 40 * scale
         let outerR: CGFloat = 44 * scale
         let majorOuterR: CGFloat = 44.5 * scale
-        let e = BurnMotion.energy(ratio: drawnBurn)
+        let e = BurnMotion.energy(ratio: burnRatio)
 
         // Quiet ticks along rest → cruise (7:30, 9, 10:30, 12).
         let quietAngles: [Double] = [135, 180, 225, 270]
@@ -312,7 +225,7 @@ struct GaugeRingView: View {
 
         // Cruise pip (~1 o'clock) — brightens when near cruise pace.
         let cruise: Double = 300 // 1:00
-        let pipBoost = BurnMotion.cruisePipBoost(ratio: drawnBurn)
+        let pipBoost = BurnMotion.cruisePipBoost(ratio: burnRatio)
         let pipOp = 0.52 + pipBoost
         strokeTick(
             context: context,
@@ -336,7 +249,7 @@ struct GaugeRingView: View {
         }
 
         // Redline ticks (3, 4, 4:30) — slightly more present in overdrive.
-        let od = BurnMotion.overdrive(ratio: drawnBurn)
+        let od = BurnMotion.overdrive(ratio: burnRatio)
         let redAngles: [Double] = [0, 30, 45]
         for deg in redAngles {
             strokeTick(
@@ -364,7 +277,7 @@ struct GaugeRingView: View {
         let outerR: CGFloat = (triple ? 32 : 31) * scale
         let midR: CGFloat = (triple ? 26.5 : 25) * scale
         let coreR: CGFloat = 21 * scale
-        let glowBoost = BurnMotion.brandRingGlowBoost(ratio: drawnBurn)
+        let glowBoost = BurnMotion.brandRingGlowBoost(ratio: burnRatio)
 
         // Track underlays (tertiary uses amber ghost so 0% Fable/Spark still reads).
         strokeRing(context: context, center: center, radius: outerR, fraction: 1,
@@ -430,19 +343,18 @@ struct GaugeRingView: View {
         context: GraphicsContext,
         center: CGPoint,
         scale: CGFloat,
-        date: Date
+        date: Date?
     ) {
-        let unit = BurnRate.needleUnit(ratio: drawnBurn)
+        let unit = BurnRate.needleUnit(ratio: burnRatio)
         let baseAngle = Self.needleAngleDegrees(unit: unit)
-        let angle = baseAngle + BurnMotion.needleJitterDegrees(
-            ratio: drawnBurn,
-            at: date,
-            phaseOffset: phaseOffset
-        )
+        let jitter = date.map {
+            BurnMotion.needleJitterDegrees(ratio: burnRatio, at: $0, phaseOffset: phaseOffset)
+        } ?? 0
+        let angle = baseAngle + jitter
         let tipR: CGFloat = 38 * scale
         let tip = point(center: center, angleDeg: angle, radius: tipR)
         let red = Self.burnRed
-        let widthScale = BurnMotion.needleWidthScale(ratio: drawnBurn)
+        let widthScale = BurnMotion.needleWidthScale(ratio: burnRatio)
         let lineW = 1.35 * scale * CGFloat(widthScale)
 
         var path = Path()
@@ -450,7 +362,7 @@ struct GaugeRingView: View {
         path.addLine(to: tip)
 
         // Tip halo only deep overdrive — amp-first; avoid stacking FX past hot.
-        let od = BurnMotion.overdrive(ratio: drawnBurn)
+        let od = BurnMotion.overdrive(ratio: burnRatio)
         if od > 0.55 {
             let tipHaloR: CGFloat = (1.6 + od * 0.9) * scale
             var halo = context
@@ -464,30 +376,30 @@ struct GaugeRingView: View {
             halo.fill(Path(ellipseIn: hRect), with: .color(red.opacity(0.12 + od * 0.10)))
         }
 
-        let glowα = BurnMotion.needleGlowOpacity(ratio: drawnBurn)
+        let glowα = BurnMotion.needleGlowOpacity(ratio: burnRatio)
         if glowα > 0.02 {
             var glow = context
             glow.addFilter(.shadow(
                 color: red.opacity(glowα),
-                radius: BurnMotion.needleGlowRadius(ratio: drawnBurn) * scale,
+                radius: BurnMotion.needleGlowRadius(ratio: burnRatio) * scale,
                 x: 0,
                 y: 0
             ))
             glow.stroke(
                 path,
-                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: drawnBurn))),
+                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: burnRatio))),
                 style: StrokeStyle(lineWidth: lineW, lineCap: .round)
             )
         } else {
             context.stroke(
                 path,
-                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: drawnBurn))),
+                with: .color(red.opacity(BurnMotion.needleStrokeOpacity(ratio: burnRatio))),
                 style: StrokeStyle(lineWidth: lineW, lineCap: .round)
             )
         }
 
         // Hub.
-        let hubR: CGFloat = (2.25 + BurnMotion.energy(ratio: drawnBurn) * 0.25) * scale
+        let hubR: CGFloat = (2.25 + BurnMotion.energy(ratio: burnRatio) * 0.25) * scale
         let hubRect = CGRect(x: center.x - hubR, y: center.y - hubR, width: hubR * 2, height: hubR * 2)
         context.fill(Path(ellipseIn: hubRect), with: .color(red))
         let coreR: CGFloat = 0.95 * scale
@@ -508,11 +420,6 @@ struct GaugeRingView: View {
             let t = (u - 0.5) / 0.5
             return 300 + t * 105 // 300 → 405 ≡ 45
         }
-    }
-
-    /// Back-compat for tests / call sites that still pass burn into the old helper.
-    static func needleJitterDegrees(burn: Double, at date: Date, phaseOffset: TimeInterval = 0) -> Double {
-        BurnMotion.needleJitterDegrees(ratio: burn, at: date, phaseOffset: phaseOffset)
     }
 
     /// Partial arc between two fractions of the same ring (12 o'clock origin).

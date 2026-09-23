@@ -20,6 +20,9 @@ final class IslandModel: ObservableObject {
     @Published private(set) var expandedItemCount: Int = 0
     /// Trailing add rail revealed by chevron hover (grows black body to the right).
     @Published private(set) var addRailOpen: Bool = false
+    /// Window occluded or displays asleep, and Low Power Mode — both pause decoration.
+    @Published private(set) var windowHidden = false
+    @Published private(set) var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
 
     /// Fits `AccountWidget.cellHeight` (gauge + title + caption slot) under the notch.
     private let expandedContentHeight: CGFloat = 136
@@ -117,6 +120,14 @@ final class IslandModel: ObservableObject {
         guard capped != addRailOpen else { return }
         addRailOpen = capped
         recomputeSize()
+    }
+
+    func setWindowHidden(_ hidden: Bool) {
+        if hidden != windowHidden { windowHidden = hidden }
+    }
+
+    func setLowPower(_ on: Bool) {
+        if on != lowPower { lowPower = on }
     }
 
     func recomputeSize() {

@@ -6,6 +6,7 @@ struct IslandRootView: View {
     @ObservedObject private var accountStore = AccountStore.shared
     @ObservedObject private var orchestrator = UsageOrchestrator.shared
     @ObservedObject private var preferences = PreferencesStore.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var prefsOpen = false
     @State private var dialogOpen = false
@@ -67,17 +68,12 @@ struct IslandRootView: View {
 
             if showExpandedShell {
                 expandedChrome
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .offset(y: -8)),
-                        removal: .opacity.combined(with: .offset(y: -40))
-                    ))
+                    .transition(shellTransition(insertY: -8, removeY: -40))
                 expandedContent
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .offset(y: -6)),
-                        removal: .opacity.combined(with: .offset(y: -44))
-                    ))
+                    .transition(shellTransition(insertY: -6, removeY: -44))
             }
         }
+        .environment(\.islandMotion, motion)
         // Hover target = black body (not bleed). Outer frames only reserve canvas space.
         .frame(width: hoverWidth, height: hoverHeight, alignment: .top)
         .contentShape(Rectangle())
@@ -186,7 +182,13 @@ struct IslandRootView: View {
                 lineWidth: 1.35,
                 peakOpacity: 0.95,
                 baseOpacity: 0.28,
-                accent: preferences.rimAccent.color
+                accent: preferences.rimAccent.color,
+                // Hidden under the expanded body while the shell is up.
+                frameInterval: MotionPolicy.rimFrameInterval(
+                    motion,
+                    expanded: false,
+                    fetching: orchestrator.loading && !showExpandedShell
+                )
             )
         }
         .frame(width: bodyW, height: bodyH, alignment: .top)
@@ -220,7 +222,8 @@ struct IslandRootView: View {
                 peakOpacity: 0.92,
                 baseOpacity: 0.24,
                 period: 3.2,
-                accent: preferences.rimAccent.color
+                accent: preferences.rimAccent.color,
+                frameInterval: MotionPolicy.rimFrameInterval(motion, expanded: true, fetching: false)
             )
         }
         // Black body only; parent hover frame is the same width.
@@ -268,6 +271,23 @@ struct IslandRootView: View {
         // GaugeClusterView clips its slot row before drawing hover overlays.
         // A second mask here clips the tips where they overlap the body's edge.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var motion: MotionPolicy.Conditions {
+        MotionPolicy.Conditions(
+            reduceMotion: reduceMotion,
+            lowPower: model.lowPower,
+            hidden: model.windowHidden
+        )
+    }
+
+    /// Reduce Motion: fade only, no slide.
+    private func shellTransition(insertY: CGFloat, removeY: CGFloat) -> AnyTransition {
+        if reduceMotion { return .opacity }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: insertY)),
+            removal: .opacity.combined(with: .offset(y: removeY))
+        )
     }
 
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {

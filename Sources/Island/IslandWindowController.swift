@@ -16,6 +16,10 @@ final class IslandWindowController {
     private var dragActiveObserver: NSObjectProtocol?
     private var requestKeyObserver: NSObjectProtocol?
     private var targetDisplayObserver: NSObjectProtocol?
+    /// Occlusion + Low Power (default center) and display sleep (workspace center).
+    private var motionObservers: [NSObjectProtocol] = []
+    private var workspaceMotionObservers: [NSObjectProtocol] = []
+    private var screensAsleep = false
     /// While true, the full window receives mouse events so drags aren't killed.
     private var dragActive = false
     private var pointerInside = false
@@ -87,6 +91,7 @@ final class IslandWindowController {
         observeTargetDisplayChanges()
         observeDragActive()
         observeKeyRequests()
+        observeMotionConditions()
         installMouseTracking()
     }
 
@@ -106,6 +111,8 @@ final class IslandWindowController {
         if let observer = targetDisplayObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        motionObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        workspaceMotionObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         spaceRevealTask?.cancel()
         followCandidateTask?.cancel()
         if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
@@ -142,6 +149,46 @@ final class IslandWindowController {
                 self?.window.ignoresMouseEvents = false
             }
         }
+    }
+
+    /// Pause decoration nobody can see (occluded window, sleeping displays) and in Low Power Mode.
+    private func observeMotionConditions() {
+        let center = NotificationCenter.default
+        motionObservers = [
+            center.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.updateWindowHidden() }
+            },
+            center.addObserver(
+                forName: .NSProcessInfoPowerStateDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.model.setLowPower(ProcessInfo.processInfo.isLowPowerModeEnabled)
+                }
+            }
+        ]
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspaceMotionObservers = [
+            (NSWorkspace.screensDidSleepNotification, true),
+            (NSWorkspace.screensDidWakeNotification, false)
+        ].map { name, asleep in
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.screensAsleep = asleep
+                    self?.updateWindowHidden()
+                }
+            }
+        }
+        updateWindowHidden()
+    }
+
+    private func updateWindowHidden() {
+        model.setWindowHidden(screensAsleep || !window.occlusionState.contains(.visible))
     }
 
     private func observeScreenChanges() {
