@@ -113,6 +113,18 @@ enum LocalUsageSuite {
             try assertTrue(corrupt.notice != nil)
             try assertEqual(String(contentsOf: damaged, encoding: .utf8), "do not overwrite")
         }
+        let olderArchive = LocalUsageArchive.Archive(
+            events: ["kept": LocalUsageEvent(id: "kept", date: now.addingTimeInterval(-60), model: "m",
+                                             tokens: UsageTokens(input: 1, output: 1))])
+        var olderObject = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(olderArchive))) as? [String: Any] ?? [:]
+        olderObject.removeValue(forKey: "incompleteFiles")
+        try? JSONSerialization.data(withJSONObject: olderObject)
+            .write(to: archiveURL.appendingPathComponent("older-schema.json"))
+        let olderRead = await LocalUsageArchive(directory: archiveURL).cached(provider: "grok", scope: "older-schema")
+        failures += check("history saved before a defaulted archive field is still readable") {
+            try assertEqual(olderRead.events.map(\.id), ["kept"])
+            try assertTrue(olderRead.notice == nil, "got \(olderRead.notice ?? "")")
+        }
         let notDirectory = root.appendingPathComponent("not-directory")
         try? Data("preserve".utf8).write(to: notDirectory)
         try? Data(lines.utf8).write(to: file)

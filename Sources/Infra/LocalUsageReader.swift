@@ -143,6 +143,17 @@ actor LocalUsageArchive {
         var events: [String: LocalUsageEvent] = [:]
         var files: [String: Stamp] = [:]
         var incompleteFiles: Set<String> = []
+
+        init(events: [String: LocalUsageEvent] = [:]) { self.events = events }
+
+        // Missing keys take their defaults, so adding a field never makes saved history unreadable.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            events = try c.decodeIfPresent([String: LocalUsageEvent].self, forKey: .events) ?? [:]
+            files = try c.decodeIfPresent([String: Stamp].self, forKey: .files) ?? [:]
+            incompleteFiles = try c.decodeIfPresent(Set<String>.self, forKey: .incompleteFiles) ?? []
+        }
     }
     struct Snapshot: Sendable {
         var events: [LocalUsageEvent]
