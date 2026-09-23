@@ -81,7 +81,7 @@ Log.poll.debug("skip account=\(id.short) reason=cooldown in=\(Int(until.timeInte
   The directory is created on start. Any file error disables the file sink
   silently; the unified log keeps working. Logging never crashes the app.
 - Line format:
-  `2026-09-22T10:11:12.345+0900 I [poll] skip account=9C11FBE9 reason=cooldown in=812s`
+  `2026-09-22T10:11:12.345+0900 I [poll] skip account=ABCDEF12 reason=cooldown in=812s`
   Level letter is one of `D I W E`. Timestamp is local time with offset so it
   lines up with what the user sees. Newlines inside a message are replaced
   with `⏎` so one event is one line.

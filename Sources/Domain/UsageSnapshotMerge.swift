@@ -1,6 +1,6 @@
 import Foundation
 
-/// Soft vs hard failure policy for usage polls (Certilife-style).
+/// Soft vs hard failure policy for usage polls (reference-client style).
 ///
 /// - **soft**: keep last-good rings; surface quiet caption; do not demand reauth.
 /// - **hard**: keep last-good rings if any, but always show reauth / terminal caption.

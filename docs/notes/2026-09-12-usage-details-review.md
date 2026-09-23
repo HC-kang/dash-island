@@ -104,4 +104,4 @@ Codex/Claude는 공식 완료 이벤트를 로컬 OTLP/JSON 수집기에 연결�
 
 Grok/Agy는 명시적으로 선택한 계정 홈에서 실행하는 `account-cli` 경로를 제공한다. 일반 터미널과 Orca 터미널 모두 동일한 명령을 사용할 수 있다. 이 명령을 거치지 않은 공용 로그까지 자동 계정 귀속한다고 주장하지 않는다.
 
-검증: Swift 170개 통과, Python 수집·중복·계정분리·설정 보존·실행 환경 검증 통과. 실제 Codex CLI의 null body/0 timeUnixNano 형식을 재현하고 event.timestamp로 처리했다. 실제 호출 수집 후 앱에서 Codex personal 30.6K/$0.31, Claude Dev 8.8K/$0.02 표시를 확인했고 다른 계정에는 합산되지 않았다. 숫자는 검증 시점이며 이후 호출에 따라 변한다. Claude의 정확한 원본 합계 8,779 tokens/$0.016881와 수집값이 일치했다.
+검증: Swift 170개 통과, Python 수집·중복·계정분리·설정 보존·실행 환경 검증 통과. 실제 Codex CLI의 null body/0 timeUnixNano 형식을 재현하고 event.timestamp로 처리했다. 실제 호출 수집 후 앱에서 계정별 Codex와 Claude 합계 표시를 확인했고 다른 계정에는 합산되지 않았다. 숫자는 검증 시점이며 이후 호출에 따라 변한다. Claude의 원본 합계와 수집값이 일치했다.

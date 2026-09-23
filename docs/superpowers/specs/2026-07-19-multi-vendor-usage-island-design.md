@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19  
 **Status:** Accepted · living in `dash-island`  
-**Repo:** `/Users/ford/projects/personal/dash-island` (`HC-kang/dash-island`)  
+**Repo:** `~/projects/personal/dash-island` (`HC-kang/dash-island`)  
 **Principles:** 1) Simplicity 2) Practicality 3) Elegance  
 **Stack:** Swift 6 · SwiftUI + AppKit island · in-process vendor adapters  
 
