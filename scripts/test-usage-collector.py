@@ -74,6 +74,34 @@ for vendor, variable in [('codex','CODEX_HOME'),('claude','CLAUDE_CONFIG_DIR'),(
     env = launcher.launch_environment({'vendorID':vendor},Path('/tmp/account-a'),{'HOME':'/real','KEEP':'yes','OPENAI_API_KEY':'wrong','ANTHROPIC_API_KEY':'wrong'})
     assert env[variable] == '/tmp/account-a' and env['KEEP'] == 'yes'
     assert 'OPENAI_API_KEY' not in env and 'ANTHROPIC_API_KEY' not in env
+assert launcher.account_directory(Path('/base'), {'credentialRef': 'ref-a'}) == Path('/base/accounts/ref-a')
+for reference in ['', '.', '..', '../x', None]:
+    try:
+        launcher.account_directory(Path('/base'), {'credentialRef': reference})
+        raise AssertionError('invalid credentialRef %r must not select the accounts root' % reference)
+    except SystemExit:
+        pass
+routing = {'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'OPENAI_BASE_URL'}
+env = launcher.launch_environment({'vendorID': 'claude'}, Path('/tmp/account-a'), {name: '1' for name in routing})
+assert not routing & set(env), 'provider routing would bypass the selected subscription account'
+try:
+    launcher.launch_environment({'vendorID': 'other'}, Path('/tmp/account-a'), {})
+    raise AssertionError('unknown vendors must fail clearly')
+except SystemExit as error:
+    assert 'other' in str(error)
+with tempfile.TemporaryDirectory() as real:
+    # agy only reads $HOME, so HOME must move; keep the user's git identity for the agent's commands.
+    assert 'GIT_CONFIG_GLOBAL' not in launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    (Path(real) / '.config/git').mkdir(parents=True)
+    (Path(real) / '.config/git/config').write_text('[user]\n')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    assert env['HOME'] == '/tmp/account-a' and env['GIT_CONFIG_GLOBAL'] == str(Path(real) / '.config/git/config')
+    (Path(real) / '.gitconfig').write_text('[user]\n')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    assert env['GIT_CONFIG_GLOBAL'] == str(Path(real) / '.gitconfig')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real, 'GIT_CONFIG_GLOBAL': '/mine'})
+    assert env['GIT_CONFIG_GLOBAL'] == '/mine'
+    assert 'GIT_CONFIG_GLOBAL' not in launcher.launch_environment({'vendorID': 'codex'}, Path('/tmp/account-a'), {'HOME': real})
 print('PASS: account isolation, duplicates, cache/reasoning, malformed events, Claude cost, safe/idempotent config merge')
 
 # Codex reports no cost. Price it at ingest from the app's cached catalog so projection has dollars.
