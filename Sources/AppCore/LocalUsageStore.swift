@@ -51,7 +51,8 @@ final class LocalUsageStore: ObservableObject {
                     notice: identity == nil ? "Account identity unavailable. Reauthenticate this account to reconnect tracking." : captured.notice)
                 updated[key] = date
             }
-            Log.local.info("load provider=\(provider) scope=captured events=\(captured.accounts.values.reduce(0) { $0 + $1.count }) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+            // debug: the detail panel reloads every ~15 s.
+            Log.local.debug("load provider=\(provider) scope=captured events=\(captured.accounts.values.reduce(0) { $0 + $1.count }) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
             return
         }
         if let date = updated[key], Date().timeIntervalSince(date) < 120 { return }
@@ -66,7 +67,8 @@ final class LocalUsageStore: ObservableObject {
         let roots = roots(provider: provider, accountID: accountID)
         snapshots[key] = await LocalUsageArchive.shared.refresh(provider: provider, roots: roots, scope: archiveScope)
         updated[key] = Date()
-        Log.local.info("load provider=\(provider) scope=\(archiveScope) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+        // debug: the detail panel reloads every ~15 s.
+        Log.local.debug("load provider=\(provider) scope=\(transcriptHistory ? "history" : "archive") account=\(accountID?.short ?? "-") ms=\(Int(Date().timeIntervalSince(started) * 1000))")
     }
 
     private func roots(provider: String, accountID: AccountID?) -> [URL] {
