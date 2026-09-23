@@ -121,6 +121,13 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (default `3`).
 
+### Logs
+
+- File: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 rotation). Also mirrored to the unified log (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
+- Level: `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` (or `DASHISLAND_LOG=debug` in the env). Values: `debug info warn error`. Default `info`. Restart the app to apply.
+- Tail: `scripts/logs.sh`, follow: `scripts/logs.sh -f`, filter: `scripts/logs.sh -f fetch`.
+- The log never contains tokens or response bodies.
+
 ### Tests
 
 ```bash
@@ -252,6 +259,13 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 ```
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (기본 `3`).
+
+### 로그
+
+- 파일: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 회전). 통합 로그에도 같은 내용이 기록됩니다 (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
+- 레벨: `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` 또는 환경 변수 `DASHISLAND_LOG=debug`. 값은 `debug info warn error`이고 기본값은 `info`입니다. 앱을 다시 시작해야 적용됩니다.
+- 보기: `scripts/logs.sh`, 따라가기: `scripts/logs.sh -f`, 필터: `scripts/logs.sh -f fetch`.
+- 로그에는 토큰과 응답 본문이 기록되지 않습니다.
 
 ### 테스트
 
