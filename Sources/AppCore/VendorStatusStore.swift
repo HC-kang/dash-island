@@ -1,42 +1,5 @@
 import Foundation
 
-/// Vendor **platform** health from official status pages (not our account poll).
-enum ServiceLevel: Int, Equatable, Comparable, Sendable {
-    case unknown = -1
-    case operational = 0
-    case degraded = 1
-    case outage = 2
-
-    static func < (lhs: ServiceLevel, rhs: ServiceLevel) -> Bool {
-        lhs.rawValue < rhs.rawValue
-    }
-
-    var accountHealth: AccountHealth {
-        switch self {
-        case .operational, .unknown: return .ok
-        case .degraded: return .warn
-        case .outage: return .error
-        }
-    }
-}
-
-struct VendorServiceSnapshot: Equatable, Sendable {
-    var level: ServiceLevel
-    /// Short line for tooltip, e.g. "Claude: All Systems Operational".
-    var summary: String
-    var fetchedAt: Date
-    var sourceURL: String
-
-    static func unknown(vendor: String, reason: String = "status unavailable") -> VendorServiceSnapshot {
-        VendorServiceSnapshot(
-            level: .unknown,
-            summary: "\(vendor): \(reason)",
-            fetchedAt: Date(),
-            sourceURL: ""
-        )
-    }
-}
-
 /// Polls official status pages slowly. Shared across accounts of the same vendor.
 @MainActor
 final class VendorStatusStore: ObservableObject {

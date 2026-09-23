@@ -19,7 +19,7 @@ struct TestMain {
         failures += await LocalUsageSuite.run()
         failures += LogSuite.run()
         failures += VendorStatusSuite.run()
-        failures += UsageModelSuite.run()
+        failures += await UsageModelSuite.run()
 
         if failures == 0 {
             print("✓ All tests passed")

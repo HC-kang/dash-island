@@ -67,21 +67,25 @@ final class PreferencesStore: ObservableObject {
         static let pollSeconds = "DashIsland.pollSeconds"
     }
 
+    /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
+    private let defaults: UserDefaults
+
     /// Used vs remaining for ring/center mapping.
     @Published var displayMode: DisplayMode {
         didSet {
-            UserDefaults.standard.set(displayMode.rawValue, forKey: Keys.displayMode)
+            defaults.set(displayMode.rawValue, forKey: Keys.displayMode)
         }
     }
 
     /// Shared rim color for compact + expanded.
     @Published var rimAccent: RimAccent {
         didSet {
-            UserDefaults.standard.set(rimAccent.rawValue, forKey: Keys.rimAccent)
+            defaults.set(rimAccent.rawValue, forKey: Keys.rimAccent)
         }
     }
 
     init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 

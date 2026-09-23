@@ -1,10 +1,29 @@
 import Foundation
 
-/// Persisted usage types and error classification.
+/// Persisted usage types, error classification and stored preferences.
 enum UsageModelSuite {
-    static func run() -> Int {
+    static func run() async -> Int {
         print("UsageModel")
         var failures = 0
+
+        // Test binary's own standard domain, not the app's; restored either way.
+        let keys = ["DashIsland.displayMode", "DashIsland.rimAccent"]
+        let standardBefore = keys.map { UserDefaults.standard.object(forKey: $0) }
+        let suite = "UsageModelTests-\(UUID().uuidString)"
+        let injected = UserDefaults(suiteName: suite)!
+        await MainActor.run {
+            let prefs = PreferencesStore(defaults: injected)
+            prefs.displayMode = .remaining
+            prefs.rimAccent = .magma
+        }
+        let standardAfter = keys.map { UserDefaults.standard.object(forKey: $0) as? String }
+        let injectedAfter = keys.map { injected.string(forKey: $0) }
+        for (key, value) in zip(keys, standardBefore) { UserDefaults.standard.set(value, forKey: key) }
+        injected.removePersistentDomain(forName: suite)
+        failures += check("PreferencesStore writes to the defaults it reads from") {
+            try assertEqual(injectedAfter, ["remaining", "magma"])
+            try assertEqual(standardAfter, standardBefore.map { $0 as? String })
+        }
 
         failures += check("last-good snapshot saved before a defaulted field still decodes") {
             let snapshot = UsageSnapshot(
