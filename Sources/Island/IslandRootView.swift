@@ -16,6 +16,7 @@ struct IslandRootView: View {
     @State private var dragActive = false
     @State private var pointerInside = false
     @State private var collapseTask: Task<Void, Never>?
+    @State private var hoverExpandTask: Task<Void, Never>?
     /// Dwell before lazy network refresh on expand (avoids hover-flick burns).
     @State private var expandRefreshTask: Task<Void, Never>?
     /// Expanded chrome/content visibility — decoupled from `model.state` window size
@@ -23,6 +24,9 @@ struct IslandRootView: View {
     @State private var showExpandedShell = false
 
     private let bodyOutset: CGFloat = 1.0
+    /// Hover must rest this long before expanding — a pointer crossing the
+    /// notch on its way to the menu bar should not open the island.
+    private let hoverExpandDwellNs: UInt64 = 200_000_000
     /// Match add-rail dwell philosophy — intentional expand, not mouse graze.
     private let expandRefreshDwellNs: UInt64 = 400_000_000
     /// Re-ask while the island stays open. `expandInterval` is the real gate.
@@ -320,18 +324,38 @@ struct IslandRootView: View {
             && accountStore.accounts.count < AccountStore.maxAccounts
     }
 
+    /// Hover expands after a short dwell and never activates the app: the
+    /// frontmost app keeps keyboard focus. A click activates (AppKit does that),
+    /// and clicks reach SwiftUI via `allowsWindowActivationEvents`.
     private func handleHover(_ hovering: Bool) {
         pointerInside = hovering
+        hoverExpandTask?.cancel()
+        hoverExpandTask = nil
         if hovering {
             collapseTask?.cancel()
             collapseTask = nil
-            expandOpen()
-            // Key + activate so SwiftUI Menu / contextMenu can present.
-            if !detailsOpen {
-                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+            // Re-entry while still open (tips, collapse grace) must not wait.
+            if model.state == .expanded {
+                expandOpen()
+                requestKeyOnLegacyOS()
+                return
+            }
+            hoverExpandTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: hoverExpandDwellNs)
+                guard !Task.isCancelled, pointerInside else { return }
+                expandOpen()
+                requestKeyOnLegacyOS()
             }
         } else if !blockingOverlay {
             scheduleCollapse()
+        }
+    }
+
+    /// macOS 13/14 lack `allowsWindowActivationEvents`: SwiftUI drops the click
+    /// that activates the window, so keep the old hover activation there.
+    private func requestKeyOnLegacyOS() {
+        if #unavailable(macOS 15.0), !detailsOpen {
+            NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
         }
     }
 
@@ -357,7 +381,10 @@ struct IslandRootView: View {
             }
             try? await Task.sleep(nanoseconds: collapseShellNs)
             guard !Task.isCancelled, !blockingOverlay, !pointerInside else { return }
+            guard model.state == .expanded else { return }
             model.setState(.compact)
+            // Pointer left and nothing is open: hand focus back if a click took it.
+            NotificationCenter.default.post(name: .dashIslandPointerCollapsed, object: nil)
         }
     }
 

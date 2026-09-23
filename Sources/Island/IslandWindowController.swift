@@ -20,6 +20,12 @@ final class IslandWindowController {
     private var motionObservers: [NSObjectProtocol] = []
     private var workspaceMotionObservers: [NSObjectProtocol] = []
     private var screensAsleep = false
+    /// Last other app that was frontmost, and the app to hand focus back to
+    /// when the island collapses after a click activated us.
+    private var lastOtherApp: NSRunningApplication?
+    private var focusReturnApp: NSRunningApplication?
+    private var focusObservers: [NSObjectProtocol] = []
+    private var workspaceFocusObserver: NSObjectProtocol?
     /// While true, the full window receives mouse events so drags aren't killed.
     private var dragActive = false
     private var pointerInside = false
@@ -92,6 +98,7 @@ final class IslandWindowController {
         observeDragActive()
         observeKeyRequests()
         observeMotionConditions()
+        observeFocus()
         installMouseTracking()
     }
 
@@ -112,6 +119,10 @@ final class IslandWindowController {
             NotificationCenter.default.removeObserver(observer)
         }
         motionObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        focusObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let observer = workspaceFocusObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
         workspaceMotionObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         spaceRevealTask?.cancel()
         followCandidateTask?.cancel()
@@ -189,6 +200,49 @@ final class IslandWindowController {
 
     private func updateWindowHidden() {
         model.setWindowHidden(screensAsleep || !window.occlusionState.contains(.visible))
+    }
+
+    /// Remember who had focus before we became active; give it back on pointer collapse.
+    private func observeFocus() {
+        let own = NSRunningApplication.current.processIdentifier
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != own {
+            lastOtherApp = front
+        }
+        workspaceFocusObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor in
+                guard let app, app.processIdentifier != own else { return }
+                self?.lastOtherApp = app
+            }
+        }
+        let center = NotificationCenter.default
+        focusObservers = [
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.focusReturnApp = self?.lastOtherApp }
+            },
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.focusReturnApp = nil }
+            },
+            center.addObserver(forName: .dashIslandPointerCollapsed, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.returnFocus() }
+            }
+        ]
+    }
+
+    /// Collapse after a click left us active with no window of ours in use:
+    /// the previous app gets keyboard focus back.
+    private func returnFocus() {
+        guard NSApp.isActive,
+              NSApp.keyWindow == nil || NSApp.keyWindow === window,
+              let app = focusReturnApp, !app.isTerminated
+        else { return }
+        focusReturnApp = nil
+        app.activate(options: [])
+        Log.window.debug("focus returned on collapse")
     }
 
     private func observeScreenChanges() {
@@ -324,6 +378,8 @@ final class IslandWindowController {
 
     private func handleActiveSpaceDidChange() {
         spaceRevealTask?.cancel()
+        // Activating an app from the old space would swipe the user back there.
+        focusReturnApp = nil
 
         // Drop expanded chrome immediately — never carry a wide panel across spaces.
         model.setState(.compact)

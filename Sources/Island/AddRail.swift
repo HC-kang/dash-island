@@ -55,7 +55,10 @@ struct AddRail: View {
             stripHovered = hovering
             if hovering {
                 cancelClose()
-                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+                // The `+` Menu accepts the first click; only macOS 13/14 need focus first.
+                if #unavailable(macOS 15.0) {
+                    NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+                }
                 scheduleOpen()
             } else {
                 cancelOpen()
