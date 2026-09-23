@@ -148,8 +148,9 @@ actor LocalUsageArchive {
                 && walModified == other.walModified && walSize == other.walSize
         }
     }
-    /// Events older than this leave the archive. The detail panel shows at most 30 days.
-    static let retentionDays = 90
+    /// Events older than this leave the archive. Matches the collector (RETENTION_DAYS in
+    /// scripts/usage-collector.py): the panel reads 30 days, a year stays for comparisons.
+    static let retentionDays = 400
     struct Archive: Codable {
         var version = 1
         var events: [String: LocalUsageEvent] = [:]

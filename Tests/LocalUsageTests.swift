@@ -297,7 +297,7 @@ enum LocalUsageSuite {
             try assertEqual(inodeAfterIdle, inodeAfterFirst)
         }
         var aged = LocalUsageArchive.Archive(events: [
-            "old": LocalUsageEvent(id: "old", date: now.addingTimeInterval(-100 * 86_400), model: "m",
+            "old": LocalUsageEvent(id: "old", date: now.addingTimeInterval(-Double(LocalUsageArchive.retentionDays + 10) * 86_400), model: "m",
                                    tokens: UsageTokens(input: 1, output: 1)),
             "recent": LocalUsageEvent(id: "recent", date: now.addingTimeInterval(-10 * 86_400), model: "m",
                                       tokens: UsageTokens(input: 1, output: 1))])
@@ -308,7 +308,7 @@ enum LocalUsageSuite {
             .refresh(provider: "grok", roots: [], scope: "aged", now: now)
         let prunedFile = try? JSONDecoder().decode(LocalUsageArchive.Archive.self,
             from: Data(contentsOf: growArchiveURL.appendingPathComponent("aged.json")))
-        failures += check("archive keeps 90 days of events and forgets vanished files") {
+        failures += check("archive keeps retentionDays of events and forgets vanished files") {
             try assertEqual(prunedSnapshot.events.map(\.id), ["recent"])
             try assertTrue(prunedSnapshot.notice == nil, "got \(prunedSnapshot.notice ?? "")")
             try assertEqual(prunedFile?.events.keys.sorted(), ["recent"])
