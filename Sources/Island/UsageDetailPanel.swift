@@ -145,38 +145,30 @@ private struct UsageDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            GeometryReader { viewport in
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 22) {
-                            quotas
-                            Divider().overlay(Color.white.opacity(0.05))
-                            activity
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.top, 8)
-                        .padding(.bottom, 24)
-                        .background(GeometryReader { content in
-                            Color.clear.preference(
-                                key: DetailContentBottomKey.self,
-                                value: content.frame(in: .named(Self.scrollSpace)).maxY
-                            )
-                        })
-                        Color.clear.frame(height: 0).id(Self.bottomAnchor)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        quotas
+                        Divider().overlay(Color.white.opacity(0.05))
+                        activity
                     }
-                    .coordinateSpace(name: Self.scrollSpace)
-                    // A connected mouse makes "Automatic" draw the legacy tracked scroller,
-                    // which clashes with the dark panel. Scrolling still works.
-                    .scrollIndicators(.never)
-                    .onPreferenceChange(DetailContentBottomKey.self) { bottom in
-                        let more = IslandGeometry.hasMoreBelow(contentBottom: bottom, viewportHeight: viewport.size.height)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
+                    // SwiftUI preferences do not leave the NSScrollView-backed ScrollView
+                    // on macOS 13, so read the clip view directly.
+                    .background(ScrollCueProbe { more in
                         if more != moreBelow { moreBelow = more }
-                    }
-                    .overlay(alignment: .bottom) {
-                        if moreBelow { scrollCue(proxy) }
-                    }
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: moreBelow)
+                    })
+                    Color.clear.frame(height: 0).id(Self.bottomAnchor)
                 }
+                // A connected mouse makes "Automatic" draw the legacy tracked scroller,
+                // which clashes with the dark panel. Scrolling still works.
+                .scrollIndicators(.never)
+                .overlay(alignment: .bottom) {
+                    if moreBelow { scrollCue(proxy) }
+                }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: moreBelow)
             }
         }
         .background(Color(white: 0.045))
@@ -451,13 +443,55 @@ private struct UsageDetailView: View {
     }
 }
 
-private struct DetailContentBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+/// Reports whether the enclosing NSScrollView has content below the visible area.
+/// Watches clip-view scrolling and document resizing (usage rows load late).
+private struct ScrollCueProbe: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> ProbeView { ProbeView(onChange: onChange) }
+    func updateNSView(_ view: ProbeView, context: Context) { view.onChange = onChange }
+
+    final class ProbeView: NSView {
+        var onChange: (Bool) -> Void
+        private var observers: [NSObjectProtocol] = []
+
+        init(onChange: @escaping (Bool) -> Void) {
+            self.onChange = onChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard window != nil, let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
+            scroll.contentView.postsBoundsChangedNotifications = true
+            doc.postsFrameChangedNotifications = true
+            let center = NotificationCenter.default
+            for (name, object) in [(NSView.boundsDidChangeNotification, scroll.contentView as NSView),
+                                   (NSView.frameDidChangeNotification, doc)] {
+                observers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.report() }
+                })
+            }
+            DispatchQueue.main.async { [weak self] in self?.report() }
+        }
+
+        private func report() {
+            guard let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
+            let visible = scroll.documentVisibleRect
+            let below = doc.isFlipped ? doc.bounds.height - visible.maxY : visible.minY
+            onChange(IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height))
+        }
+    }
 }
 
 extension UsageDetailView {
-    fileprivate static let scrollSpace = "usageDetailScroll"
     fileprivate static let bottomAnchor = "usageDetailBottom"
 
     /// Soft fade over the last line plus a quiet chevron; click scrolls to the end.
