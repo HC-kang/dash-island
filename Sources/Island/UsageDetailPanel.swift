@@ -113,6 +113,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var accounts = AccountStore.shared
     @ObservedObject private var preferences = PreferencesStore.shared
     @ObservedObject private var vendorStatus = VendorStatusStore.shared
+    @ObservedObject private var quotaHistory = QuotaHistoryStore.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -178,6 +179,7 @@ private struct UsageDetailView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         .colorScheme(.dark)
         .tint(accent)
+        .onAppear { _ = quotaHistory.history(for: initial.id) }
         .task(id: sourceKey) {
             repeat {
                 await local.load(provider: provider, accountID: initial.id)
@@ -237,6 +239,7 @@ private struct UsageDetailView: View {
                 }
                 quotaBar(first)
                 resetLabel(first).padding(.top, -8)
+                trend(first)
                 ForEach(Array(windows.dropFirst().enumerated()), id: \.offset) { _, window in
                     VStack(spacing: 6) {
                         HStack {
@@ -285,6 +288,56 @@ private struct UsageDetailView: View {
         }
         guard let name = window.labelOverride else { return period }
         return name.hasSuffix(" wk") ? String(name.dropLast(3)) + " Weekly" : name
+    }
+
+    /// Seven days of the headline window from QuotaHistory, in the display mode.
+    @ViewBuilder
+    private func trend(_ window: WindowUsage) -> some View {
+        let now = Date()
+        let span: TimeInterval = 7 * 86_400
+        let points = (quotaHistory.byAccount[initial.id] ?? QuotaHistory())
+            .series(window: window.displayLabel, days: 7, now: now)
+        if points.count >= 2 {
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { g in
+                    let xy: (QuotaHistory.Sample) -> CGPoint = { p in
+                        let x = g.size.width * CGFloat(1 - now.timeIntervalSince(p.at) / span)
+                        let v = showsUsed ? p.used : 1 - p.used
+                        return CGPoint(x: x, y: g.size.height * CGFloat(1 - v))
+                    }
+                    let line = Path { path in
+                        path.move(to: xy(points[0]))
+                        for p in points.dropFirst() { path.addLine(to: xy(p)) }
+                    }
+                    ZStack {
+                        Path { p in
+                            p.move(to: CGPoint(x: 0, y: g.size.height / 2))
+                            p.addLine(to: CGPoint(x: g.size.width, y: g.size.height / 2))
+                        }
+                        .stroke(Color.white.opacity(0.06), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        Path { p in
+                            p.addPath(line)
+                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: g.size.height))
+                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: g.size.height))
+                            p.closeSubpath()
+                        }
+                        .fill(accent.opacity(0.14))
+                        line.stroke(accent.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                        let end = xy(points[points.count - 1])
+                        Circle().fill(accent).frame(width: 5, height: 5).position(end)
+                    }
+                }
+                .frame(height: 36)
+                HStack {
+                    Text("7 days ago")
+                    Spacer()
+                    Text("now")
+                }
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(window.displayLabel) over the last 7 days")
+        }
     }
 
     /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).

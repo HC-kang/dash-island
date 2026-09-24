@@ -963,6 +963,7 @@ final class UsageOrchestrator: ObservableObject {
         }
         lastGood[accountID] = snapshot
         persistLastGood(accountID: accountID, snapshot: snapshot)
+        QuotaHistoryStore.shared.record(accountID: accountID, snapshot: snapshot, at: now)
         pushBurn(accountID: accountID, snapshot: snapshot)
         anchorProjection(accountID: accountID, snapshot: snapshot, now: now)
     }

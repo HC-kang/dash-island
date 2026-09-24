@@ -137,6 +137,7 @@ final class AccountStore: ObservableObject {
             break
         }
         try? CredentialStore.removeDirectory(for: removed.credentialRef)
+        QuotaHistoryStore.shared.remove(accountID: removed.id)
     }
 
     func rename(id: AccountID, label: String) throws {

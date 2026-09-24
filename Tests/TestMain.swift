@@ -15,6 +15,7 @@ struct TestMain {
         failures += UsagePaceSuite.run()
         failures += CollectorHealthSuite.run()
         failures += StatusExportSuite.run()
+        failures += QuotaHistorySuite.run()
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += UsageProjectionSuite.run()
