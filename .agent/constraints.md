@@ -70,3 +70,12 @@ Hard rules and non-obvious facts. Vendor, platform, and live-machine limits live
 
 - macOS 13/14 runtime is not verified anywhere. The dated verification bullets in mistakes.md and patterns.md state the exact gaps.
 - Known limits: `.help` tooltips and the pointing-hand cursor may not show while the app is inactive (2026-09-23).
+
+## Limit resets (2026-09-25)
+
+- A reset call spends a credit and cannot be undone. Tests never send one; live checks read counts only.
+- Codex: `GET wham/rate-limit-reset-credits` (count), `POST …/consume {"redeem_request_id"}`. Answers are HTTP 200 codes: `reset`, `already_redeemed`, `nothing_to_reset`, `no_credit`.
+- Claude: `GET /api/oauth/usage?cedar_ember=1&skip_spend=1` (grants), `POST /api/organizations/{org}/reset_rate_limits {"program":"cedar_ember","grant_id","request_id"}`. The org id is `oauthAccount.organizationUuid` in the folder's `.claude.json`.
+- Claude gates resets on the client surface, read from the User-Agent. `claude-code/<ver>` answers `ineligible_reason: surface`; `claude-cli/<ver> (external, cli)` works. Only the reset calls send the CLI form.
+- The request id is the idempotency key. Keep it after a timeout, 5xx or unknown answer, and reuse it on the retry.
+- Claude grants seen so far have `use_requires_limit=false`: early use spends the credit, so the confirmation names the highest limit percent.
