@@ -123,6 +123,9 @@ final class AccountStore: ObservableObject {
         let dir = CredentialStore.directoryURL(for: removed.credentialRef)
         switch removed.vendorID {
         case "claude":
+            // A background CLI ping could recreate the folder after deletion,
+            // and orphan recovery would then bring the account back.
+            ClaudeAdapter.cliPings.cancel(dir.path)
             ClaudeAdapter.clearManagedCredentials(configDir: dir)
         case "codex":
             CodexAdapter.clearManagedCredentials(codexHome: dir)

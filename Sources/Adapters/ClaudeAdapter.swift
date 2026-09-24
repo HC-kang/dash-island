@@ -461,10 +461,11 @@ struct ClaudeAdapter: VendorAdapter {
         let slot = cliPings.reserve(key, until: now.addingTimeInterval(cliPingBudget), now: now)
         guard slot.started else { return slot.end }
         Log.auth.info("cliPing vendor=claude outcome=started ref=\(String(configDir.lastPathComponent.prefix(8))) mode=background")
-        Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             _ = await pingCLIThenAdopt(configDir: configDir, failedAccessToken: failedAccessToken)
             cliPings.finish(key)
         }
+        cliPings.attach(key, task: task)
         return slot.end
     }
 
@@ -486,9 +487,11 @@ struct ClaudeAdapter: VendorAdapter {
         markPingAttempted(configDir: configDir)
         let before = readCredentialsFile(configDir: configDir)?.accessToken
         guard await spawnManagedRefreshPing(configDir: configDir) else { return nil }
+        // Cancelled (account removed): write nothing into a folder being deleted.
+        guard !Task.isCancelled else { return nil }
         // Darwin CLI writes Keychain and often *deletes* `.credentials.json`.
         // Harvest via `/usr/bin/security` (no Dash password sheet), then file.
-        if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir) {
+        if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir), !Task.isCancelled {
             commitHarvestedCredentials(creds: harvested, configDir: configDir)
             if harvested.accessToken != failedAccessToken,
                harvested.accessToken != before
@@ -1522,8 +1525,22 @@ struct ClaudeAdapter: VendorAdapter {
 final class CLIPingRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var until: [String: Date] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]
 
     init() {}
+
+    func attach(_ key: String, task: Task<Void, Never>) {
+        lock.lock(); defer { lock.unlock() }
+        tasks[key] = task
+    }
+
+    /// Account removed: stop its ping (the child CLI is terminated by
+    /// `LoginProcess` on cancellation) and free the slot.
+    func cancel(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        tasks.removeValue(forKey: key)?.cancel()
+        until[key] = nil
+    }
 
     /// Reserve `key` until `date`. When a ping already runs there, keep it and
     /// return its end with `started == false`.
@@ -1544,6 +1561,7 @@ final class CLIPingRegistry: @unchecked Sendable {
     func finish(_ key: String) {
         lock.lock(); defer { lock.unlock() }
         until[key] = nil
+        tasks[key] = nil
     }
 }
 

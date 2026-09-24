@@ -23,6 +23,16 @@ enum PollingPathSuite {
             try assertTrue(registry.runningUntil("a", now: t0.addingTimeInterval(5)) == nil)
         }
 
+        failures += check("CLI ping registry: cancel stops the attached task and frees the slot") {
+            let registry = CLIPingRegistry()
+            let now = Date()
+            _ = registry.reserve("dir", until: now.addingTimeInterval(60), now: now)
+            let task = Task.detached { _ = try? await Task.sleep(nanoseconds: 5_000_000_000) }
+            registry.attach("dir", task: task)
+            registry.cancel("dir")
+            try assertEqual(task.isCancelled, true)
+            try assertEqual(registry.runningUntil("dir", now: now), nil)
+        }
         failures += check("CLI ping registry: a ping past its budget no longer blocks") {
             let registry = CLIPingRegistry()
             let end = t0.addingTimeInterval(60)
