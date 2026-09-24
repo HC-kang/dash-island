@@ -11,11 +11,16 @@ struct CenteredAddButton: View {
         Menu {
             VendorMenuItems(onSelect: onSelectVendor)
         } label: {
-            GlassPlusLabel(size: 40, symbolSize: 16)
+            // First run showed only a bare "+"; say what it does (ui-13). A borderless
+            // Menu flattens its label to one line, so keep it to icon + text.
+            Label("Add an account", systemImage: "plus")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.85))
         }
         .menuStyle(.borderlessButton)
         .frame(maxWidth: .infinity, minHeight: AccountWidget.cellHeight)
         .accessibilityLabel("Add account")
+        .help("Add a Claude, Codex, Grok, or Antigravity account")
     }
 }
 
@@ -33,29 +38,6 @@ struct VendorMenuItems: View {
                 }
             }
         }
-    }
-}
-
-/// Quiet glass circle with a plus glyph.
-struct GlassPlusLabel: View {
-    var size: CGFloat = 28
-    var symbolSize: CGFloat = 12
-
-    var body: some View {
-        Image(systemName: "plus")
-            .font(.system(size: symbolSize, weight: .semibold))
-            .foregroundStyle(Color.white.opacity(0.88))
-            .frame(width: size, height: size)
-            .background {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Circle()
-                            .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
-            }
-            .contentShape(Circle())
     }
 }
 
