@@ -27,6 +27,8 @@ if [ -d Sources/Resources/VendorLogos ]; then
 fi
 
 cp Sources/Resources/usage-prices.json "$RES_DIR/"
+# App icon (regenerate with: swift scripts/make-icon.swift).
+cp Sources/Resources/AppIcon.icns "$RES_DIR/"
 cp THIRD_PARTY_NOTICES.md "$RES_DIR/"
 cp scripts/usage-collector.py scripts/connect-usage.py scripts/account-cli.py "$RES_DIR/"
 
@@ -58,6 +60,7 @@ cat > "$CONTENTS/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>$DEPLOYMENT_TARGET</string>
   <key>LSUIElement</key><true/>
