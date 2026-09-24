@@ -46,7 +46,20 @@ struct PrefsSheet: View {
 
                 prefBlock(title: "AT A GLANCE") {
                     prefToggle("Warning color on the rim", isOn: $preferences.glanceRim)
-                    prefToggle("Show top usage beside the notch", isOn: $preferences.glanceEars)
+                    HStack {
+                        Text("Usage beside the notch")
+                            .font(Typography.settingsRow)
+                            .foregroundStyle(.white.opacity(0.88))
+                        Spacer()
+                        Picker("Usage beside the notch", selection: $preferences.glanceEarsMode) {
+                            Text("Auto").tag(IslandGlance.EarsMode.auto)
+                            Text("Always").tag(IslandGlance.EarsMode.always)
+                            Text("Never").tag(IslandGlance.EarsMode.never)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 170)
+                    }
                     prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
                     Text("Left ear: total across accounts of")
                         .font(Typography.settingsRow)
@@ -65,7 +78,7 @@ struct PrefsSheet: View {
                             .font(.system(size: 11))
                         }
                     }
-                    Text("Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left ear sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
+                    Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left ear sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))
                         .fixedSize(horizontal: false, vertical: true)

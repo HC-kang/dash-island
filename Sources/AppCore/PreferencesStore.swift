@@ -66,7 +66,8 @@ final class PreferencesStore: ObservableObject {
         static let expandedRim = "DashIsland.rimExpanded"
         static let pollSeconds = "DashIsland.pollSeconds"
         static let glanceRim = "DashIsland.glanceRim"
-        static let glanceEars = "DashIsland.glanceEars"
+        static let glanceEars = "DashIsland.glanceEars"  // legacy Bool, migrated below
+        static let glanceEarsMode = "DashIsland.glanceEarsMode"
         static let alertNotifications = "DashIsland.alertNotifications"
         static let glanceTotalVendors = "DashIsland.glanceTotalVendors"
     }
@@ -93,9 +94,9 @@ final class PreferencesStore: ObservableObject {
         didSet { defaults.set(glanceRim, forKey: Keys.glanceRim) }
     }
 
-    /// Compact ears show the worst account and its reset countdown.
-    @Published var glanceEars: Bool {
-        didSet { defaults.set(glanceEars, forKey: Keys.glanceEars) }
+    /// When the compact ears (worst account / total, reset countdown) draw.
+    @Published var glanceEarsMode: IslandGlance.EarsMode {
+        didSet { defaults.set(glanceEarsMode.rawValue, forKey: Keys.glanceEarsMode) }
     }
 
     /// macOS notifications at 80% / 95%, after a reset, and when sign-in is needed.
@@ -111,7 +112,12 @@ final class PreferencesStore: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
-        self.glanceEars = defaults.object(forKey: Keys.glanceEars) as? Bool ?? true
+        if let raw = defaults.string(forKey: Keys.glanceEarsMode), let mode = IslandGlance.EarsMode(rawValue: raw) {
+            self.glanceEarsMode = mode
+        } else {
+            // Someone who turned the old toggle off keeps them off; everyone else gets Auto.
+            self.glanceEarsMode = (defaults.object(forKey: Keys.glanceEars) as? Bool) == false ? .never : .auto
+        }
         self.alertNotifications = defaults.object(forKey: Keys.alertNotifications) as? Bool ?? true
         self.glanceTotalVendors = defaults.stringArray(forKey: Keys.glanceTotalVendors) ?? []
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""

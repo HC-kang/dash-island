@@ -27,6 +27,19 @@ struct IslandGlance: Equatable, Sendable {
     static let warnAt = 0.80
     static let criticalAt = 0.95
 
+    /// When the compact ears draw. Auto: only without a physical notch, where the
+    /// menu-bar center is empty; on a notched display they would cover menu items.
+    enum EarsMode: String, CaseIterable, Sendable {
+        case auto, always, never
+        func shows(hasNotch: Bool) -> Bool {
+            switch self {
+            case .auto: return !hasNotch
+            case .always: return true
+            case .never: return false
+            }
+        }
+    }
+
     var level: Level
     /// Worst account, e.g. "work 72%".
     var leading: String?
@@ -52,7 +65,7 @@ struct IslandGlance: Equatable, Sendable {
 
         let counted = accounts.filter { totalVendors.contains($0.vendor) && $0.shortUsed != nil }
         let total = !counted.isEmpty
-        let sum = counted.reduce(0) { $0 + percent($1.shortUsed ?? 0) }
+        let sum = counted.reduce(0) { $0 + percent(effectiveShort($1)) }
         let leading = total ? "\(sum)/\(counted.count * 100)%" : worst.map(label)
         let reset = total ? counted.compactMap(\.shortResetAt).filter { $0 > now }.min() : worst?.resetAt
         let trailing: String?
@@ -67,6 +80,15 @@ struct IslandGlance: Equatable, Sendable {
             : worst.map { label($0) + " used" } ?? "No usage reported"
         if broken > 0 { spoken += ", \(broken) need sign-in" }
         return IslandGlance(level: level, leading: leading, trailing: trailing, accessibility: spoken)
+    }
+
+    /// Shortest window, unless a longer window is nearly full: wk 100% with 5h 0%
+    /// still means the account cannot be used now. (Units differ between windows,
+    /// so only a blocking long window overrides.)
+    private static func effectiveShort(_ a: Account) -> Double {
+        let short = a.shortUsed ?? 0
+        guard let top = a.used, top >= criticalAt else { return short }
+        return max(short, top)
     }
 
     private static func label(_ a: Account) -> String {

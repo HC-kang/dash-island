@@ -66,6 +66,20 @@ enum IslandGlanceSuite {
             try assertEqual(g.level, .warning)            // rim still follows the worst account (a at 90%)
             try assertEqual(g.accessibility, "122 of 300 percent used across 3 accounts")
         }
+        f += check("total mode: a nearly full longer window overrides an empty short one") {
+            // wk 100% + 5h 0%: the account cannot be used, so it counts as full.
+            let g = IslandGlance.make(accounts: [
+                A(title: "a", used: 1.0, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.0, shortResetAt: nil),
+                A(title: "b", used: 0.6, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.1, shortResetAt: nil),
+            ], now: now, totalVendors: ["claude"])
+            try assertEqual(g.leading, "110/200%")  // a: 100 (blocked), b: 10 (wk 60% is not binding)
+        }
+        f += check("ears: auto shows them only without a physical notch") {
+            try assertEqual(IslandGlance.EarsMode.auto.shows(hasNotch: false), true)
+            try assertEqual(IslandGlance.EarsMode.auto.shows(hasNotch: true), false)
+            try assertEqual(IslandGlance.EarsMode.always.shows(hasNotch: true), true)
+            try assertEqual(IslandGlance.EarsMode.never.shows(hasNotch: false), false)
+        }
         f += check("total mode leaves out accounts with nothing reported") {
             let g = IslandGlance.make(accounts: [
                 A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.40, shortResetAt: nil),

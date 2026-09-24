@@ -339,7 +339,8 @@ struct IslandRootView: View {
     private static let criticalColor = Color(red: 1.0, green: 0.32, blue: 0.30)
 
     private var earsVisible: Bool {
-        preferences.glanceEars && !model.compactHidden && glance.leading != nil
+        preferences.glanceEarsMode.shows(hasNotch: model.notch.hasNotch)
+            && !model.compactHidden && glance.leading != nil
     }
 
     private var compactBodySize: CGSize {
@@ -531,8 +532,11 @@ private struct IslandReveal: ViewModifier, Animatable {
 
     func body(content: Content) -> some View {
         let t = CGFloat(min(max(progress, 0), 1))
-        let w = start.width + (end.width - start.width) * t
-        let h = start.height + (end.height - start.height) * t
+        // Fully revealed: mask nothing, so hover tips can hang below the black body.
+        // (Same view structure at every progress, so content state is kept.)
+        let open = t >= 0.999
+        let w = open ? 100_000 : start.width + (end.width - start.width) * t
+        let h = open ? 100_000 : start.height + (end.height - start.height) * t
         let radius = min(26, max(11, h * 0.40))
         return content.mask(alignment: .top) {
             IslandShape(bottomRadius: radius)
