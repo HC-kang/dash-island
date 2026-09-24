@@ -8,6 +8,11 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
     private var displayedAccountID: AccountID?
     private var localMonitor: Any?
     private var globalMonitor: Any?
+    /// Bumped by every show/close so a fade-out that finishes late does not
+    /// hide a panel that was reopened meanwhile.
+    private var fadeToken = 0
+    /// The panel drops this far from under the island while it fades in.
+    private static let slide: CGFloat = 10
 
     private init() {
         let panel = DetailWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 620),
@@ -47,6 +52,9 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
         displayedAccountID = model.id
         window.title = "\(model.title) usage"
         window.contentViewController = NSHostingController(rootView: UsageDetailView(initial: model).id(model.id))
+        fadeToken += 1
+        let wasVisible = window.isVisible && isOpen
+        var target = window.frame
         let screen = DisplayInfo.currentScreen() ?? NSScreen.main
         if let screen {
             let visible = screen.visibleFrame.insetBy(dx: 12, dy: 12)
@@ -55,7 +63,7 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
             let height = min(720, max(280, top - visible.minY))
             let width = min(400, visible.width)
             let x = min(max(notch.anchoredCenterX - width / 2, visible.minX), visible.maxX - width)
-            window.setFrame(NSRect(x: x, y: max(visible.minY, top - height), width: width, height: height), display: true)
+            target = NSRect(x: x, y: max(visible.minY, top - height), width: width, height: height)
         }
         if !isOpen {
             localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -65,28 +73,75 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
                 if event.window !== self?.window { self?.close() }
                 return event
             }
-            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-                Task { @MainActor in self?.close() }
+            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                // When the app is not active, a click on the island arrives here
+                // too. Closing then made the widget's toggle reopen the panel.
+                let left = event.type == .leftMouseDown
+                let point = NSEvent.mouseLocation
+                Task { @MainActor in
+                    if !(left && Self.islandContains(point)) { self?.close() }
+                }
             }
         }
         isOpen = true
         NotificationCenter.default.post(name: .dashIslandDetailsOpenChanged, object: true)
         NSApp.activate(ignoringOtherApps: true)
+        guard !wasVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            window.setFrame(target, display: true)
+            window.alphaValue = 1
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        window.alphaValue = 0
+        window.setFrame(target.offsetBy(dx: 0, dy: Self.slide), display: false)
         window.makeKeyAndOrderFront(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1)
+            window.animator().alphaValue = 1
+            window.animator().setFrame(target, display: true)
+        }
+    }
+
+    private static func islandContains(_ point: NSPoint) -> Bool {
+        NSApp.windows.contains { $0 is BorderlessFloatingWindow && $0.isVisible && $0.frame.contains(point) }
     }
 
     override func close() {
-        clear()
-        super.close()
+        guard let window, isOpen, window.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else {
+            clear()
+            super.close()
+            return
+        }
+        // Monitors and the island state release now; the content stays mounted
+        // until the fade ends so the panel does not empty before it disappears.
+        clear(unmount: false)
+        fadeToken += 1
+        let token = fadeToken
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            window.animator().alphaValue = 0
+            window.animator().setFrame(window.frame.offsetBy(dx: 0, dy: Self.slide / 2), display: true)
+        }, completionHandler: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.fadeToken == token else { return }
+                self.window?.contentViewController = nil
+                self.window?.orderOut(nil)
+                self.window?.alphaValue = 1
+            }
+        })
     }
 
     func windowWillClose(_ notification: Notification) { clear() }
 
-    private func clear() {
+    private func clear(unmount: Bool = true) {
         guard isOpen else { return }
         // Unmount the view: its 15 s `.task` reload otherwise keeps reading usage
         // history while the panel is closed. `show` builds a fresh view.
-        window?.contentViewController = nil
+        if unmount { window?.contentViewController = nil }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         localMonitor = nil
