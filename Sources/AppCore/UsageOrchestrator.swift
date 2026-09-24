@@ -1303,7 +1303,6 @@ final class UsageOrchestrator: ObservableObject {
     /// Short under-widget line (truncated by the cell).
     nonisolated static func caption(for error: UsageError?, vendorID: VendorID = "") -> String? {
         guard let error else { return nil }
-        let kind = UsageSnapshotMerge.failureKind(error)
         switch error {
         case .authRequired:
             switch vendorID {
@@ -1319,20 +1318,25 @@ final class UsageOrchestrator: ObservableObject {
             return message.isEmpty ? "network error" : message
         case .parse(let message):
             return message.isEmpty ? "parse error" : message
-        case .unavailable(let message):
-            let lower = message.lowercased()
-            if lower.contains("setup-token") || lower.contains("user:profile") {
-                return "need browser login"
-            }
+        case .unavailable:
+            // One classification (UnavailableReason) for severity and copy (core-10).
+            switch error.unavailableReason ?? .temporary {
+            case .needsLogin: return "need browser login"
             // Self-scheduled retry: rings stay, no red line. Notice/tooltip carry the age.
-            if lower.contains("refresh pending") { return nil }
-            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
-                return "token quiet"
+            case .refreshPending: return nil
+            case .tokenQuiet, .temporary: return "token quiet"
             }
-            if lower.contains("refresh") {
-                return "token quiet"
-            }
-            return message.isEmpty ? "unavailable" : message
+        }
+    }
+
+    /// The one command that signs this account in again from a terminal.
+    nonisolated static func loginCommand(vendorID: VendorID, home: String) -> String {
+        switch vendorID {
+        case "claude": return "CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai"
+        case "codex": return "CODEX_HOME='\(home)' codex login"
+        case "grok": return "GROK_HOME='\(home)' grok login --oauth"
+        case "agy": return "HOME='\(home)' agy"
+        default: return ""
         }
     }
 
@@ -1344,7 +1348,6 @@ final class UsageOrchestrator: ObservableObject {
     ) -> String? {
         guard let error else { return nil }
         let home = CredentialStore.directoryURL(for: credentialRef).path
-        let kind = UsageSnapshotMerge.failureKind(error)
         switch error {
         case .authRequired:
             switch vendorID {
@@ -1392,28 +1395,25 @@ final class UsageOrchestrator: ObservableObject {
         case .parse(let message):
             return message.isEmpty ? "Could not parse vendor response." : message
         case .unavailable(let message):
-            let lower = message.lowercased()
-            if lower.contains("setup-token") || lower.contains("user:profile") {
+            switch error.unavailableReason ?? .temporary {
+            case .needsLogin:
                 return """
                 \(message)
                 Widget menu → Reauthenticate (browser login for this account only).
-                CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
+                \(loginCommand(vendorID: vendorID, home: home))
                 """
-            }
-            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
-                return """
-                \(message)
-                Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
-                If this persists for hours, widget menu → Reauthenticate this account only.
-                """
-            }
-            if lower.contains("refresh") {
+            case .refreshPending:
                 return """
                 \(message)
                 Soft failure — will retry on the next poll. Last-good rings stay if present.
                 """
+            case .tokenQuiet, .temporary:
+                return """
+                \(message.isEmpty ? "Temporarily unavailable." : message)
+                Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
+                If this persists for hours, widget menu → Reauthenticate this account only.
+                """
             }
-            return message.isEmpty ? "Temporarily unavailable." : message
         }
     }
 
