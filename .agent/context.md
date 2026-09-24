@@ -663,3 +663,15 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Claude tests never call `fetchUsage` (it deletes a Keychain item). Drive `refreshThenProbe` / `refreshManagedCredentialsDetailed` inside a sandbox that swaps the gate (throwaway defaults) and `backgroundPing` (counter). A token-host 429/5xx test is now safe that way.
 - adapters-02: `CredentialStore.acquireRefreshLock` (`flock` on `<folder>/.dash-refresh.lock`, non-blocking tries, 20s, nil on timeout/cancel; unwritable folder runs unlocked). Codex/Grok hold it across read → POST → write and adopt the file when its refresh token differs from `knownRefreshToken` (the caller's read). Claude holds it from its post-gate re-read; its existing re-read/adopt logic covers a rotated file, so no extra comparison was added.
 - account-cli takes no lock: vendor CLIs cannot honor it. The app yields to a newer file (README). Agy has no lock (Google refresh tokens rarely rotate; not in scope).
+
+## Phase 2 UI + core (2026-09-24, branch feat/improve-phase2)
+
+- E2E: a scratch driver (`drive info/hover/away/click/scroll/shot`) plus `screencapture -v` + ffmpeg frames checks transitions. The user works on the same Mac: wait for an idle pointer, then restore its position. Never leave `DASHISLAND_DEMO=1` running.
+- SwiftUI `ScrollView` on macOS is NSScrollView-backed; preference keys set inside do not reach the outside. The scroll cue uses an NSViewRepresentable probe on the clip view, and writes state on the next runloop (writes during layout are dropped).
+- Island transitions: `IslandReveal` masks chrome and content only while progress < 0.999. A mask at rest clipped hover balloons. Wings shrink through an `IslandShape` mask so corners stay round.
+- Ears cover menu-bar widgets on notched displays. `EarsMode.auto` shows them only on displays without a notch; the expanded island shows the glance in its top band instead.
+- Total mode: each account adds its shortest own window, unless its longer window is ≥ 0.95 (week 100% + 5h 0% must not read 0%). Model-scoped extras do not count.
+- Localization without Xcode: `swiftc -emit-localized-strings` extracts keys; keys are the English copy; `Locale.ui` follows the running language.
+- Collector: the app reads the interpreter from the LaunchAgent plist and runs `connect-usage.py --update`. The user is never asked to reconnect. `--update` never touches CLI configs.
+- `isDue` floors a network retry at the vendor `minPoll` (agy 300 s). Kept on purpose: a timed-out request may still have reached the vendor. The log prints `max(backoff, minPoll)`.
+- core-07: `UsageOrchestrator` pure helpers live in `+Schedule`, `+LastGood`, `+Format`; `PollGenerations.swift` holds the generation and status types.
