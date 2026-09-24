@@ -38,9 +38,7 @@ import AppKit
     }
 }
 SWIFT
-swiftc -parse-as-library -target arm64-apple-macos13.0 -O \
-    -framework SwiftUI -framework AppKit -framework Combine -framework Security \
-    -framework ServiceManagement -framework CoreGraphics \
-    $(find Sources -name '*.swift' ! -path 'Sources/App/App.swift' | sort) \
-    "$CHECK_DIR/Check.swift" -o "$CHECK_DIR/check"
+# shellcheck source=scripts/check-build.sh
+. scripts/check-build.sh
+compile_check "$CHECK_DIR/Check.swift" "$CHECK_DIR/check"
 "$CHECK_DIR/check"
