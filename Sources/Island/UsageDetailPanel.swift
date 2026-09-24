@@ -246,8 +246,12 @@ private struct UsageDetailView: View {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.system(size: 11)).foregroundStyle(Color.orange)
             }
+            ForEach([model.paceLine(now: Date()), model.budgetLine(now: Date())].compactMap { $0 }, id: \.self) { line in
+                Label(line, systemImage: "gauge.with.dots.needle.33percent")
+                    .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.72))
+            }
             if let date = model.lastSuccessAt {
-                Text("Last quota reading \(date.formatted(date: .abbreviated, time: .shortened))")
+                Text("Last quota reading \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui)))")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
@@ -278,7 +282,7 @@ private struct UsageDetailView: View {
     private func resetLabel(_ window: WindowUsage) -> some View {
         HStack {
             if let date = window.resetAt {
-                Text(date > Date() ? "Resets \(date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))" : "Awaiting next reading")
+                Text(date > Date() ? "Resets \(date.formatted(.dateTime.month(.abbreviated).day().hour().minute().locale(.ui)))" : "Awaiting next reading")
             } else { Text("Reset time unavailable") }
             Spacer()
         }.font(.system(size: 11)).foregroundStyle(.secondary)
@@ -351,7 +355,7 @@ private struct UsageDetailView: View {
                 Text(liveTracking ? "Attributed by the account ID reported with each call. Earlier unlinked history is excluded."
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
                 if liveTracking, let date = local.snapshots[sourceKey]?.events.map(\.date).max() {
-                    Text("Last captured call \(date.formatted(date: .abbreviated, time: .shortened))")
+                    Text("Last captured call \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui)))")
                 }
                 Text(provider == "grok" ? "Values reported by Grok are not subscription charges."
                      : "API estimates use standard rates, not subscription charges.")
@@ -382,11 +386,11 @@ private struct UsageDetailView: View {
                         .fill(point.tokens == 0 ? Color.white.opacity(0.06) : accent.opacity(0.7))
                         .frame(maxWidth: .infinity)
                         .frame(height: max(2, 42 * Double(point.tokens) / Double(peak)))
-                        .help("\(point.date.formatted()) · \(Self.tokens(point.tokens)) tokens")
+                        .help("\(point.date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui))) · \(Self.tokens(point.tokens)) tokens")
                 }
             }.frame(height: 42, alignment: .bottom)
             HStack {
-                Text(period == .today ? "00:00" : points.first?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")
+                Text(period == .today ? "00:00" : points.first?.date.formatted(.dateTime.month(.abbreviated).day().locale(.ui)) ?? "")
                 Spacer()
                 Text(period == .today ? "24:00" : "Today")
             }.font(.system(size: 9)).foregroundStyle(.secondary)

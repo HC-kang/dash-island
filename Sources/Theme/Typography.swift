@@ -11,3 +11,9 @@ enum Typography {
     static let settingsSection = Font.system(size: 10, weight: .semibold)
     static let settingsRow = Font.system(size: 12, weight: .medium)
 }
+
+extension Locale {
+    /// UI copy is English, so dates follow it instead of the system region
+    /// (a Korean system showed "9월 24일" inside English sentences).
+    static let ui = Locale(identifier: "en_US")
+}

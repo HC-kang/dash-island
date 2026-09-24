@@ -15,6 +15,7 @@ struct NotchBandChrome: View {
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
+        f.locale = .ui
         f.unitsStyle = .abbreviated
         return f
     }()
@@ -164,6 +165,7 @@ private struct FetchStatusPopover: View {
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
+        f.locale = .ui
         f.unitsStyle = .abbreviated
         return f
     }()

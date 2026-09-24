@@ -12,6 +12,7 @@ struct TestMain {
         failures += IslandGeometrySuite.run()
         failures += IslandGlanceSuite.run()
         failures += AlertEngineSuite.run()
+        failures += UsagePaceSuite.run()
         failures += AccountsPersistenceSuite.run()
         failures += OrchestratorDueSuite.run()
         failures += UsageProjectionSuite.run()
