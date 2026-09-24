@@ -888,7 +888,12 @@ final class UsageOrchestrator: ObservableObject {
         if case .network = snapshot.error {
             let streak = (networkFailureStreak[accountID] ?? 0) + 1
             networkFailureStreak[accountID] = streak
-            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(Self.transientRetryWait(streak: streak)))s")
+            // isDue floors every interval at the vendor's minPoll, so log the wait that
+            // actually applies (agy: 300 s), not the raw backoff step.
+            let vendor = accountStore.accounts.first { $0.id == accountID }?.vendorID ?? ""
+            let minPoll = TimeInterval(VendorRegistry.adapter(for: vendor)?.minPollSeconds ?? 300)
+            let wait = max(Self.transientRetryWait(streak: streak), minPoll)
+            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(wait))s")
         } else {
             networkFailureStreak[accountID] = nil
         }
