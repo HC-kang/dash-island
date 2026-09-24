@@ -287,10 +287,19 @@ struct AccountWidget: View {
     @ViewBuilder
     private var captionSlot: some View {
         if model.errorCaption != nil || model.noticeCaption != nil {
-            TimelineView(.periodic(from: .now, by: 15)) { context in
-                let isError = model.errorCaption != nil
-                let text = liveShortCaption(now: context.date)
-                captionLabel(text, isError: isError)
+            if model.needsReauth, let account = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+                // A truncated "reauth: codex log…" told users what to type; offer the action.
+                Button { AccountChromeActions.reauthenticate(account: account) } label: {
+                    captionLabel("Reauthenticate ›", isError: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Reauthenticate \(account.label)")
+            } else {
+                TimelineView(.periodic(from: .now, by: 15)) { context in
+                    let isError = model.errorCaption != nil
+                    let text = liveShortCaption(now: context.date)
+                    captionLabel(text, isError: isError)
+                }
             }
         } else {
             Color.clear

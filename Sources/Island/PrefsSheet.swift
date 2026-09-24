@@ -75,7 +75,7 @@ struct PrefsSheet: View {
                             .font(Typography.settingsRow)
                             .foregroundStyle(.white.opacity(0.88))
                         Spacer()
-                        Toggle("", isOn: Binding(
+                        Toggle("Launch at Login", isOn: Binding(
                             get: { launchAtLogin.isEnabled },
                             set: { launchAtLogin.setEnabled($0) }
                         ))

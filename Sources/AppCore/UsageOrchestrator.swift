@@ -1273,7 +1273,8 @@ final class UsageOrchestrator: ObservableObject {
             isAwaitingFirstSample: awaiting,
             health: healthPair.health,
             healthTooltip: healthPair.tooltip,
-            projectedPrimaryFraction: projected
+            projectedPrimaryFraction: projected,
+            needsReauth: err == .authRequired
         )
     }
 
