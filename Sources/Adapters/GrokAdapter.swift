@@ -120,7 +120,7 @@ struct GrokAdapter: VendorAdapter {
         // A busy token host is soft: the current access may still work, so probe.
         var quiet: UsageSnapshot?
         if !Self.isAccessTokenFresh(session) {
-            switch await Self.refreshManagedSession(grokHome: dir) {
+            switch await Self.refreshManagedSession(grokHome: dir, knownRefreshToken: session.refreshToken) {
             case .success(let next):
                 session = next
                 Log.auth.info("refresh vendor=grok outcome=ok trigger=proactive ref=\(String(ref.prefix(8)))")
@@ -138,7 +138,7 @@ struct GrokAdapter: VendorAdapter {
         // Reactive: billing 401/403 → one forced refresh + retry.
         if case .authRequired = snap.error {
             if let quiet { return quiet }
-            switch await Self.refreshManagedSession(grokHome: dir) {
+            switch await Self.refreshManagedSession(grokHome: dir, knownRefreshToken: session.refreshToken) {
             case .success(let next):
                 snap = await Self.probeUsage(session: next, fetchedAt: Date())
                 if snap.error == nil {
@@ -361,7 +361,13 @@ struct GrokAdapter: VendorAdapter {
     }
 
     /// Refresh managed auth.json via OIDC token endpoint. Rotates refresh_token.
-    static func refreshManagedSession(grokHome: URL) async -> RefreshOutcome {
+    /// `knownRefreshToken` is the one the caller read: a different one in the
+    /// file means `grok` (account-cli) rotated it, so adopt and skip the POST.
+    static func refreshManagedSession(grokHome: URL, knownRefreshToken: String? = nil) async -> RefreshOutcome {
+        guard let lock = await CredentialStore.acquireRefreshLock(in: grokHome) else {
+            return .unavailable("token quiet — refresh busy", retryAt: nil)
+        }
+        defer { lock.release() }
         guard var session = readSession(grokHome: grokHome),
               let refresh = session.refreshToken, !refresh.isEmpty,
               let clientID = session.oidcClientID, !clientID.isEmpty,
@@ -372,6 +378,10 @@ struct GrokAdapter: VendorAdapter {
               var entry = root[mapKey] as? [String: Any]
         else {
             return .skipped
+        }
+        if let knownRefreshToken, refresh != knownRefreshToken {
+            Log.auth.info("refresh vendor=grok outcome=adopted ref=\(String(grokHome.lastPathComponent.prefix(8)))")
+            return .success(session)
         }
 
         var req = URLRequest(url: oauthTokenURL)

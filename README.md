@@ -96,6 +96,8 @@ To connect account tracking for both ordinary CLI sessions and Orca sessions, ru
 
 For an explicitly selected account in either a normal terminal or an Orca terminal, run `"$HOME/Library/Application Support/DashIsland/tracking/account-cli" <account-id-prefix> [CLI arguments]`. Running it without arguments lists accounts; Grok/Antigravity empty states also provide “Copy command for this account”. This selects the account's CLI home and removes competing API-key and provider-routing variables (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY`). Other variables, proxies, and files outside that home stay shared. Antigravity reads its login only from `$HOME`, so the whole `agy` session runs with the account folder as `HOME`: git keeps your global config through `GIT_CONFIG_GLOBAL`, but other tools the agent runs do not find their `~` settings. Plain Grok/Antigravity launches outside that home are not attributed to the selected account.
 
+A CLI launched through `account-cli` and the app share the account folder, and both can rotate its refresh token. The app takes an advisory lock (`.dash-refresh.lock` in the folder) and reads the credential file again before each Codex, Grok or Claude token refresh. If the refresh token in the file is newer than the one the app last read, the app uses that file and does not refresh. `account-cli` takes no lock, because the vendor CLIs do not know it. The app yields to the newer file instead.
+
 To undo the connection, run `python3 scripts/connect-usage.py --disconnect`. It removes only the settings it added: a value that existed before connecting comes back, and later edits stay. It also stops and removes the LaunchAgent and deletes the collector token. Captured usage and config backups stay in `tracking/`.
 
 The connector writes the local collector token into each CLI config file (`config.toml`, `settings.json`) and sets those files to mode 0600. The token only allows writes to the loopback collector, but do not commit these files to a dotfiles repository. A symlinked config file is written through its link.
@@ -268,6 +270,8 @@ cp -R build/DashIsland.app /Applications/
 CLI 설정 파일(`config.toml`, `settings.json`)에는 로컬 수집기 토큰이 기록되고, 파일 권한은 0600이 됩니다. 이 토큰은 루프백 수집기에 쓰는 권한만 있습니다. 그래도 이 파일들을 dotfiles 저장소에 커밋하지 마세요. 심볼릭 링크인 설정 파일은 링크 대상에 씁니다.
 
 특정 계정으로 CLI를 실행하려면 `"$HOME/Library/Application Support/DashIsland/tracking/account-cli" <계정-ID-접두어> [CLI 인수]`를 실행합니다. 이 명령은 계정의 CLI 홈을 선택하고, API 키와 라우팅 변수(`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY`)를 제거합니다. 그 밖의 환경 변수, 프록시, 홈 밖의 파일은 공유됩니다. Antigravity는 `$HOME`에서만 로그인을 찾습니다. 그래서 `agy` 세션 전체가 계정 폴더를 `HOME`으로 봅니다. git은 `GIT_CONFIG_GLOBAL`로 사용자 전역 설정을 유지하지만, 에이전트가 실행하는 다른 도구는 `~` 설정을 찾지 못합니다.
+
+`account-cli`로 실행한 CLI와 앱은 같은 계정 폴더를 사용하고, 둘 다 refresh token을 교체할 수 있습니다. 앱은 Codex, Grok, Claude 토큰을 갱신하기 전에 폴더의 권고 잠금(`.dash-refresh.lock`)을 잡고 자격 증명 파일을 다시 읽습니다. 파일의 refresh token이 앱이 마지막으로 읽은 것과 다르면, 앱은 그 파일을 사용하고 갱신하지 않습니다. `account-cli`는 잠금을 잡지 않습니다. 벤더 CLI가 그 잠금을 모르기 때문입니다. 대신 앱이 더 새로운 파일에 양보합니다.
 
 #### Claude 인증 (중요)
 

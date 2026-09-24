@@ -973,6 +973,13 @@ struct ClaudeAdapter: VendorAdapter {
             return .deferred(waitUntil)
         }
 
+        // Held across read → POST → write: a second app copy refreshing this
+        // folder finishes first, and the read below adopts what it wrote.
+        guard let lock = await CredentialStore.acquireRefreshLock(in: configDir) else {
+            return .deferred(Date().addingTimeInterval(60))
+        }
+        defer { lock.release() }
+
         // Fresh read after waiting — another poll may have healed the file.
         guard let data = try? Data(contentsOf: path),
               let creds = parseCredentialsJSON(data)

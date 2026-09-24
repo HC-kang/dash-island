@@ -36,7 +36,7 @@ enum AdapterRefreshSuite {
             let file = home.appendingPathComponent("auth.json")
             try assertEqual(CodexAdapter.readCredentials(codexHome: home)?.refreshToken, "rt-new")
             try assertEqual(mode(file), 0o600)
-            try assertEqual(entries(home), ["auth.json"])
+            try assertEqual(entries(home), [".dash-refresh.lock", "auth.json"])
         }
 
         failures += await checkAsync("Codex usage 401 → refresh → retry with the new access") {
@@ -101,7 +101,7 @@ enum AdapterRefreshSuite {
             try assertEqual(session.refreshToken, "rt-new")
             try assertEqual(GrokAdapter.readSession(grokHome: home)?.refreshToken, "rt-new")
             try assertEqual(mode(home.appendingPathComponent("auth.json")), 0o600)
-            try assertEqual(entries(home), ["auth.json"])
+            try assertEqual(entries(home), [".dash-refresh.lock", "auth.json"])
         }
 
         failures += await checkAsync("Grok billing 401 → refresh → retry with the new access") {
@@ -168,7 +168,7 @@ enum AdapterRefreshSuite {
                 try assertEqual(creds.refreshToken, "rt-new")
                 try assertEqual(ClaudeAdapter.readCredentialsFile(configDir: dir)?.refreshToken, "rt-new")
                 try assertEqual(mode(dir.appendingPathComponent(".credentials.json")), 0o600)
-                try assertEqual(entries(dir), [".credentials.json"])
+                try assertEqual(entries(dir), [".credentials.json", ".dash-refresh.lock"])
             }
         }
 
@@ -254,7 +254,91 @@ enum AdapterRefreshSuite {
             guard case .needsReauth = result else { throw TestFailure(description: "expected needsReauth, got \(result)") }
         }
 
+        // MARK: Folder lock (adapters-02): account-cli and the app share each folder
+
+        failures += await checkAsync("refresh lock excludes a second holder until release") {
+            let dir = try tempDir("lock")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            guard let held = await CredentialStore.acquireRefreshLock(in: dir) else {
+                throw TestFailure(description: "first holder got no lock")
+            }
+            let blocked = await CredentialStore.acquireRefreshLock(in: dir, timeout: 0.3)
+            try assertTrue(blocked == nil, "second holder must wait")
+            try assertEqual(mode(dir.appendingPathComponent(".dash-refresh.lock")), 0o600)
+            held.release()
+            let next = await CredentialStore.acquireRefreshLock(in: dir, timeout: 0.3)
+            try assertTrue(next != nil, "free after release")
+            next?.release()
+        }
+
+        failures += await checkAsync("Codex adopts a refresh token the CLI rotated since the poll read it") {
+            let home = try codexHome(lastRefresh: nil)
+            defer { try? FileManager.default.removeItem(at: home) }
+            let outcome = await StubHTTP.with(status: 500, body: "") {
+                await holdLockWhileRotating(home, file: "auth.json",
+                    to: #"{"tokens":{"access_token":"at-cli","refresh_token":"rt-cli"}}"#) {
+                    await CodexAdapter.refreshManagedCredentials(codexHome: home, force: true, knownRefreshToken: "rt-old")
+                }
+            }
+            try assertEqual(outcome, .success(CodexAdapter.CodexCreds(
+                accessToken: "at-cli", refreshToken: "rt-cli", accountID: nil,
+                filePath: home.appendingPathComponent("auth.json")
+            )))
+            try assertEqual(StubHTTP.requestCount, 0)
+        }
+
+        failures += await checkAsync("Grok adopts a refresh token the CLI rotated since the poll read it") {
+            let home = try grokHome(expiresAt: "2020-01-01T00:00:00Z")
+            defer { try? FileManager.default.removeItem(at: home) }
+            let cli = #"{"https://auth.x.ai::client-1":{"key":"at-cli","refresh_token":"rt-cli","expires_at":"2099-01-01T00:00:00Z"}}"#
+            let outcome = await StubHTTP.with(status: 500, body: "") {
+                await holdLockWhileRotating(home, file: "auth.json", to: cli) {
+                    await GrokAdapter.refreshManagedSession(grokHome: home, knownRefreshToken: "rt-old")
+                }
+            }
+            guard case .success(let session) = outcome else {
+                throw TestFailure(description: "expected adopted session, got \(outcome)")
+            }
+            try assertEqual(session.accessToken, "at-cli")
+            try assertEqual(StubHTTP.requestCount, 0)
+        }
+
+        failures += await checkAsync("Claude waits for the folder lock and adopts the newer file") {
+            try await withClaudeSandbox { dir, pings in
+                let later = Int(Date().addingTimeInterval(8 * 3600).timeIntervalSince1970 * 1000)
+                let cli = #"{"claudeAiOauth":{"accessToken":"at-cli","refreshToken":"rt-cli","expiresAt":\#(later)}}"#
+                let outcome = await StubHTTP.with(status: 500, body: "") {
+                    await holdLockWhileRotating(dir, file: ".credentials.json", to: cli) {
+                        await ClaudeAdapter.refreshManagedCredentialsDetailed(configDir: dir, failedAccessToken: "at-old")
+                    }
+                }
+                guard case .adopted(let creds) = outcome else {
+                    throw TestFailure(description: "expected adopted, got \(outcome)")
+                }
+                try assertEqual(creds.refreshToken, "rt-cli")
+                try assertEqual(StubHTTP.requestCount, 0)
+                try assertEqual(pings(), 0)
+            }
+        }
+
         return failures
+    }
+
+    /// Another holder (a second app copy) has the folder lock while `refresh`
+    /// starts, rotates `file`, then lets go. Without the lock, `refresh` POSTs
+    /// the spent token first.
+    private static func holdLockWhileRotating<T: Sendable>(
+        _ dir: URL,
+        file: String,
+        to json: String,
+        _ refresh: @escaping @Sendable () async -> T
+    ) async -> T {
+        let holder = await CredentialStore.acquireRefreshLock(in: dir)
+        let waiting = Task { await refresh() }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? Data(json.utf8).write(to: dir.appendingPathComponent(file), options: .atomic)
+        holder?.release()
+        return await waiting.value
     }
 
     // MARK: - Helpers
