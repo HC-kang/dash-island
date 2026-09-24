@@ -64,14 +64,16 @@ struct IslandRootView: View {
         ZStack(alignment: .top) {
             // Must not participate in expand/collapse animations — otherwise the
             // notch fill rides the size spring and looks like it bobs vertically.
-            if preferences.glanceEars && !showExpandedShell && !model.compactHidden {
-                compactEars
-            }
             compactNotchBase
                 .opacity(model.compactHidden ? 0 : 1)
                 .allowsHitTesting(!showExpandedShell)
                 .accessibilityHidden(showExpandedShell || model.compactHidden)
                 .transaction { $0.animation = nil }
+            // Drawn over the pill (one silhouette, one rim); clicks fall through to it.
+            if earsVisible {
+                compactEars
+                    .transaction { $0.animation = nil }
+            }
 
             if showExpandedShell {
                 expandedChrome
@@ -196,6 +198,7 @@ struct IslandRootView: View {
                     fetching: orchestrator.loading && !showExpandedShell && !model.compactHidden
                 )
             )
+            .opacity(earsVisible ? 0 : 1)
         }
         .frame(width: bodyW, height: bodyH, alignment: .top)
         // Fill parent width only for centering; height stays notch-sized (not model.size.height).
@@ -325,39 +328,57 @@ struct IslandRootView: View {
     private static let warningColor = Color(red: 1.0, green: 0.72, blue: 0.20)
     private static let criticalColor = Color(red: 1.0, green: 0.32, blue: 0.30)
 
-    /// Black wings on both sides of the pill: worst account and its reset (or sign-in count).
-    /// Visual only — clicks fall through to the menu bar beneath.
+    private var earsVisible: Bool {
+        preferences.glanceEars && !showExpandedShell && !model.compactHidden && glance.leading != nil
+    }
+
+    /// Wings on both sides of the pill, drawn as one black silhouette with one rim.
+    /// Both wings take the wider label's width, so the shape stays symmetric and the
+    /// middle gap sits exactly on the pill. Visual only — clicks fall through.
     private var compactEars: some View {
         let g = glance
         let notch = model.notch
         let bodyW = notch.width + bodyOutset * 2
+        let bodyH = notch.height + bodyOutset
+        let radius = cornerRadius(forHeight: bodyH)
         let dot: Color = g.level == .critical ? Self.criticalColor
             : g.level == .warning ? Self.warningColor : IslandColor.liveTeal
-        // Two equal side slots around a pill-wide gap keep the gap centered on the pill
-        // whatever the wing widths. fixedSize lets the row overflow the pill-wide
-        // compact root. Each wing tucks ~10pt under the pill so the three read as one.
-        let slot: CGFloat = 220
+        let sizing = ZStack {
+            earLabel(g.leading ?? "", dot: dot)
+            earLabel(g.trailing ?? "", dot: nil)
+        }.hidden()
         return HStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                if let leading = g.leading {
-                    earLabel(leading, dot: dot).padding(.leading, 12).padding(.trailing, 20)
-                        .background(UnevenRoundedRectangle(bottomLeadingRadius: 10).fill(Color.black))
-                }
+            ZStack(alignment: .trailing) {
+                sizing
+                if let leading = g.leading { earLabel(leading, dot: dot) }
             }
-            .frame(width: slot)
-            Color.clear.frame(width: bodyW - 20)
-            HStack(spacing: 0) {
-                if let trailing = g.trailing {
-                    earLabel(trailing, dot: nil).padding(.leading, 20).padding(.trailing, 12)
-                        .background(UnevenRoundedRectangle(bottomTrailingRadius: 10).fill(Color.black))
-                }
-                Spacer(minLength: 0)
+            .padding(.leading, 14).padding(.trailing, 12)
+            Color.clear.frame(width: bodyW)
+            ZStack(alignment: .leading) {
+                sizing
+                if let trailing = g.trailing { earLabel(trailing, dot: nil) }
             }
-            .frame(width: slot)
+            .padding(.leading, 12).padding(.trailing, 14)
+        }
+        .frame(height: bodyH)
+        .background {
+            ZStack {
+                IslandShape(bottomRadius: radius).fill(Color.black)
+                NotchRimGlow(
+                    bottomRadius: radius,
+                    lineWidth: 1.35,
+                    peakOpacity: 0.95,
+                    baseOpacity: 0.28,
+                    accent: compactRimColor,
+                    frameInterval: MotionPolicy.rimFrameInterval(
+                        motion,
+                        expanded: false,
+                        fetching: orchestrator.loading && !showExpandedShell && !model.compactHidden
+                    )
+                )
+            }
         }
         .fixedSize()
-        .frame(height: notch.height, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
