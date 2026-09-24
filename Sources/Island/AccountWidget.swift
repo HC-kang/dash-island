@@ -156,6 +156,23 @@ struct AccountWidget: View {
         .accessibilityHint("Click to open or close usage details")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { UsageDetailPanel.shared.toggle(model: model) }
+        .accessibilityAction(named: "Move left") { move(model.id, by: -1) }
+        .accessibilityAction(named: "Move right") { move(model.id, by: 1) }
+        .accessibilityAction(named: "Rename") {
+            if let a = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+                AccountChromeActions.rename(accountID: a.id, currentLabel: a.label)
+            }
+        }
+        .accessibilityAction(named: "Reauthenticate") {
+            if let a = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+                AccountChromeActions.reauthenticate(account: a)
+            }
+        }
+        .accessibilityAction(named: "Remove") {
+            if let a = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
+                AccountChromeActions.remove(accountID: a.id, label: a.label)
+            }
+        }
     }
 
     @ViewBuilder
@@ -170,9 +187,26 @@ struct AccountWidget: View {
                 AccountChromeActions.reauthenticate(account: account)
             }
             Divider()
+            // Reorder without dragging (keyboard / VoiceOver path, ui-10).
+            Button("Move Left") { move(account.id, by: -1) }
+                .disabled(index(of: account.id) == 0)
+            Button("Move Right") { move(account.id, by: 1) }
+                .disabled(index(of: account.id) == AccountStore.shared.accounts.count - 1)
+            Divider()
             Button("Remove…", role: .destructive) {
                 AccountChromeActions.remove(accountID: account.id, label: account.label)
             }
+        }
+    }
+
+    private func index(of id: AccountID) -> Int? {
+        AccountStore.shared.accounts.firstIndex { $0.id == id }
+    }
+
+    private func move(_ id: AccountID, by delta: Int) {
+        guard let from = index(of: id) else { return }
+        do { try AccountStore.shared.move(id: id, toIndex: from + delta) } catch {
+            Log.accounts.warn("reorder failed account=\(id.short) error=\(error.localizedDescription)")
         }
     }
 
