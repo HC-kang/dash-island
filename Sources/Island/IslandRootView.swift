@@ -70,16 +70,30 @@ struct IslandRootView: View {
                 .accessibilityHidden(showExpandedShell || model.compactHidden)
                 .transaction { $0.animation = nil }
             // Drawn over the pill (one silhouette, one rim); clicks fall through to it.
+            // They stay under the expanding body and only hide once it covers them, and
+            // come back at once on collapse, so the black never breaks.
             if earsVisible {
                 compactEars
-                    .transaction { $0.animation = nil }
+                    .opacity(showExpandedShell ? 0 : 1)
+                    .animation(showExpandedShell && !reduceMotion ? .linear(duration: 0.01).delay(0.38) : nil,
+                               value: showExpandedShell)
             }
 
             if showExpandedShell {
+                // The black body grows out of the compact silhouette and shrinks back
+                // into it: never faded, so the desktop never shows through mid-way.
                 expandedChrome
-                    .transition(shellTransition(insertY: -8, removeY: -40))
+                    .transition(reduceMotion ? .identity : .modifier(
+                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize),
+                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize)
+                    ))
+                // Content is clipped by the same growing mask, so no widget floats over
+                // the desktop outside the black while the body is still growing.
                 expandedContent
-                    .transition(shellTransition(insertY: -6, removeY: -44))
+                    .transition(reduceMotion ? .opacity : AnyTransition.modifier(
+                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize),
+                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize)
+                    ).combined(with: .opacity))
             }
         }
         .environment(\.islandMotion, motion)
@@ -198,7 +212,7 @@ struct IslandRootView: View {
                     fetching: orchestrator.loading && !showExpandedShell && !model.compactHidden
                 )
             )
-            .opacity(earsVisible ? 0 : 1)
+            .opacity(earsVisible && !showExpandedShell ? 0 : 1)
         }
         .frame(width: bodyW, height: bodyH, alignment: .top)
         // Fill parent width only for centering; height stays notch-sized (not model.size.height).
@@ -291,14 +305,6 @@ struct IslandRootView: View {
     }
 
     /// Reduce Motion: fade only, no slide.
-    private func shellTransition(insertY: CGFloat, removeY: CGFloat) -> AnyTransition {
-        if reduceMotion { return .opacity }
-        return .asymmetric(
-            insertion: .opacity.combined(with: .offset(y: insertY)),
-            removal: .opacity.combined(with: .offset(y: removeY))
-        )
-    }
-
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
         min(16, max(11, h * 0.40))
     }
@@ -329,7 +335,15 @@ struct IslandRootView: View {
     private static let criticalColor = Color(red: 1.0, green: 0.32, blue: 0.30)
 
     private var earsVisible: Bool {
-        preferences.glanceEars && !showExpandedShell && !model.compactHidden && glance.leading != nil
+        preferences.glanceEars && !model.compactHidden && glance.leading != nil
+    }
+
+    private var compactBodySize: CGSize {
+        CGSize(width: model.notch.width + bodyOutset * 2, height: model.notch.height + bodyOutset)
+    }
+
+    private var expandedBodySize: CGSize {
+        CGSize(width: model.expandedContentWidth, height: model.blackHeight)
     }
 
     /// Wings on both sides of the pill, drawn as one black silhouette with one rim.
@@ -493,6 +507,31 @@ struct IslandRootView: View {
                 orchestrator.onIslandExpanded()
                 try? await Task.sleep(nanoseconds: expandRefreshRepeatNs)
             }
+        }
+    }
+}
+
+/// Reveals the expanded black body through an island-shaped mask that grows from
+/// the compact pill (`start`) to the full body (`end`), top-centered.
+private struct IslandReveal: ViewModifier, Animatable {
+    var progress: Double
+    var start: CGSize
+    var end: CGSize
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let t = CGFloat(min(max(progress, 0), 1))
+        let w = start.width + (end.width - start.width) * t
+        let h = start.height + (end.height - start.height) * t
+        let radius = min(26, max(11, h * 0.40))
+        return content.mask(alignment: .top) {
+            IslandShape(bottomRadius: radius)
+                .frame(width: w, height: h)
+                .frame(maxWidth: .infinity, alignment: .top)
         }
     }
 }
