@@ -173,7 +173,7 @@ struct NotchBandChrome: View {
     }
 
     private func statusLabel(relativeTo now: Date) -> String {
-        if isLoading { return "polling…" }
+        if isLoading { return String(localized: "polling…") }
         if let updated = effectiveUpdated {
             return Self.relativeFormatter.localizedString(for: updated, relativeTo: now)
         }

@@ -11,7 +11,7 @@ struct IslandDialogChrome<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(Typography.settingsTitle)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 18)
@@ -82,7 +82,7 @@ struct IslandTextPromptView: View {
                     }
                 }
 
-                Text(message)
+                Text(LocalizedStringKey(message))
                     .font(Typography.settingsRow)
                     .foregroundStyle(.white.opacity(0.5))
                     .fixedSize(horizontal: false, vertical: true)
@@ -166,7 +166,7 @@ struct IslandProgressView: View {
                     ProgressView()
                         .controlSize(.small)
                         .colorScheme(.dark)
-                    Text(message)
+                    Text(LocalizedStringKey(message))
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(0.55))
                         .fixedSize(horizontal: false, vertical: true)
@@ -196,7 +196,7 @@ struct IslandConfirmView: View {
     var body: some View {
         IslandDialogChrome(title: title, width: 320) {
             VStack(alignment: .leading, spacing: 16) {
-                Text(message)
+                Text(LocalizedStringKey(message))
                     .font(Typography.settingsRow)
                     .foregroundStyle(.white.opacity(0.55))
                     .fixedSize(horizontal: false, vertical: true)
@@ -234,7 +234,7 @@ func dialogButton(
     action: @escaping () -> Void
 ) -> some View {
     Button(action: action) {
-        Text(title)
+        Text(LocalizedStringKey(title))
             .font(Typography.settingsRow)
             .foregroundStyle(buttonForeground(primary: primary, destructive: destructive, enabled: enabled))
             .padding(.horizontal, 14)

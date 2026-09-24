@@ -81,7 +81,7 @@ enum AccountChromeActions {
             title: "Sign in",
             message: adapter.id == "agy"
                 ? "A Terminal window opens for Antigravity. Sign in there, then close it. This window waits up to 3 minutes."
-                : "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
+                : String(localized: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes."),
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()
@@ -128,7 +128,7 @@ enum AccountChromeActions {
             } catch let error as AccountStoreError where error == .maxAccountsReached {
                 presentAlert(
                     title: "Account limit",
-                    message: "You can add up to \(AccountStore.maxAccounts) accounts."
+                    message: String(localized: "You can add up to \(AccountStore.maxAccounts) accounts.")
                 )
             } catch {
                 if !Task.isCancelled {
@@ -160,7 +160,7 @@ enum AccountChromeActions {
         guard let adapter = VendorRegistry.adapter(for: account.vendorID) else {
             presentAlert(
                 title: "Reauthenticate",
-                message: "No adapter for vendor “\(account.vendorID)”."
+                message: String(localized: "No adapter for vendor “\(account.vendorID)”.")
             )
             return
         }
@@ -172,7 +172,7 @@ enum AccountChromeActions {
         case "agy":
             message = "Extending this Antigravity session. A Terminal sign-in opens only if the stored session no longer works."
         default:
-            message = "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds."
+            message = String(localized: "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds.")
         }
         let previous = cancelRunning()
         addTask = Task {
@@ -216,7 +216,7 @@ enum AccountChromeActions {
         DispatchQueue.main.async {
             activateForUI()
             let ok = IslandDialogController.shared.runConfirm(
-                title: "Remove \(label)?",
+                title: String(localized: "Remove \(label)?"),
                 message: "This removes the account from Dash Island and deletes its stored credentials.",
                 confirmTitle: "Remove",
                 isDestructive: true,

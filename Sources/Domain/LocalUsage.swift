@@ -74,7 +74,7 @@ struct UsagePriceCatalog: Codable, Sendable {
 enum UsagePeriod: Int, CaseIterable, Identifiable {
     case today = 1, week = 7, month = 30
     var id: Int { rawValue }
-    var title: String { self == .today ? "Today" : "\(rawValue) days" }
+    var title: String { self == .today ? String(localized: "Today") : String(localized: "\(rawValue) days") }
 }
 
 struct ModelUsageTotal: Identifiable {

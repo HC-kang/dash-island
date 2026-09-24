@@ -285,13 +285,13 @@ private struct UsageDetailView: View {
     private func label(_ window: WindowUsage) -> String {
         let period: String
         switch window.kind {
-        case .fiveHour: period = "Session"
-        case .weekly: period = "Weekly"
-        case .monthly: period = "Monthly"
-        case .unknown: period = "Usage"
+        case .fiveHour: period = String(localized: "Session")
+        case .weekly: period = String(localized: "Weekly")
+        case .monthly: period = String(localized: "Monthly")
+        case .unknown: period = String(localized: "Usage")
         }
         guard let name = window.labelOverride else { return period }
-        return name.hasSuffix(" wk") ? String(name.dropLast(3)) + " Weekly" : name
+        return name.hasSuffix(" wk") ? String(localized: "\(String(name.dropLast(3))) Weekly") : name
     }
 
     /// Seven days of the headline window from QuotaHistory, in the display mode.
@@ -346,7 +346,7 @@ private struct UsageDetailView: View {
 
     /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).
     private var showsUsed: Bool { preferences.displayMode == .used }
-    private var shownWord: String { showsUsed ? "used" : "left" }
+    private var shownWord: String { showsUsed ? String(localized: "used") : String(localized: "left") }
     private func shownFraction(_ window: WindowUsage) -> Double {
         let used = min(1, max(0, window.usedFraction))
         return showsUsed ? used : 1 - used
@@ -413,10 +413,10 @@ private struct UsageDetailView: View {
                 }.padding(.vertical, 8)
             } else {
                 HStack(alignment: .top) {
-                    metric(Self.tokens(summary.tokens.total), caption: liveTracking ? "Captured tokens, incl. cache" : "Tokens, including cache")
+                    metric(Self.tokens(summary.tokens.total), caption: liveTracking ? String(localized: "Captured tokens, incl. cache") : String(localized: "Tokens, including cache"))
                     Spacer()
-                    metric(summary.dollars.map(money) ?? "—", caption: (provider == "grok" ? "Recorded API value" : "API estimate")
-                           + (summary.unpricedTokens > 0 ? " · partial" : ""))
+                    metric(summary.dollars.map(money) ?? "—", caption: (provider == "grok" ? String(localized: "Recorded API value") : String(localized: "API estimate"))
+                           + (summary.unpricedTokens > 0 ? String(localized: " · partial") : ""))
                 }
                 trend(summary.trend)
                 VStack(spacing: 14) {

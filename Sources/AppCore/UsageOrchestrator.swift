@@ -614,7 +614,7 @@ final class UsageOrchestrator: ObservableObject {
             guard let snapshot = Self.loadLastGood(from: url) else { continue }
             lastGood[account.id] = snapshot
             lastSuccessAt[account.id] = snapshot.fetchedAt
-            lastNotice[account.id] = "saved last-good · checking live usage"
+            lastNotice[account.id] = String(localized: "saved last-good · checking live usage")
             lastUpdated = max(lastUpdated ?? .distantPast, snapshot.fetchedAt)
             restored += 1
         }
@@ -1195,7 +1195,7 @@ final class UsageOrchestrator: ObservableObject {
             perHour += weight * (3600.0 / interval)
         }
         let n = Int(perHour.rounded(.up))
-        return "≤\(n) API calls/h all busy · 1m busy / 15m idle · \(accounts.count) acct"
+        return String(localized: "≤\(n) API calls/h all busy · 1m busy / 15m idle · \(accounts.count) acct")
     }
 
     private func makeViewModel(
@@ -1307,25 +1307,25 @@ final class UsageOrchestrator: ObservableObject {
         switch error {
         case .authRequired:
             switch vendorID {
-            case "claude": return "reconnect account"
-            case "codex": return "reauth: codex"
-            case "grok": return "reauth: grok"
-            case "agy": return "reauth: agy"
-            default: return "reauth needed"
+            case "claude": return String(localized: "reconnect account")
+            case "codex": return String(localized: "reauth: codex")
+            case "grok": return String(localized: "reauth: grok")
+            case "agy": return String(localized: "reauth: agy")
+            default: return String(localized: "reauth needed")
             }
         case .rateLimited:
-            return vendorID == "claude" ? "oauth rate limited" : "rate limited"
+            return vendorID == "claude" ? String(localized: "oauth rate limited") : String(localized: "rate limited")
         case .network(let message):
-            return message.isEmpty ? "network error" : message
+            return message.isEmpty ? String(localized: "network error") : message
         case .parse(let message):
-            return message.isEmpty ? "parse error" : message
+            return message.isEmpty ? String(localized: "parse error") : message
         case .unavailable:
             // One classification (UnavailableReason) for severity and copy (core-10).
             switch error.unavailableReason ?? .temporary {
-            case .needsLogin: return "need browser login"
+            case .needsLogin: return String(localized: "need browser login")
             // Self-scheduled retry: rings stay, no red line. Notice/tooltip carry the age.
             case .refreshPending: return nil
-            case .tokenQuiet, .temporary: return "token quiet"
+            case .tokenQuiet, .temporary: return String(localized: "token quiet")
             }
         }
     }
@@ -1353,67 +1353,67 @@ final class UsageOrchestrator: ObservableObject {
         case .authRequired:
             switch vendorID {
             case "claude":
-                return """
+                return String(localized: """
                 Claude rejected this account’s token (invalid login or missing user:profile).
                 setup-token cannot read usage — use full browser OAuth.
                 Widget menu → Reauthenticate this account only (other accounts stay put).
                 Or: CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
-                """
+                """)
             case "codex":
-                return """
+                return String(localized: """
                 Codex session rejected. Widget menu → Reauthenticate, or:
                 CODEX_HOME='\(home)' codex login
-                """
+                """)
             case "grok":
-                return """
+                return String(localized: """
                 Grok session rejected. Widget menu → Reauthenticate, or:
                 GROK_HOME='\(home)' grok login --oauth
-                """
+                """)
             case "agy":
-                return """
+                return String(localized: """
                 Antigravity session rejected. Widget menu → Reauthenticate, or:
                 HOME='\(home)' agy
-                """
+                """)
             default:
-                return "Reauthenticate from the widget menu."
+                return String(localized: "Reauthenticate from the widget menu.")
             }
         case .rateLimited:
             if vendorID == "claude" {
-                return """
+                return String(localized: """
                 Claude OAuth token host is rate-limited (not your 5h/wk usage quota).
                 Long quiet window — last-good rings stay. No re-login required yet.
                 Each account uses its own credentials file; reconnect only if this never recovers.
-                """
+                """)
             }
-            return """
+            return String(localized: """
             Vendor rate-limited (usage API or OAuth token refresh).
             Long quiet window; last-good numbers stay on the rings. No re-login needed yet.
-            """
+            """)
         case .network(let message):
             return message.isEmpty
-                ? "Network error — will retry on next poll. Last-good rings stay if present."
+                ? String(localized: "Network error — will retry on next poll. Last-good rings stay if present.")
                 : message
         case .parse(let message):
-            return message.isEmpty ? "Could not parse vendor response." : message
+            return message.isEmpty ? String(localized: "Could not parse vendor response.") : message
         case .unavailable(let message):
             switch error.unavailableReason ?? .temporary {
             case .needsLogin:
-                return """
+                return String(localized: """
                 \(message)
                 Widget menu → Reauthenticate (browser login for this account only).
                 \(loginCommand(vendorID: vendorID, home: home))
-                """
+                """)
             case .refreshPending:
-                return """
+                return String(localized: """
                 \(message)
                 Soft failure — will retry on the next poll. Last-good rings stay if present.
-                """
+                """)
             case .tokenQuiet, .temporary:
-                return """
-                \(message.isEmpty ? "Temporarily unavailable." : message)
+                return String(localized: """
+                \(message.isEmpty ? String(localized: "Temporarily unavailable.") : message)
                 Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
                 If this persists for hours, widget menu → Reauthenticate this account only.
-                """
+                """)
             }
         }
     }
@@ -1422,30 +1422,30 @@ final class UsageOrchestrator: ObservableObject {
     nonisolated static func formatAgeAgo(since date: Date, now: Date = Date()) -> String {
         let seconds = max(0, now.timeIntervalSince(date))
         let total = Int(seconds.rounded(.down))
-        if total < 60 { return "<1m ago" }
+        if total < 60 { return String(localized: "<1m ago") }
         let days = total / 86_400
         let hours = (total % 86_400) / 3_600
         let mins = (total % 3_600) / 60
         if days > 0 {
-            return hours > 0 ? "\(days)d \(hours)h ago" : "\(days)d ago"
+            return hours > 0 ? String(localized: "\(days)d \(hours)h ago") : String(localized: "\(days)d ago")
         }
         if hours > 0 {
-            return mins > 0 ? "\(hours)h \(mins)m ago" : "\(hours)h ago"
+            return mins > 0 ? String(localized: "\(hours)h \(mins)m ago") : String(localized: "\(hours)h ago")
         }
-        return "\(mins)m ago"
+        return String(localized: "\(mins)m ago")
     }
 
     /// Compact age for under-widget captions: `3m`, `2h`, `1d`.
     nonisolated static func formatCompactAge(since date: Date, now: Date = Date()) -> String {
         let seconds = max(0, now.timeIntervalSince(date))
         let total = Int(seconds.rounded(.down))
-        if total < 60 { return "<1m" }
+        if total < 60 { return String(localized: "<1m") }
         let days = total / 86_400
         let hours = (total % 86_400) / 3_600
         let mins = (total % 3_600) / 60
-        if days > 0 { return "\(days)d" }
-        if hours > 0 { return "\(hours)h" }
-        return "\(mins)m"
+        if days > 0 { return String(localized: "\(days)d") }
+        if hours > 0 { return String(localized: "\(hours)h") }
+        return String(localized: "\(mins)m")
     }
 
     /// Freshness line for a healthy widget. Without this a 14-minute-old ring and
@@ -1460,9 +1460,9 @@ final class UsageOrchestrator: ObservableObject {
     ) -> String? {
         guard let lastSuccessAt else { return nil }
         let age = formatAgeAgo(since: lastSuccessAt, now: now)
-        guard let projectedFraction else { return "checked \(age)" }
+        guard let projectedFraction else { return String(localized: "checked \(age)") }
         let percent = Int((min(1, max(0, projectedFraction)) * 100).rounded())
-        return "checked \(age) · ≈\(percent)% est. from local calls"
+        return String(localized: "checked \(age) · ≈\(percent)% est. from local calls")
     }
 
     /// Timing lines for error tips: checked / retry / last ok.
@@ -1474,17 +1474,17 @@ final class UsageOrchestrator: ObservableObject {
     ) -> [String] {
         var lines: [String] = []
         if let checked = lastCheckedAt {
-            lines.append("checked \(formatAgeAgo(since: checked, now: now))")
+            lines.append(String(localized: "checked \(formatAgeAgo(since: checked, now: now))"))
         }
         if let retry = retryAt, retry > now,
            let remaining = formatResetRemaining(until: retry, now: now)
         {
-            lines.append("retry in \(remaining)")
+            lines.append(String(localized: "retry in \(remaining)"))
         } else if lastCheckedAt != nil, retryAt == nil {
-            lines.append("retry on next poll")
+            lines.append(String(localized: "retry on next poll"))
         }
         if let ok = lastSuccessAt {
-            lines.append("last ok \(formatAgeAgo(since: ok, now: now))")
+            lines.append(String(localized: "last ok \(formatAgeAgo(since: ok, now: now))"))
         }
         return lines
     }
@@ -1531,19 +1531,19 @@ final class UsageOrchestrator: ObservableObject {
         now: Date = Date()
     ) -> String? {
         let seconds = resetAt.timeIntervalSince(now)
-        if seconds <= 0 { return "now" }
+        if seconds <= 0 { return String(localized: "now") }
         let total = Int(seconds.rounded(.down))
         let days = total / 86_400
         let hours = (total % 86_400) / 3_600
         let mins = (total % 3_600) / 60
         if days > 0 {
-            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+            return hours > 0 ? String(localized: "\(days)d \(hours)h") : String(localized: "\(days)d")
         }
         if hours > 0 {
-            return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
+            return mins > 0 ? String(localized: "\(hours)h \(mins)m") : String(localized: "\(hours)h")
         }
-        if mins > 0 { return "\(mins)m" }
-        return "<1m"
+        if mins > 0 { return String(localized: "\(mins)m") }
+        return String(localized: "<1m")
     }
 
     /// Compact token count for hover (k / m).

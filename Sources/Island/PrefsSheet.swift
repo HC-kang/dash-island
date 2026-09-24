@@ -220,11 +220,11 @@ struct PrefsSheet: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(selected ? IslandColor.liveTeal : Color.white.opacity(0.28))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(LocalizedStringKey(title))
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
-                    Text(subtitle)
+                    Text(LocalizedStringKey(subtitle))
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))
                         .lineLimit(1)
@@ -253,11 +253,11 @@ struct PrefsSheet: View {
 
     private func prefToggle(_ title: String, isOn: Binding<Bool>) -> some View {
         HStack {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(Typography.settingsRow)
                 .foregroundStyle(.white.opacity(0.88))
             Spacer()
-            Toggle(title, isOn: isOn)
+            Toggle(LocalizedStringKey(title), isOn: isOn)
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
@@ -267,7 +267,7 @@ struct PrefsSheet: View {
 
     private func prefBlock<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(Typography.settingsSection)
                 .tracking(0.8)
                 .foregroundStyle(.white.opacity(0.45))
@@ -311,7 +311,7 @@ struct PrefsSheet: View {
                 Button {
                     selection.wrappedValue = opt.0
                 } label: {
-                    Text(opt.1)
+                    Text(LocalizedStringKey(opt.1))
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(selected ? 0.95 : 0.45))
                         .frame(maxWidth: .infinity)

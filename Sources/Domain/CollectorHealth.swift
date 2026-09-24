@@ -10,20 +10,20 @@ struct CollectorHealth: Equatable, Sendable {
 
     static func assess(status: [String: Any]?, bundledVersion: Int?, now: Date) -> CollectorHealth {
         guard let status else {
-            return .init(state: .notConnected, message: "Tracking is not connected")
+            return .init(state: .notConnected, message: String(localized: "Tracking is not connected"))
         }
         let running = (status["version"] as? NSNumber)?.intValue
         if let bundledVersion, (running ?? 0) < bundledVersion {
-            return .init(state: .outdated, message: "Tracking collector is out of date. Reconnect to update it.")
+            return .init(state: .outdated, message: String(localized: "Tracking collector is out of date. Reconnect to update it."))
         }
         guard let last = (status["lastBatchAt"] as? NSNumber)?.doubleValue else {
-            return .init(state: .quiet, message: "Tracking connected · no calls captured yet")
+            return .init(state: .quiet, message: String(localized: "Tracking connected · no calls captured yet"))
         }
         let age = now.timeIntervalSince1970 - last
         if age > 86_400 {
-            return .init(state: .quiet, message: "Tracking connected · no calls for \(Int(age / 86_400))d")
+            return .init(state: .quiet, message: String(localized: "Tracking connected · no calls for \(Int(age / 86_400))d"))
         }
-        return .init(state: .active, message: "Tracking active · last call \(IslandGlance.countdown(age)) ago")
+        return .init(state: .active, message: String(localized: "Tracking active · last call \(IslandGlance.countdown(age)) ago"))
     }
 
     static func version(inScript text: String) -> Int? {

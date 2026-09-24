@@ -73,15 +73,15 @@ struct IslandGlance: Equatable, Sendable {
         let reset = total ? counted.compactMap(\.shortResetAt).filter { $0 > now }.min() : worst?.resetAt
         let trailing: String?
         if broken > 0 {
-            trailing = "reauth \(broken)"
+            trailing = String(localized: "reauth \(broken)")
         } else if let reset {
             trailing = "↻ " + countdown(reset.timeIntervalSince(now))
         } else {
             trailing = nil
         }
-        var spoken = total ? "\(sum) of \(counted.count * 100) percent used across \(counted.count) accounts"
-            : worst.map { label($0) + " used" } ?? "No usage reported"
-        if broken > 0 { spoken += ", \(broken) need sign-in" }
+        var spoken = total ? String(localized: "\(sum) of \(counted.count * 100) percent used across \(counted.count) accounts")
+            : worst.map { String(localized: "\(label($0)) used") } ?? String(localized: "No usage reported")
+        if broken > 0 { spoken += String(localized: ", \(broken) need sign-in") }
         return IslandGlance(level: level, leading: leading, trailing: trailing, accessibility: spoken)
     }
 
@@ -101,12 +101,12 @@ struct IslandGlance: Equatable, Sendable {
     static func percent(_ f: Double) -> Int { Int((min(max(f, 0), 1) * 100).rounded()) }
 
     static func countdown(_ seconds: TimeInterval) -> String {
-        guard seconds > 0 else { return "now" }
+        guard seconds > 0 else { return String(localized: "now") }
         let m = Int(seconds / 60)
-        if m < 60 { return "\(m)m" }
-        if m < 24 * 60 { return m % 60 == 0 ? "\(m / 60)h" : "\(m / 60)h \(m % 60)m" }
+        if m < 60 { return String(localized: "\(m)m") }
+        if m < 24 * 60 { return m % 60 == 0 ? String(localized: "\(m / 60)h") : String(localized: "\(m / 60)h \(m % 60)m") }
         let h = m / 60
-        return h % 24 == 0 ? "\(h / 24)d" : "\(h / 24)d \(h % 24)h"
+        return h % 24 == 0 ? String(localized: "\(h / 24)d") : String(localized: "\(h / 24)d \(h % 24)h")
     }
 }
 

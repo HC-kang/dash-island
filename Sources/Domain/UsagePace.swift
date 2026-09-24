@@ -13,23 +13,26 @@ enum UsagePace {
         return now.addingTimeInterval(seconds)
     }
 
+    /// "out at 14:00, before the 16:00 reset" or "lasts until the 16:00 reset".
     static func line(used: Double, resetAt: Date?, ratio: Double, now: Date,
                      calendar: Calendar = .current) -> String? {
         guard let resetAt, ratio > 0, used < 1, resetAt > now else { return nil }
         let reset = clock(resetAt, now: now, calendar: calendar)
         if let eta = exhaustion(used: used, resetAt: resetAt, ratio: ratio, now: now) {
-            return "At this pace: out at \(clock(eta, now: now, calendar: calendar)), before the \(reset) reset"
+            let out = clock(eta, now: now, calendar: calendar)
+            return String(localized: "out at \(out), before the \(reset) reset")
         }
-        return "At this pace: lasts until the \(reset) reset"
+        return String(localized: "lasts until the \(reset) reset")
     }
 
-    /// "14:00" today, "Thu 14:00" on another day. Fixed English weekday names to
-    /// match the rest of the UI.
+    /// "14:00" today, "Thu 14:00" on another day; the weekday follows the UI language.
     static func clock(_ date: Date, now: Date, calendar: Calendar = .current) -> String {
         let c = calendar.dateComponents([.hour, .minute, .weekday], from: date)
         let hm = String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
         guard !calendar.isDate(date, inSameDayAs: now), let wd = c.weekday else { return hm }
-        return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wd - 1] + " " + hm
+        var names = calendar
+        names.locale = .ui
+        return names.shortWeekdaySymbols[wd - 1] + " " + hm
     }
 }
 
@@ -40,6 +43,6 @@ extension WidgetViewModel {
         let ratio = burnLongRatio > 0 ? burnLongRatio : burnRatio
         guard let line = UsagePace.line(used: window.usedFraction, resetAt: window.resetAt, ratio: ratio, now: now)
         else { return nil }
-        return "\(window.displayLabel) · " + line.replacingOccurrences(of: "At this pace: ", with: "")
+        return "\(window.displayLabel) · " + line
     }
 }

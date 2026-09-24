@@ -22,19 +22,19 @@ enum UsageAlert: Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .crossed(let a, let w, let p, _): return "\(a): \(w) at \(p)%"
-        case .recovered(let a, let w): return "\(a): \(w) limit reset"
-        case .signIn(let a): return "\(a) needs sign-in"
+        case .crossed(let a, let w, let p, _): return String(localized: "\(a): \(w) at \(p)%")
+        case .recovered(let a, let w): return String(localized: "\(a): \(w) limit reset")
+        case .signIn(let a): return String(localized: "\(a) needs sign-in")
         }
     }
 
     var body: String {
         switch self {
         case .crossed(_, _, let percent, let critical):
-            if percent >= 100 { return "Limit reached. Requests are refused until the window resets." }
-            return critical ? "Almost out. Requests may be refused until the window resets." : "Usage passed 80% of this window."
-        case .recovered: return "The window reset. Usage is back below 80%."
-        case .signIn: return "Open Dash Island and choose Reauthenticate."
+            if percent >= 100 { return String(localized: "Limit reached. Requests are refused until the window resets.") }
+            return critical ? String(localized: "Almost out. Requests may be refused until the window resets.") : String(localized: "Usage passed 80% of this window.")
+        case .recovered: return String(localized: "The window reset. Usage is back below 80%.")
+        case .signIn: return String(localized: "Open Dash Island and choose Reauthenticate.")
         }
     }
 }

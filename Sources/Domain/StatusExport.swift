@@ -41,7 +41,8 @@ struct StatusExport: Encodable, Equatable {
                 id: w.id.short,
                 label: w.title,
                 vendor: w.vendorID,
-                health: w.health.defaultLabel == "warning" ? "warn" : w.health.defaultLabel,
+                // Machine field: fixed English values, never the localized label.
+                health: w.health == .ok ? "ok" : w.health == .warn ? "warn" : "error",
                 windows: windows.map { Window(label: $0.displayLabel, usedPercent: IslandGlance.percent($0.usedFraction), resetAt: $0.resetAt) },
                 lastSuccessAt: w.lastSuccessAt,
                 stale: w.usageSnapshot?.error != nil

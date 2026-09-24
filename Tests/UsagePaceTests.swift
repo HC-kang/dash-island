@@ -30,9 +30,9 @@ enum UsagePaceSuite {
         }
         f += check("pace line copy") {
             try assertEqual(UsagePace.line(used: 0.5, resetAt: reset, ratio: 2, now: now, calendar: cal),
-                            "At this pace: out at 14:00, before the 16:00 reset")
+                            "out at 14:00, before the 16:00 reset")
             try assertEqual(UsagePace.line(used: 0.5, resetAt: reset, ratio: 0.8, now: now, calendar: cal),
-                            "At this pace: lasts until the 16:00 reset")
+                            "lasts until the 16:00 reset")
             try assertEqual(UsagePace.line(used: 0.5, resetAt: reset, ratio: 0, now: now, calendar: cal), nil)
         }
         return f

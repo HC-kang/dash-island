@@ -30,6 +30,10 @@ if [ -d Sources/Resources/VendorLogos ]; then
 fi
 
 cp Sources/Resources/usage-prices.json "$RES_DIR/"
+# UI translations (English is the development language; keys are the English copy).
+for lproj in Sources/Resources/*.lproj; do
+  [ -d "$lproj" ] && cp -R "$lproj" "$RES_DIR/"
+done
 # App icon (regenerate with: swift scripts/make-icon.swift).
 cp Sources/Resources/AppIcon.icns "$RES_DIR/"
 cp THIRD_PARTY_NOTICES.md "$RES_DIR/"
@@ -64,6 +68,8 @@ cat > "$CONTENTS/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>ko</string></array>
   <key>DashIslandCommit</key><string>$COMMIT</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>$DEPLOYMENT_TARGET</string>
