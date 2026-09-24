@@ -33,7 +33,7 @@ enum AccountHoverTips {
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(Color(white: 0.90))
                 }
-                ForEach([model.paceLine(now: context.date), model.budgetLine(now: context.date)].compactMap { $0 }, id: \.self) { line in
+                ForEach([model.paceLine(now: context.date)].compactMap { $0 }, id: \.self) { line in
                     Text(line)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(Color(white: 0.78))

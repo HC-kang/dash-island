@@ -264,7 +264,7 @@ private struct UsageDetailView: View {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.system(size: 11)).foregroundStyle(Color.orange)
             }
-            ForEach([model.paceLine(now: Date()), model.budgetLine(now: Date())].compactMap { $0 }, id: \.self) { line in
+            ForEach([model.paceLine(now: Date())].compactMap { $0 }, id: \.self) { line in
                 Label(line, systemImage: "gauge.with.dots.needle.33percent")
                     .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.72))
             }

@@ -264,7 +264,9 @@ struct IslandRootView: View {
         return VStack(spacing: 0) {
             NotchBandChrome(
                 notchWidth: model.notch.width,
-                notchHeight: model.notch.height
+                notchHeight: model.notch.height,
+                glance: accountStore.accounts.isEmpty ? nil : glance,
+                glanceDot: glanceDotColor
             ) {
                 openPrefs()
             }
@@ -335,6 +337,14 @@ struct IslandRootView: View {
         }
     }
 
+    private var glanceDotColor: Color {
+        switch glance.level {
+        case .normal: return IslandColor.liveTeal
+        case .warning: return Self.warningColor
+        case .critical: return Self.criticalColor
+        }
+    }
+
     private static let warningColor = Color(red: 1.0, green: 0.72, blue: 0.20)
     private static let criticalColor = Color(red: 1.0, green: 0.32, blue: 0.30)
 
@@ -360,8 +370,7 @@ struct IslandRootView: View {
         let bodyW = notch.width + bodyOutset * 2
         let bodyH = notch.height + bodyOutset
         let radius = cornerRadius(forHeight: bodyH)
-        let dot: Color = g.level == .critical ? Self.criticalColor
-            : g.level == .warning ? Self.warningColor : IslandColor.liveTeal
+        let dot = glanceDotColor
         let sizing = ZStack {
             earLabel(g.leading ?? "", dot: dot)
             earLabel(g.trailing ?? "", dot: nil)

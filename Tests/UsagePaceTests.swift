@@ -28,11 +28,6 @@ enum UsagePaceSuite {
             let odd = UsagePace.exhaustion(used: 0.5, resetAt: reset, ratio: 2.9, now: now)!  // 82.8 min
             try assertEqual(odd, now.addingTimeInterval(80 * 60))
         }
-        f += check("daily budget only for windows longer than a day") {
-            let week = now.addingTimeInterval(4 * 86_400)
-            try assertEqual(UsagePace.dailyBudget(used: 0.6, resetAt: week, now: now)!, 0.1, accuracy: 1e-9)
-            try assertEqual(UsagePace.dailyBudget(used: 0.6, resetAt: reset, now: now), nil)
-        }
         f += check("pace line copy") {
             try assertEqual(UsagePace.line(used: 0.5, resetAt: reset, ratio: 2, now: now, calendar: cal),
                             "At this pace: out at 14:00, before the 16:00 reset")

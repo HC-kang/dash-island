@@ -7,9 +7,10 @@ All notable user-facing changes. Format: [Keep a Changelog](https://keepachangel
 ## [0.1.0] - 2026-09-24
 
 ### Added
-- At-a-glance compact island: the rim turns amber at 80% and red at 95% or when an account needs sign-in; ears beside the notch show the worst account (for example `Dev wk 100%`) and its reset countdown. Both can be turned off in Preferences.
+- At a glance: the rim turns amber at 80% and red at 95% or when an account needs sign-in. The expanded island shows the worst account (for example `Dev wk 100%`) and its reset countdown beside the notch; on displays without a notch the compact island shows them too (Preferences: Auto / Always / Never).
+- Optional total across accounts of chosen vendors (for example `212/500%`), using each account's shortest window unless a longer one is nearly full.
 - macOS notifications at 80% and 95%, after a window resets, and when an account needs sign-in (once per crossing; Preferences toggle).
-- Run-out ETA and a per-day budget for weekly/monthly windows in the hover card and the detail panel.
+- Run-out ETA in the hover card and the detail panel.
 - Detail panel: collector health line with a reconnect command, vendor incident banner from the status page, and a chevron cue when more content is below.
 - `status.json` in Application Support for scripts (sketchybar, tmux, Raycast).
 - Move Left / Move Right in the widget menu and VoiceOver actions for every account action.

@@ -13,14 +13,6 @@ enum UsagePace {
         return now.addingTimeInterval(seconds)
     }
 
-    /// Fraction per day that still reaches the reset, for windows longer than a day.
-    static func dailyBudget(used: Double, resetAt: Date?, now: Date) -> Double? {
-        guard let resetAt else { return nil }
-        let days = resetAt.timeIntervalSince(now) / 86_400
-        guard days >= 1 else { return nil }
-        return max(0, 1 - used) / days
-    }
-
     static func line(used: Double, resetAt: Date?, ratio: Double, now: Date,
                      calendar: Calendar = .current) -> String? {
         guard let resetAt, ratio > 0, used < 1, resetAt > now else { return nil }
@@ -49,15 +41,5 @@ extension WidgetViewModel {
         guard let line = UsagePace.line(used: window.usedFraction, resetAt: window.resetAt, ratio: ratio, now: now)
         else { return nil }
         return "\(window.displayLabel) · " + line.replacingOccurrences(of: "At this pace: ", with: "")
-    }
-
-    /// Weekly/monthly window: how much per day still reaches the reset.
-    func budgetLine(now: Date) -> String? {
-        guard let s = usageSnapshot else { return nil }
-        let long = ([s.primary] + [s.secondary].compactMap { $0 })
-            .first { $0.isReported && ($0.kind == .weekly || $0.kind == .monthly) }
-        guard let long, let perDay = UsagePace.dailyBudget(used: long.usedFraction, resetAt: long.resetAt, now: now)
-        else { return nil }
-        return "\(long.displayLabel) budget · \(Int((perDay * 100).rounded()))%/day until reset"
     }
 }
