@@ -96,6 +96,37 @@ enum LogSuite {
             try assertEqual(lines.count, 40)
         }
 
+        failures += check("a writer follows the path after another writer rotates") {
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let url = dir.appendingPathComponent("follow.log")
+            let a = LogFile(url: url, maxBytes: 100, keep: 3)!
+            let b = LogFile(url: url, maxBytes: 100, keep: 3)!
+            let pad = String(repeating: "x", count: 57)
+            a.append("A0" + pad)
+            b.append("B0" + pad)  // 120 bytes: b rotates .log → .log.1
+            a.append("A1" + pad)  // a must write the new .log, not the moved file
+            let current = try String(contentsOf: url, encoding: .utf8)
+            try assertTrue(current.contains("A1"), "A1 missing from .log: \(current)")
+            let previous = try String(contentsOf: URL(fileURLWithPath: url.path + ".1"), encoding: .utf8)
+            try assertTrue(previous.contains("A0") && previous.contains("B0"), "lost lines: \(previous)")
+        }
+
+        failures += check("sink failure is reported once, then the sink stays off") {
+            let dir = try makeTempDir()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+                try? FileManager.default.removeItem(at: dir)
+            }
+            let url = dir.appendingPathComponent("off.log")
+            nonisolated(unsafe) var reports: [String] = []
+            let file = LogFile(url: url, maxBytes: 100, keep: 3, report: { reports.append($0) })!
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+            for i in 0..<10 { file.append("L\(i)" + String(repeating: "x", count: 57)) }
+            try assertEqual(reports.count, 1)
+            try assertTrue(reports[0].contains("sink off"), "got \(reports)")
+        }
+
         failures += check("startFile on unwritable path leaves sink off") {
             Log.startFile(at: URL(fileURLWithPath: "/dev/null/nope/x.log"))
             try assertEqual(Log.fileURL, nil)

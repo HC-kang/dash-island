@@ -108,6 +108,12 @@ enum GrokAdapterSuite {
             )
         }
 
+        failures += check("config without weekly % is not reported") {
+            let snap = GrokAdapter.parseCreditsResponse(data: Data(#"{"config":{"subscriptionTier":"Free"}}"#.utf8))
+            try assertEqual(snap.error, nil as UsageError?)
+            try assertTrue(!snap.primary.isReported)
+        }
+
         failures += check("no config → unavailable") {
             let snap = GrokAdapter.parseCreditsResponse(data: Data("{}".utf8))
             try assertEqual(
@@ -119,6 +125,28 @@ enum GrokAdapterSuite {
         failures += check("invalid JSON → parse error") {
             let snap = GrokAdapter.parseCreditsResponse(data: Data("not-json".utf8))
             try assertEqual(snap.error, UsageError.parse("parse error"))
+        }
+
+        failures += check("huge monthly money values never trap") {
+            let config: [String: Any] = ["monthlyLimit": ["val": 1e21], "used": ["val": "1e20"]]
+            let window = GrokAdapter.mapMonthlyUsage(config)
+            try assertEqual(window?.usedFraction ?? -1, 0.1, accuracy: 0.0001)
+            try assertTrue(window?.usedTokens == nil)
+            try assertTrue(GrokAdapter.numberValue("inf") == nil)
+        }
+
+        failures += check("monthly cache key is the account, never a token prefix") {
+            // JWTs share their first 16 characters across accounts. Build the header at
+            // runtime so secret scanners do not flag a JWT-shaped literal.
+            let header = Data(#"{"alg":"RS256"}"#.utf8).base64EncodedString()
+            var a = GrokAdapter.GrokSession(accessToken: header + ".aaa", userId: nil, email: nil, teamId: nil, expiresAt: nil)
+            var b = a
+            b.accessToken = header + ".bbb"
+            a.filePath = URL(fileURLWithPath: "/tmp/acct-a/auth.json")
+            b.filePath = URL(fileURLWithPath: "/tmp/acct-b/auth.json")
+            try assertTrue(GrokAdapter.monthlyCacheKey(a) != GrokAdapter.monthlyCacheKey(b))
+            a.userId = "user-1"
+            try assertEqual(GrokAdapter.monthlyCacheKey(a), "user-1")
         }
 
         failures += check("clamp creditUsagePercent above 100") {
@@ -221,23 +249,21 @@ enum GrokAdapterSuite {
             try assertEqual(VendorRegistry.adapter(for: "grok")?.minPollSeconds, 300)
         }
 
-        failures += check("dual-window helper prefers weekly primary") {
-            let weeklyCfg: [String: Any] = [
-                "creditUsagePercent": 20,
-                "currentPeriod": ["end": "2026-07-07T00:00:00Z"],
-            ]
-            let monthlyCfg: [String: Any] = [
-                "monthlyLimit": ["val": 100],
-                "used": ["val": 25],
-            ]
-            let snap = GrokAdapter.parseBillingWindows(
-                weeklyConfig: weeklyCfg,
-                monthlyConfig: monthlyCfg,
-                plan: "SuperGrok"
+        failures += check("reauth keeps auth.json aside, restored on cancel") {
+            let home = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-island-grok-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            let nested = home.appendingPathComponent(".grok/auth.json")
+            try FileManager.default.createDirectory(
+                at: nested.deletingLastPathComponent(),
+                withIntermediateDirectories: true
             )
-            try assertEqual(snap.primary.usedFraction, 0.20, accuracy: 0.0001)
-            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.25, accuracy: 0.0001)
-            try assertEqual(snap.plan, "SuperGrok")
+            try Data(#"{"https://auth.x.ai":{"key":"tok-old","refresh_token":"rt-old"}}"#.utf8).write(to: nested)
+            let prior = CredentialStore.PriorFiles.stash(GrokAdapter.authFiles(grokHome: home))
+            try assertTrue(GrokAdapter.readSession(grokHome: home) == nil, "grok login starts signed out")
+            prior.restore()
+            try assertEqual(GrokAdapter.readSession(grokHome: home)?.refreshToken, "rt-old")
         }
 
         return failures

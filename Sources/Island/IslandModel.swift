@@ -20,43 +20,35 @@ final class IslandModel: ObservableObject {
     @Published private(set) var expandedItemCount: Int = 0
     /// Trailing add rail revealed by chevron hover (grows black body to the right).
     @Published private(set) var addRailOpen: Bool = false
+    /// Window occluded or displays asleep, and Low Power Mode — both pause decoration.
+    @Published private(set) var windowHidden = false
+    @Published private(set) var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+    /// Non-notch display in a full-screen space: draw no compact handle, take no hits.
+    @Published private(set) var compactHidden = false
 
-    /// Fits `AccountWidget.cellHeight` (gauge + title + caption slot) under the notch.
-    private let expandedContentHeight: CGFloat = 136
-    /// Transparent buffer so lifted widgets + trash + hang-down tips render past the black body.
-    /// Must clear long caption tooltips (~180pt) and the trash magnet.
-    private let dragBleed: CGFloat = 220
-    private let compactRimPad: CGFloat = 3
-
-    static let cellSize: CGFloat = 100
-    static let cellGap: CGFloat = 12
-    /// Must match `IslandRootView.expandedContent` horizontal padding.
-    static let contentPadLeading: CGFloat = 14
-    static let contentPadTrailing: CGFloat = 14
-    /// Trailing when add chevron is visible (root pad + AddRail outer pad).
-    static let contentPadTrailingWithAdd: CGFloat = 4 + 6
+    // Pure geometry lives in `IslandGeometry` (unit-tested).
+    static let cellSize: CGFloat = IslandGeometry.cellSize
+    static let cellGap: CGFloat = IslandGeometry.cellGap
     /// Hard cap on stored accounts (scroll when more than `maxVisibleSlots`).
     static let maxItems: Int = AccountStore.maxAccounts
     /// How many gauges fit in the island body at once; extra accounts scroll horizontally.
-    static let maxVisibleSlots: Int = 5
-    static let addChevronWidth: CGFloat = AddRail.chevronWidth
-    static let addRailWidth: CGFloat = AddRail.railWidth
+    static let maxVisibleSlots: Int = IslandGeometry.maxVisibleSlots
 
     init(notch: NotchInfo) {
         self.notch = notch
-        self.size = Self.compactSize(for: notch, rimPad: 3)
+        self.size = Self.compactSize(for: notch)
     }
 
     var blackHeight: CGFloat {
         switch state {
         case .compact: return notch.height
-        case .expanded: return notch.height + expandedContentHeight
+        case .expanded: return notch.height + IslandGeometry.expandedContentHeight
         }
     }
 
     /// Black silhouette width (no bleed), including chevron + open add rail.
     var expandedContentWidth: CGFloat {
-        Self.expandedWidth(
+        IslandGeometry.expandedWidth(
             notchWidth: notch.width,
             itemCount: expandedItemCount,
             canAdd: expandedItemCount < Self.maxItems,
@@ -67,25 +59,20 @@ final class IslandModel: ObservableObject {
     /// Stable NSWindow size: always the maximum expanded footprint for this notch.
     /// Expand/collapse must not change this — only screen/notch geometry does.
     var canvasSize: CGSize {
-        Self.canvasSize(for: notch, dragBleed: dragBleed, expandedContentHeight: expandedContentHeight)
+        IslandGeometry.canvasSize(notchWidth: notch.width, notchHeight: notch.height)
     }
 
     /// Mouse hit / hover target — physical black body only.
     /// Excludes drag-bleed so the fixed canvas window does not steal nearby menu-bar clicks.
     /// Expanded adds a short strip under the body for downward tooltips.
     var hitSize: CGSize {
-        switch state {
-        case .compact:
-            return CGSize(
-                width: max(notch.width + compactRimPad * 2, 80),
-                height: notch.height + compactRimPad
-            )
-        case .expanded:
-            return CGSize(
-                width: expandedContentWidth,
-                height: blackHeight + 20
-            )
-        }
+        IslandGeometry.hitSize(
+            expanded: state == .expanded,
+            compactHidden: compactHidden,
+            compact: Self.compactSize(for: notch),
+            bodyWidth: expandedContentWidth,
+            notchHeight: notch.height
+        )
     }
 
     /// Drawing space only. Tooltips must not enlarge the mouse retention area.
@@ -119,41 +106,24 @@ final class IslandModel: ObservableObject {
         recomputeSize()
     }
 
-    func recomputeSize() {
-        if state == .compact {
-            size = Self.compactSize(for: notch, rimPad: compactRimPad)
-        } else {
-            let contentW = expandedContentWidth
-            size = CGSize(
-                width: contentW + dragBleed * 2,
-                height: notch.height + expandedContentHeight + dragBleed
-            )
-        }
+    func setWindowHidden(_ hidden: Bool) {
+        if hidden != windowHidden { windowHidden = hidden }
     }
 
-    /// Floor at 3 slots; body grows through `maxVisibleSlots`, then scrolls inside.
-    /// Width matches real chrome: content pads + slot row + optional add rail.
-    static func expandedWidth(
-        notchWidth: CGFloat,
-        itemCount: Int,
-        canAdd: Bool = false,
-        addRailOpen: Bool = false
-    ) -> CGFloat {
-        let padTrailing = canAdd ? contentPadTrailingWithAdd : contentPadTrailing
-        let addW = canAdd ? (addChevronWidth + (addRailOpen ? addRailWidth : 0)) : 0
-        return CGFloat(
-            IslandClusterLayout.islandBodyWidth(
-                itemCount: itemCount,
-                maxVisible: maxVisibleSlots,
-                minSlots: 3,
-                cell: Double(cellSize),
-                gap: Double(cellGap),
-                padLeading: Double(contentPadLeading),
-                padTrailing: Double(padTrailing),
-                addChrome: Double(addW),
-                notchWidth: Double(notchWidth)
-            )
-        )
+    func setLowPower(_ on: Bool) {
+        if on != lowPower { lowPower = on }
+    }
+
+    func setCompactHidden(_ hidden: Bool) {
+        if hidden != compactHidden { compactHidden = hidden }
+    }
+
+    func recomputeSize() {
+        if state == .compact {
+            size = Self.compactSize(for: notch)
+        } else {
+            size = IslandGeometry.expandedSize(bodyWidth: expandedContentWidth, notchHeight: notch.height)
+        }
     }
 
     /// Row width for `count` cells (no outer padding).
@@ -165,28 +135,7 @@ final class IslandModel: ObservableObject {
         ))
     }
 
-    static func canvasSize(
-        for notch: NotchInfo,
-        dragBleed: CGFloat = 220,
-        expandedContentHeight: CGFloat = 136
-    ) -> CGSize {
-        // Canvas uses viewport width (max visible), not full scroll content.
-        let contentW = expandedWidth(
-            notchWidth: notch.width,
-            itemCount: maxVisibleSlots,
-            canAdd: true,
-            addRailOpen: true
-        )
-        return CGSize(
-            width: contentW + dragBleed * 2,
-            height: notch.height + expandedContentHeight + dragBleed
-        )
-    }
-
-    private static func compactSize(for notch: NotchInfo, rimPad: CGFloat) -> CGSize {
-        CGSize(
-            width: max(notch.width + rimPad * 2, 80),
-            height: notch.height + rimPad
-        )
+    private static func compactSize(for notch: NotchInfo) -> CGSize {
+        IslandGeometry.compactSize(notchWidth: notch.width, notchHeight: notch.height, hasNotch: notch.hasNotch)
     }
 }

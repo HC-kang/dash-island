@@ -44,7 +44,8 @@ enum CodexAdapterError: Error, Equatable, LocalizedError {
 ///
 /// **Credentials:** per-account folder under Application Support
 /// (`accounts/<uuid>/` as `CODEX_HOME`). Auth lives at `$CODEX_HOME/auth.json`
-/// (`tokens.access_token`). Codex CLI rotates tokens itself — we only read.
+/// (`tokens.access_token`). We refresh it via auth.openai.com and write the
+/// rotated tokens back (`refreshManagedCredentials`).
 struct CodexAdapter: VendorAdapter {
     let id: VendorID = "codex"
     let displayName = "Codex"
@@ -81,15 +82,19 @@ struct CodexAdapter: VendorAdapter {
 
     func reauthenticate(_ ref: CredentialRef) async throws -> CredentialRef {
         let dir = try CredentialStore.createDirectory(for: ref)
+        let priorToken = Self.readCredentials(codexHome: dir)?.accessToken
+        // Move auth.json aside, never delete it: Cancel or a failed login used
+        // to leave a healthy account with no refresh token at all.
+        let prior = CredentialStore.PriorFiles.stash(Self.authFiles(codexHome: dir))
         do {
-            // Wipe first — existing auth.json makes runLogin return immediately.
-            Self.clearManagedCredentials(codexHome: dir)
-            try await runLogin(codexHome: dir)
+            try await runLogin(codexHome: dir, priorToken: priorToken)
             _ = try Self.requireCredentials(codexHome: dir)
+            prior.discard()
             return ref
-        } catch let error as CodexAdapterError {
-            throw error
         } catch {
+            prior.restore()
+            if error is CancellationError { throw error }
+            if let error = error as? CodexAdapterError { throw error }
             throw CodexAdapterError.reauthFailed(error.localizedDescription)
         }
     }
@@ -100,24 +105,33 @@ struct CodexAdapter: VendorAdapter {
         guard var creds = Self.readCredentials(codexHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
-        // Managed CODEX_HOME tokens — refresh before usage if we still have a refresh_token.
-        if let refreshed = await Self.refreshManagedCredentials(codexHome: dir) {
-            // Always try refresh path only when needed; method no-ops if fresh.
+        // Managed CODEX_HOME tokens — refresh before usage (no-op within 45m of
+        // the last one). Any failure keeps the current access: the probe decides.
+        var quiet: UsageSnapshot?
+        var refreshDead = false
+        switch await Self.refreshManagedCredentials(codexHome: dir) {
+        case .success(let refreshed):
             if refreshed.accessToken != creds.accessToken {
-                creds = refreshed
                 Log.auth.info("refresh vendor=codex outcome=ok ref=\(String(ref.prefix(8)))")
-            } else {
-                creds = refreshed
             }
+            creds = refreshed
+        case .unavailable(let message, let retryAt):
+            quiet = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: now)
+        case .rejected:
+            refreshDead = true
+        case .skipped:
+            break
         }
         var snap = await Self.probeUsage(
             token: creds.accessToken,
             accountID: creds.accountID,
             fetchedAt: now
         )
-        if case .authRequired = snap.error,
-           let refreshed = await Self.refreshManagedCredentials(codexHome: dir, force: true)
-        {
+        guard case .authRequired = snap.error, !refreshDead else { return snap }
+        // A busy token host is not a dead login: soft quiet, never red "reconnect".
+        if let quiet { return quiet }
+        switch await Self.refreshManagedCredentials(codexHome: dir, force: true) {
+        case .success(let refreshed):
             snap = await Self.probeUsage(
                 token: refreshed.accessToken,
                 accountID: refreshed.accountID,
@@ -126,32 +140,39 @@ struct CodexAdapter: VendorAdapter {
             if snap.error == nil {
                 Log.auth.info("refresh vendor=codex outcome=ok trigger=reactive ref=\(String(ref.prefix(8)))")
             }
+        case .unavailable(let message, let retryAt):
+            snap = TokenHostFailure.quietSnapshot(message: message, retryAt: retryAt, fetchedAt: Date())
+        case .rejected, .skipped:
+            break
         }
         return snap
     }
 
     // MARK: - Login (managed CODEX_HOME)
 
-    static func clearManagedCredentials(codexHome: URL) {
-        let fm = FileManager.default
-        let paths = [
+    /// `$CODEX_HOME/auth.json`, plus the nested copy a HOME-isolated login writes.
+    static func authFiles(codexHome: URL) -> [URL] {
+        [
             codexHome.appendingPathComponent(authFileName, isDirectory: false),
             codexHome
                 .appendingPathComponent(".codex", isDirectory: true)
                 .appendingPathComponent(authFileName, isDirectory: false),
         ]
-        for path in paths where fm.fileExists(atPath: path.path) {
+    }
+
+    static func clearManagedCredentials(codexHome: URL) {
+        let fm = FileManager.default
+        for path in authFiles(codexHome: codexHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
         Log.auth.info("clearCreds vendor=codex dir=\(codexHome.path)")
     }
 
-    private func runLogin(codexHome: URL) async throws {
+    /// `priorToken` is never accepted as the new login's result.
+    private func runLogin(codexHome: URL, priorToken: String? = nil) async throws {
         guard let binary = Self.locateCodexBinary() else {
             throw CodexAdapterError.codexBinaryNotFound
         }
-
-        let priorToken = Self.readCredentials(codexHome: codexHome)?.accessToken
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: binary)
@@ -182,35 +203,30 @@ struct CodexAdapter: VendorAdapter {
             return !creds.accessToken.isEmpty
         }
 
-        while Date() < deadline {
-            if Task.isCancelled {
-                if task.isRunning { task.terminate() }
-                throw CancellationError()
-            }
-            if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if task.isRunning {
-                    task.terminate()
-                }
-                return
-            }
-            if !task.isRunning {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        // Cancel ends `codex login` too, so no orphan keeps the callback port.
+        try await LoginProcess.supervise(task) {
+            while Date() < deadline {
+                try Task.checkCancellation()
                 if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
                     return
                 }
-                throw CodexAdapterError.credentialsMissing(codexHome: codexHome.path)
+                if !task.isRunning {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                        return
+                    }
+                    throw CodexAdapterError.credentialsMissing(codexHome: codexHome.path)
+                }
+                try await Task.sleep(nanoseconds: Self.pollNanos)
             }
-            try await Task.sleep(nanoseconds: Self.pollNanos)
-        }
 
-        if task.isRunning {
-            task.terminate()
+            LoginProcess.terminate(task)
+            if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
+                return
+            }
+            throw CodexAdapterError.loginTimeout(codexHome: codexHome.path)
         }
-        if let creds = Self.readCredentials(codexHome: codexHome), isAcceptable(creds) {
-            return
-        }
-        throw CodexAdapterError.loginTimeout(codexHome: codexHome.path)
     }
 
     private static func requireCredentials(codexHome: URL) throws -> CodexCreds {
@@ -272,18 +288,28 @@ struct CodexAdapter: VendorAdapter {
         )
     }
 
-    /// Refresh managed auth.json. When `force` is false, only refreshes if we
-    /// have a refresh token (always attempt when token may be stale — Codex
-    /// does not always store access expiry).
+    enum RefreshOutcome: Equatable {
+        /// Refreshed, or still fresh enough that no POST was needed.
+        case success(CodexCreds)
+        /// No refresh token / unreadable file: nothing to refresh with.
+        case skipped
+        /// Spent or revoked grant: only a new `codex login` helps.
+        case rejected
+        /// Token host busy / down (429, 5xx, network): keep the session.
+        case unavailable(String, retryAt: Date?)
+    }
+
+    /// Refresh managed auth.json. Without `force`, skip the POST while the last
+    /// refresh is under 45 minutes old (Codex does not always store expiry).
     static func refreshManagedCredentials(
         codexHome: URL,
         force: Bool = false
-    ) async -> CodexCreds? {
+    ) async -> RefreshOutcome {
         guard let creds = readCredentials(codexHome: codexHome),
               let refresh = creds.refreshToken, !refresh.isEmpty,
               let path = creds.filePath,
               let existing = try? Data(contentsOf: path)
-        else { return force ? nil : readCredentials(codexHome: codexHome) }
+        else { return .skipped }
 
         // Without force, skip network if last_refresh is very recent (< 30m)
         // and access token still works often enough — but we can't know without
@@ -300,7 +326,7 @@ struct CodexAdapter: VendorAdapter {
                 if let d = iso.date(from: last) ?? plain.date(from: last),
                    Date().timeIntervalSince(d) < 45 * 60
                 {
-                    return creds
+                    return .success(creds)
                 }
             }
         }
@@ -322,22 +348,39 @@ struct CodexAdapter: VendorAdapter {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                if let http = response as? HTTPURLResponse {
-                    Log.auth.warn("refresh vendor=codex http=\(http.statusCode)")
+            guard let http = response as? HTTPURLResponse else {
+                return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                switch TokenHostFailure.classify(
+                    status: http.statusCode,
+                    body: data,
+                    retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+                ) {
+                case .rejected, .badClient:
+                    Log.auth.warn("refresh vendor=codex outcome=rejected http=\(http.statusCode)")
+                    return .rejected
+                case .unavailable(let retryAt):
+                    Log.auth.warn("refresh vendor=codex outcome=quiet http=\(http.statusCode)")
+                    return .unavailable(TokenHostFailure.quietMessage(status: http.statusCode), retryAt: retryAt)
                 }
-                return force ? nil : creds
             }
             guard let updated = applyRefreshedToken(existingJSON: existing, responseJSON: data) else {
-                return force ? nil : creds
+                return .unavailable("token quiet — token refresh parse failed", retryAt: nil)
             }
-            try? updated.write(to: path, options: .atomic)
+            do {
+                try CredentialStore.writeSecret(updated, to: path)
+            } catch {
+                // The server already rotated: the old refresh token is spent.
+                Log.auth.error("refresh vendor=codex outcome=writeFailed error=\(error.localizedDescription)")
+                return .unavailable("token quiet — credential write failed", retryAt: nil)
+            }
             var next = parseAuthJSON(updated)
             next?.filePath = path
-            return next ?? creds
+            return .success(next ?? creds)
         } catch {
             Log.auth.warn("refresh vendor=codex outcome=failed error=\(error.localizedDescription)")
-            return force ? nil : creds
+            return .unavailable(TokenHostFailure.quietMessage(status: nil), retryAt: nil)
         }
     }
 
@@ -371,6 +414,8 @@ struct CodexAdapter: VendorAdapter {
         if let accountID, !accountID.isEmpty {
             req.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
+        // Default is 60s; a stalled host held a poll slot that long.
+        req.timeoutInterval = 20
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -530,12 +575,7 @@ struct CodexAdapter: VendorAdapter {
     }
 
     private static func jsonInt64(_ value: Any?) -> Int64? {
-        if let i = value as? Int64 { return max(0, i) }
-        if let i = value as? Int { return max(0, Int64(i)) }
-        if let d = value as? Double, d.isFinite { return max(0, Int64(d.rounded())) }
-        if let n = value as? NSNumber { return max(0, n.int64Value) }
-        if let s = value as? String, let d = Double(s) { return max(0, Int64(d.rounded())) }
-        return nil
+        JSONNumber.int64(value)
     }
 
     static func parseResetAt(_ value: Any?) -> Date? {

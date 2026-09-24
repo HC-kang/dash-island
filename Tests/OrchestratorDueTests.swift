@@ -418,6 +418,116 @@ enum OrchestratorDueSuite {
             )
         }
 
+        failures += check("active cadence holds 60s on the fixed 20s tick grid") {
+            // Ticks come from a repeating timer: a fixed grid plus run-loop jitter,
+            // not "lastFetch + k·tick" as the test above assumes. The fetch starts
+            // a little after its tick when earlier accounts hold both slots.
+            let tick = UsageOrchestrator.schedulerTickSeconds
+            let interval = UsageOrchestrator.activePollSeconds
+            let origin = Date(timeIntervalSince1970: 1_700_000_000)
+            let jitter: [TimeInterval] = [0.004, 0.2, 0.01, 0.35, 0.0, 0.12, 0.3, 0.05]
+            let startLag: [TimeInterval] = [0.4, 2.5, 0, 4, 1]
+            var lastFetch: Date?
+            var fires: [Date] = []
+            for k in 0..<60 {
+                let now = origin.addingTimeInterval(tick * Double(k) + jitter[k % jitter.count])
+                if UsageOrchestrator.isDue(
+                    lastFetch: lastFetch,
+                    now: now,
+                    userInterval: interval,
+                    minPoll: 60,
+                    tolerance: UsageOrchestrator.dueTolerance
+                ) {
+                    fires.append(now)
+                    lastFetch = now.addingTimeInterval(startLag[fires.count % startLag.count])
+                }
+            }
+            try assertTrue(fires.count >= 19, "got \(fires.count) fires in 20 min")
+            for (a, b) in zip(fires, fires.dropFirst()) {
+                try assertEqual(b.timeIntervalSince(a), interval, accuracy: 1)
+            }
+        }
+
+        failures += check("due tolerance never pulls a poll a whole tick early") {
+            let last = Date(timeIntervalSince1970: 1_700_000_000)
+            let tol = UsageOrchestrator.dueTolerance
+            try assertTrue(tol > 0 && tol < UsageOrchestrator.schedulerTickSeconds)
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60 - UsageOrchestrator.schedulerTickSeconds),
+                userInterval: 60, minPoll: 60, tolerance: tol
+            ))
+            try assertTrue(UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60 - tol),
+                userInterval: 60, minPoll: 60, tolerance: tol
+            ))
+        }
+
+        failures += check("a soft retry time makes an idle account due before its 15m interval") {
+            // "refresh pending" until a CLI ping lands (~60s): cooldown ends then,
+            // and the idle interval must not add another 15 minutes.
+            let last = Date(timeIntervalSince1970: 1_700_000_000)
+            let idle = UsageOrchestrator.backgroundPollSeconds
+            let tol = UsageOrchestrator.dueTolerance
+            let retry = last.addingTimeInterval(65)
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(60),
+                userInterval: idle, minPoll: 60, tolerance: tol, retryAt: retry
+            ), "not before the retry time")
+            try assertTrue(UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(80),
+                userInterval: idle, minPoll: 60, tolerance: tol, retryAt: retry
+            ), "due once the retry time passed")
+            // The vendor floor still holds.
+            try assertTrue(!UsageOrchestrator.isDue(
+                lastFetch: last, now: last.addingTimeInterval(30),
+                userInterval: idle, minPoll: 60, retryAt: last.addingTimeInterval(20)
+            ), "minPoll is still the floor")
+        }
+
+        failures += check("network errors retry on a short backoff, capped below idle") {
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 1), 60, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 2), 120, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 3), 240, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 4), 480, accuracy: 0)
+            try assertEqual(UsageOrchestrator.transientRetryWait(streak: 40), 480, accuracy: 0)
+            try assertTrue(
+                UsageOrchestrator.transientRetryWait(streak: 40) < UsageOrchestrator.backgroundPollSeconds
+            )
+            // An idle account that just lost the network looks again in 1m, not 15m …
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: nil, lastPrimaryDelta: nil,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 1, now: now
+                ),
+                60, accuracy: 0
+            )
+            // … also behind a locked screen (a wake with Wi-Fi still joining) …
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0, lastPrimaryDelta: 0,
+                    windowResetAt: nil, screenLocked: true, networkFailures: 1, now: now
+                ),
+                60, accuracy: 0
+            )
+            // … and a long outage backs a busy account off instead of hammering.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: 0.5, lastPrimaryDelta: 0.03,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 3, now: now
+                ),
+                240, accuracy: 0
+            )
+            // No failures: unchanged cadence.
+            try assertEqual(
+                UsageOrchestrator.backgroundInterval(
+                    spentSinceAnchor: nil, lastPrimaryDelta: nil,
+                    windowResetAt: nil, screenLocked: false, networkFailures: 0, now: now
+                ),
+                UsageOrchestrator.backgroundPollSeconds, accuracy: 0
+            )
+        }
+
         failures += check("scheduler ticks far below the poll interval") {
             // A tick equal to the interval skipped every other slot, because the
             // lastFetch stamp lands after the HTTP round trip.

@@ -149,6 +149,11 @@ enum CodexAdapterSuite {
             let snap = CodexAdapter.parseUsageResponse(data: Data("not-json".utf8))
             try assertEqual(snap.error, UsageError.parse("parse error"))
         }
+        failures += check("huge token counters never trap") {
+            let window = CodexAdapter.parseWindow(["used_percent": 20, "used_tokens": 1e20, "limit_tokens": "inf"])
+            try assertEqual(window?.usedFraction ?? -1, 0.20, accuracy: 0.0001)
+            try assertTrue(window?.usedTokens == nil)
+        }
         failures += check("clamp used_percent above 100") {
             let json = #"{ "rate_limit": { "primary_window": { "used_percent": 150 } } }"#
             let snap = CodexAdapter.parseUsageResponse(data: Data(json.utf8))
@@ -185,6 +190,18 @@ enum CodexAdapterSuite {
             let old = CodexAdapter.parseUsageResponse(data: Data(#"{"rate_limit":{}}"#.utf8))
             let roundtrip = try JSONDecoder().decode(UsageSnapshot.self, from: JSONEncoder().encode(old))
             try assertTrue(roundtrip.resetCreditsAvailable == nil)
+        }
+        failures += check("reauth keeps auth.json aside, restored on cancel") {
+            let home = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-island-codex-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            let auth = #"{"tokens":{"access_token":"at-old","refresh_token":"rt-old"}}"#
+            try Data(auth.utf8).write(to: home.appendingPathComponent("auth.json"))
+            let prior = CredentialStore.PriorFiles.stash(CodexAdapter.authFiles(codexHome: home))
+            try assertTrue(CodexAdapter.readCredentials(codexHome: home) == nil, "codex login starts signed out")
+            prior.restore()
+            try assertEqual(CodexAdapter.readCredentials(codexHome: home)?.refreshToken, "rt-old")
         }
         failures += check("registry includes codex") {
             try assertTrue(VendorRegistry.adapter(for: "codex") != nil)

@@ -5,6 +5,8 @@ enum LocalUsageReader {
     struct Result {
         var events: [LocalUsageEvent]
         var incomplete: Bool
+        /// Grok logs: offset just past the last complete line read.
+        var readThrough: Int? = nil
     }
 
     static func parse(_ file: URL, provider: String, now: Date = Date()) throws -> Result {
@@ -137,12 +139,34 @@ actor LocalUsageArchive {
         var size: Int
         var walModified: Date? = nil
         var walSize: Int? = nil
+        /// Append-only line logs: file identity and bytes already parsed.
+        var inode: Int? = nil
+        var readThrough: Int? = nil
+
+        func sameContent(as other: Stamp) -> Bool {
+            modified == other.modified && size == other.size
+                && walModified == other.walModified && walSize == other.walSize
+        }
     }
+    /// Events older than this leave the archive. Matches the collector (RETENTION_DAYS in
+    /// scripts/usage-collector.py): the panel reads 30 days, a year stays for comparisons.
+    static let retentionDays = 400
     struct Archive: Codable {
         var version = 1
         var events: [String: LocalUsageEvent] = [:]
         var files: [String: Stamp] = [:]
         var incompleteFiles: Set<String> = []
+
+        init(events: [String: LocalUsageEvent] = [:]) { self.events = events }
+
+        // Missing keys take their defaults, so adding a field never makes saved history unreadable.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            events = try c.decodeIfPresent([String: LocalUsageEvent].self, forKey: .events) ?? [:]
+            files = try c.decodeIfPresent([String: Stamp].self, forKey: .files) ?? [:]
+            incompleteFiles = try c.decodeIfPresent(Set<String>.self, forKey: .incompleteFiles) ?? []
+        }
     }
     struct Snapshot: Sendable {
         var events: [LocalUsageEvent]
@@ -176,7 +200,12 @@ actor LocalUsageArchive {
         var archive = loaded[key]!
         let fm = FileManager.default
         var readError = false
+        var changed = false
+        var seen = Set<String>()
         let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: now)!
+        // Grok lines stand alone, so a grown log is read from where we stopped. Codex
+        // lines depend on earlier session/model lines; Claude parse drops future lines itself.
+        let appendOnly = provider == "grok"
         for root in Set(roots.map { $0.standardizedFileURL }) where fm.fileExists(atPath: root.path) {
             guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles], errorHandler: { _, _ in readError = true; return true }) else { readError = true; continue }
@@ -188,11 +217,22 @@ actor LocalUsageArchive {
                     let wal = provider == "agy" ? try? URL(fileURLWithPath: file.path + "-wal")
                         .resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) : nil
                     guard max(modified, wal?.contentModificationDate ?? .distantPast) >= cutoff else { continue }
-                    let stamp = Stamp(modified: modified, size: size, walModified: wal?.contentModificationDate, walSize: wal?.fileSize)
-                    guard archive.files[file.path] != stamp else { continue }
+                    seen.insert(file.path)
+                    var stamp = Stamp(modified: modified, size: size, walModified: wal?.contentModificationDate, walSize: wal?.fileSize)
+                    let old = archive.files[file.path]
+                    guard old?.sameContent(as: stamp) != true else { continue }
+                    var start = 0
+                    if appendOnly {
+                        stamp.inode = (try? fm.attributesOfItem(atPath: file.path)[.systemFileNumber]) as? Int
+                        // Same file, only grown: skip what we already parsed. Replaced or shrunk: start over.
+                        if let old, let through = old.readThrough, old.inode != nil, old.inode == stamp.inode,
+                           size >= old.size, size >= through {
+                            start = through
+                        }
+                    }
                     let parsed: LocalUsageReader.Result
                     switch provider {
-                    case "grok": parsed = try GrokUsageReader.read(file)
+                    case "grok": parsed = try GrokUsageReader.read(file, from: start)
                     case "agy": parsed = try AntigravityUsageReader.read(file)
                     default: parsed = try LocalUsageReader.parse(file, provider: provider, now: now)
                     }
@@ -201,17 +241,34 @@ actor LocalUsageArchive {
                             if event.tokens.contains(old.tokens) { archive.events[event.id] = event }
                         } else { archive.events[event.id] = event }
                     }
+                    changed = true
+                    // A line written during this refresh can be stamped after `now` and was
+                    // dropped above. Keep the old stamp so the next refresh reads it again.
+                    guard !parsed.events.contains(where: { $0.date > now }) else { continue }
+                    if appendOnly { stamp.readThrough = parsed.readThrough }
                     archive.files[file.path] = stamp
+                    // A partial read cannot prove earlier lines complete; only a full read clears the mark.
                     if parsed.incomplete { archive.incompleteFiles.insert(file.path) }
-                    else { archive.incompleteFiles.remove(file.path) }
+                    else if start == 0 { archive.incompleteFiles.remove(file.path) }
                 } catch { readError = true }
             }
         }
-        // ponytail: one atomic JSON archive per provider; switch to SQLite if retained metadata becomes large.
+        // Stamps of vanished or aged-out files and events past retention only grow the file.
+        let keepSince = Calendar.current.date(byAdding: .day, value: -Self.retentionDays, to: now)!
+        let kept = archive.files.filter { seen.contains($0.key) }
+        let recent = archive.events.filter { $0.value.date >= keepSince }
+        if kept.count != archive.files.count || recent.count != archive.events.count
+            || !archive.incompleteFiles.isSubset(of: seen) {
+            archive.files = kept
+            archive.events = recent
+            archive.incompleteFiles.formIntersection(seen)
+            changed = true
+        }
+        // ponytail: one atomic JSON archive per provider, rewritten only when something changed; switch to SQLite if retained metadata becomes large.
         var notice: String? = readError || !archive.incompleteFiles.isEmpty ? "Some local records could not be included." : nil
         if unreadable.contains(key) {
             notice = "Saved history could not be read. Original file preserved."
-        } else {
+        } else if changed {
             do {
                 try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                 let file = directory.appendingPathComponent("\(key).json")

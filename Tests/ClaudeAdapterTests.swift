@@ -54,16 +54,51 @@ enum ClaudeAdapterSuite {
             try assertEqual(snap.primary.usedFraction, 0.005, accuracy: 0.00001)
             try assertEqual(snap.secondary?.usedFraction ?? -1, 0.01, accuracy: 0.00001)
         }
-        failures += check("missing windows → zero primary, nil secondary") {
+        failures += check("missing windows are not reported, never a real 0%") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("{}".utf8), plan: nil)
             try assertEqual(snap.error, nil as UsageError?)
-            try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
+            try assertTrue(!snap.primary.isReported, "no windows → placeholder, not last-good")
             try assertEqual(snap.primary.kind, UsageWindowKind.fiveHour)
             try assertTrue(snap.secondary == nil)
+            let nulls = ClaudeAdapter.parseUsageResponse(
+                data: Data(#"{"five_hour":null,"seven_day":null}"#.utf8),
+                plan: nil
+            )
+            try assertTrue(!nulls.primary.isReported)
+            try assertTrue(nulls.secondary == nil)
+        }
+        failures += check("null seven_day is no weekly ring, not a 0% one") {
+            let json = #"{"five_hour":{"utilization":12},"seven_day":null}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.12, accuracy: 0.0001)
+            try assertTrue(snap.secondary == nil, "JSON null must not become a 0% week")
+            let noNumber = #"{"five_hour":{"utilization":12},"seven_day":{"resets_at":null}}"#
+            try assertTrue(ClaudeAdapter.parseUsageResponse(data: Data(noNumber.utf8), plan: nil).secondary == nil)
+        }
+        failures += check("idle 5h window next to a real week reads 0% (reported)") {
+            // Ambiguous on purpose: a null five_hour beside a live week is an idle window.
+            let json = #"{"five_hour":null,"seven_day":{"utilization":30}}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertTrue(snap.primary.isReported)
+            try assertEqual(snap.primary.usedFraction, 0, accuracy: 0.0001)
+            try assertEqual(snap.secondary?.usedFraction ?? -1, 0.30, accuracy: 0.0001)
         }
         failures += check("invalid JSON → parse error") {
             let snap = ClaudeAdapter.parseUsageResponse(data: Data("not-json".utf8), plan: nil)
             try assertEqual(snap.error, UsageError.parse("parse error"))
+        }
+        failures += check("huge or non-finite numbers never trap") {
+            try assertTrue(ClaudeAdapter.jsonInt64(1e20) == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64(-1e20) == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64("inf") == nil)
+            try assertTrue(ClaudeAdapter.jsonInt64("nan") == nil)
+            try assertEqual(ClaudeAdapter.jsonInt64(42.6), 43)
+            try assertEqual(ClaudeAdapter.jsonInt64("-5"), 0)
+            try assertTrue(ClaudeAdapter.jsonNumber("inf") == nil)
+            let json = #"{"five_hour":{"used_tokens":1e20,"limit_tokens":"inf","utilization":10}}"#
+            let snap = ClaudeAdapter.parseUsageResponse(data: Data(json.utf8), plan: nil)
+            try assertEqual(snap.primary.usedFraction, 0.10, accuracy: 0.0001)
+            try assertTrue(snap.primary.usedTokens == nil)
         }
         failures += check("clamp utilization above 100") {
             let json = #"{ "five_hour": { "utilization": 150 } }"#
@@ -152,9 +187,6 @@ enum ClaudeAdapterSuite {
             let noRefresh = ClaudeAdapter.ClaudeCreds(
                 accessToken: "a", refreshToken: nil, subscriptionType: nil, expiresAt: slightlyPast, rawJSON: nil
             )
-            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(fresh))
-            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(softExpired))
-            try assertTrue(ClaudeAdapter.shouldProbeBeforeRefresh(hoursDead))
             try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: nil, credentials: fresh, now: now))
             try assertTrue(
                 !ClaudeAdapter.shouldAttemptRefresh(
@@ -166,9 +198,9 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: softExpired, now: now))
             try assertTrue(ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: hoursDead, now: now))
             try assertTrue(!ClaudeAdapter.shouldAttemptRefresh(after: .authRequired, credentials: noRefresh, now: now))
-            try assertTrue(ClaudeAdapter.needsRefresh(fresh) == false)
-            try assertTrue(ClaudeAdapter.needsRefresh(softExpired))
-            try assertTrue(ClaudeAdapter.needsRefresh(noRefresh) == false)
+            try assertTrue(ClaudeAdapter.shouldRefresh(fresh) == false)
+            try assertTrue(ClaudeAdapter.shouldRefresh(softExpired))
+            try assertTrue(ClaudeAdapter.shouldRefresh(noRefresh) == false)
         }
         failures += check("managed-file adoption requires a rotated access token") {
             let current = ClaudeAdapter.ClaudeCreds(
@@ -334,7 +366,6 @@ enum ClaudeAdapterSuite {
             {"claudeAiOauth":{"accessToken":"sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","refreshToken":"sk-ant-ort01-refresh-token-value-here-xxxx","expiresAt":\(expMs)}}
             """
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
-            try assertTrue(!ClaudeAdapter.isHardExpired(creds), "3h is within week stale window")
             try assertTrue(ClaudeAdapter.canAttemptRefresh(creds))
             try assertTrue(ClaudeAdapter.shouldRefresh(creds))
         }
@@ -347,13 +378,12 @@ enum ClaudeAdapterSuite {
             try assertTrue(ClaudeAdapter.canAttemptRefresh(creds))
             try assertTrue(ClaudeAdapter.shouldRefresh(creds))
         }
-        failures += check("week-old access is hard-expired") {
+        failures += check("week-old access without refresh expiry cannot refresh") {
             let expMs = Int((Date().timeIntervalSince1970 - 10 * 24 * 3600) * 1000)
             let json = """
             {"claudeAiOauth":{"accessToken":"sk-ant-oat01-cccccccccccccccccccccccccccccccccccccccc","refreshToken":"sk-ant-ort01-refresh-token-value-here-zzzz","expiresAt":\(expMs)}}
             """
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))!
-            try assertTrue(ClaudeAdapter.isHardExpired(creds))
             try assertTrue(!ClaudeAdapter.canAttemptRefresh(creds))
         }
         failures += check("soft error must not become last-good retainable") {
@@ -379,18 +409,8 @@ enum ClaudeAdapterSuite {
             let creds = ClaudeAdapter.parseCredentialsJSON(Data(json.utf8))
             try assertTrue(creds != nil)
             try assertTrue(ClaudeAdapter.isLongLived(creds!))
-            try assertTrue(!ClaudeAdapter.needsRefresh(creds!))
+            try assertTrue(!ClaudeAdapter.shouldRefresh(creds!))
             try assertTrue(!ClaudeAdapter.isExpired(creds!))
-        }
-        failures += check("normalizePastedToken accepts sk-ant- line") {
-            // Real tokens are ~100+ chars; short strings must fail.
-            let short = "sk-ant-oat01-tooshort"
-            try assertTrue(ClaudeAdapter.normalizePastedToken(short) == nil)
-            let ok = "sk-ant-oat01-" + String(repeating: "a", count: 80)
-            let messy = "  \(ok)  \n"
-            let t = ClaudeAdapter.normalizePastedToken(messy)
-            try assertTrue(t?.hasPrefix("sk-ant-oat01-") == true)
-            try assertTrue(ClaudeAdapter.normalizePastedToken("not-a-token") == nil)
         }
         failures += check("CLI oauth with refresh still needs refresh near expiry") {
             let expMs = Int((Date().timeIntervalSince1970 - 60) * 1000)
@@ -403,7 +423,7 @@ enum ClaudeAdapterSuite {
             // actually access is oat but has refresh - isLongLived checks longLived flag first, then !hasRefresh && looksLike
             // has refresh so isLongLived false unless flagged
             try assertTrue(!ClaudeAdapter.isLongLived(creds!))
-            try assertTrue(ClaudeAdapter.needsRefresh(creds!))
+            try assertTrue(ClaudeAdapter.shouldRefresh(creds!))
         }
         failures += check("multi-account isolation is path-based (separate config dirs)") {
             let a = URL(fileURLWithPath: "/tmp/dash-claude-acct-a", isDirectory: true)
@@ -432,10 +452,10 @@ enum ClaudeAdapterSuite {
             try assertTrue(svcB != "Claude Code-credentials")
             try assertTrue(!svcA.hasSuffix("-"))
         }
-        failures += check("existingAccessToken / capture prefer the managed file") {
+        failures += check("existingCredentials / capture prefer the managed file") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }
-            try assertTrue(ClaudeAdapter.existingAccessToken(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.existingCredentials(configDir: dir) == nil)
             try assertTrue(ClaudeAdapter.captureLoginCredentials(configDir: dir) == nil)
             try assertTrue(ClaudeAdapter.readCredentials(configDir: dir) == nil)
 
@@ -447,7 +467,7 @@ enum ClaudeAdapterSuite {
                 rawJSON: nil
             )
             ClaudeAdapter.persistCredentialsFile(creds: written, configDir: dir, overwrite: true)
-            try assertEqual(ClaudeAdapter.existingAccessToken(configDir: dir), "file-access-A")
+            try assertEqual(ClaudeAdapter.existingCredentials(configDir: dir)?.accessToken, "file-access-A")
             try assertEqual(ClaudeAdapter.captureLoginCredentials(configDir: dir)?.accessToken, "file-access-A")
             try assertEqual(ClaudeAdapter.readCredentials(configDir: dir)?.refreshToken, "file-refresh-A")
         }
@@ -480,10 +500,28 @@ enum ClaudeAdapterSuite {
             ClaudeAdapter.clearManagedCredentials(configDir: dir)
 
             try assertTrue(ClaudeAdapter.readCredentialsFile(configDir: dir) == nil)
-            try assertTrue(ClaudeAdapter.existingAccessToken(configDir: dir) == nil)
+            try assertTrue(ClaudeAdapter.existingCredentials(configDir: dir) == nil)
             try assertTrue(!FileManager.default.fileExists(atPath: lastGoodURL.path))
             // Wipe must not invent a global Keychain service name.
             try assertTrue(ClaudeAdapter.scopedKeychainService(for: dir) != "Claude Code-credentials")
+        }
+        failures += check("credential file is 0600 and a failed write is reported") {
+            let dir = try makeTempDir()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+                try? FileManager.default.removeItem(at: dir)
+            }
+            let creds = ClaudeAdapter.ClaudeCreds(
+                accessToken: "at", refreshToken: "rt", subscriptionType: nil, expiresAt: nil, rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.persistCredentialsFile(creds: creds, configDir: dir, overwrite: true))
+            let file = dir.appendingPathComponent(".credentials.json")
+            let mode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
+            try assertEqual(mode, 0o600)
+            try FileManager.default.removeItem(at: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+            // commitHarvestedCredentials deletes the Keychain copy only after this is true.
+            try assertTrue(!ClaudeAdapter.persistCredentialsFile(creds: creds, configDir: dir, overwrite: true))
         }
         failures += check("reauth composition: snapshot → wipe → leftover vs new session") {
             let dir = try makeTempDir()
@@ -640,13 +678,15 @@ enum ClaudeAdapterSuite {
                 ClaudeAdapter.UsageSmokeDecision.softKeep
             )
         }
-        failures += check("setup-token paste policy in a temp dir") {
+        failures += check("stored setup-token file stays long-lived in a temp dir") {
             let dir = try makeTempDir()
             defer { try? FileManager.default.removeItem(at: dir) }
-            try assertTrue(ClaudeAdapter.normalizePastedToken("sk-ant-oat01-tooshort") == nil)
-            try assertTrue(ClaudeAdapter.normalizePastedToken("garbage") == nil)
             let tok = "sk-ant-oat01-" + String(repeating: "z", count: 80)
-            try ClaudeAdapter.installSetupToken(tok, configDir: dir)
+            let pasted = ClaudeAdapter.ClaudeCreds(
+                accessToken: tok, refreshToken: nil, subscriptionType: nil, expiresAt: nil,
+                longLived: true, rawJSON: nil
+            )
+            try assertTrue(ClaudeAdapter.persistCredentialsFile(creds: pasted, configDir: dir, overwrite: true))
             let installed = ClaudeAdapter.readCredentials(configDir: dir)
             try assertTrue(installed != nil)
             try assertTrue(ClaudeAdapter.isLongLived(installed!))
@@ -760,7 +800,6 @@ enum ClaudeAdapterSuite {
                 refreshExpiresAt: now.addingTimeInterval(20 * 24 * 3600),
                 rawJSON: nil
             )
-            try assertTrue(ClaudeAdapter.isHardExpired(creds, now: now))
             try assertTrue(ClaudeAdapter.canAttemptRefresh(creds, now: now))
         }
         failures += check("proactive refresh: 5m access skew + 24h refresh-rotate") {

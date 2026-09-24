@@ -11,20 +11,34 @@ struct NotchRimGlow: View {
     var period: TimeInterval = 2.8
     /// Highlight tint (defaults to white/silver).
     var accent: Color = .white
+    /// Sweep frame interval from `MotionPolicy`; `nil` draws a still rim.
+    var frameInterval: TimeInterval? = nil
+
+    /// Still rim: highlight parked at the bottom center (peak stop 0.54 → 90°).
+    private static let restPhase = 0.96
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: period) / period
-
-            NotchRimPath(bottomRadius: bottomRadius)
-                .stroke(
-                    flowingGradient(phase: phase),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
-                )
+        Group {
+            if let frameInterval {
+                TimelineView(.animation(minimumInterval: frameInterval)) { context in
+                    let phase = context.date.timeIntervalSinceReferenceDate
+                        .truncatingRemainder(dividingBy: period) / period
+                    rim(phase: phase)
+                }
+            } else {
+                rim(phase: Self.restPhase)
+            }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private func rim(phase: Double) -> some View {
+        NotchRimPath(bottomRadius: bottomRadius)
+            .stroke(
+                flowingGradient(phase: phase),
+                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+            )
     }
 
     /// Highlight band sweeps around the U via rotating angular stops.
@@ -44,5 +58,18 @@ struct NotchRimGlow: View {
             center: .center,
             angle: start
         )
+    }
+}
+
+private struct IslandMotionKey: EnvironmentKey {
+    static let defaultValue = MotionPolicy.Conditions()
+}
+
+extension EnvironmentValues {
+    /// Low Power / occlusion state of the island window (see `IslandModel`).
+    /// Views OR in their own `accessibilityReduceMotion`.
+    var islandMotion: MotionPolicy.Conditions {
+        get { self[IslandMotionKey.self] }
+        set { self[IslandMotionKey.self] = newValue }
     }
 }

@@ -11,12 +11,18 @@ import hmac
 import json
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Bump on every behavior change: connect-usage.py replaces an installed copy with a lower
+# VERSION, and collector-status.json reports which copy is running.
+VERSION = 2
 MAX_BODY = 4 * 1024 * 1024
+RETENTION_DAYS = 400  # The app reads at most 30 days; keep a year for comparisons.
+LOG_LIMIT = 1024 * 1024  # launchd appends stderr to collector-errors.log forever otherwise.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_events (
  provider TEXT NOT NULL, identity TEXT NOT NULL, event_id TEXT NOT NULL,
@@ -25,6 +31,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
  cache_write INTEGER NOT NULL, cache_read INTEGER NOT NULL,
  dollars REAL, PRIMARY KEY(provider, identity, event_id)
 );
+CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(provider, timestamp);
 """
 
 
@@ -56,7 +63,39 @@ def integer(value):
     return int(number)
 
 
-def parse_record(record, resource):
+RATE_KEYS = ("inputPerMillion", "outputPerMillion", "cacheCreationPerMillion", "cacheReadPerMillion")
+
+
+def load_prices(path):
+    """The app's cached UsagePriceCatalog as {model: rates}; None when missing or invalid."""
+    try:
+        catalog = json.loads(path.read_bytes())
+        if catalog["schemaVersion"] != 1 or not catalog["models"]:
+            return None
+        prices = {}
+        for model, price in catalog["models"].items():
+            rates = [float(price[key]) for key in RATE_KEYS]
+            if not all(math.isfinite(rate) and 0 <= rate <= 100_000 for rate in rates):
+                return None  # Same rule as UsagePriceCatalog.valid: one bad row rejects the file.
+            prices[model] = rates
+        return prices
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def estimate(prices, model, tokens):
+    """Mirror UsagePriceCatalog.price(for:).estimate: exact model, else drop a -YYYYMMDD suffix."""
+    prices = prices or {}
+    rates = prices.get(model)
+    suffix = model[-9:]
+    if rates is None and len(suffix) == 9 and suffix[0] == "-" and suffix[1:].isascii() and suffix[1:].isdigit():
+        rates = prices.get(model[:-9])
+    if rates is None:
+        return None
+    return sum(count * rate for count, rate in zip(tokens, rates)) / 1_000_000
+
+
+def parse_record(record, resource, prices=None):
     a = dict(resource)
     a.update(attributes(record.get("attributes")))
     if a.get("dash_island.purpose") == "auth_refresh":
@@ -104,7 +143,7 @@ def parse_record(record, resource):
         if not session:
             return None
         event_id = str(session) + ":" + str(stamp)
-        dollars = None
+        dollars = None  # Priced below, once the model is known.
     else:
         return None
     if not owner or not isinstance(event_id, str) or not 0 < len(event_id) <= 1024:
@@ -114,17 +153,23 @@ def parse_record(record, resource):
         return None
     if not math.isfinite(timestamp) or timestamp <= 0 or sum(tokens) == 0:
         return None
+    if provider == "codex":
+        # Codex reports no cost. Store the API-equivalent price the detail panel would show,
+        # so projection learns from Codex too. Unknown models stay NULL (read-time pricing).
+        dollars = estimate(prices, model, tokens)
+        if dollars is not None and not 0 <= dollars <= 1e6:
+            dollars = None
     return (provider, owner, event_id, timestamp, model, *tokens, dollars)
 
 
-def ingest(db, payload):
+def ingest(db, payload, prices=None):
     accepted = 0
     for resource in payload.get("resourceLogs", []):
         common = attributes(resource.get("resource", {}).get("attributes"))
         for scope in resource.get("scopeLogs", []):
             for record in scope.get("logRecords", []):
                 try:
-                    row = parse_record(record, common)
+                    row = parse_record(record, common, prices)
                 except (ValueError, TypeError, KeyError, OverflowError, AttributeError):
                     continue
                 if row:
@@ -134,12 +179,58 @@ def ingest(db, payload):
     return accepted
 
 
+def prune(db, now, days=RETENTION_DAYS):
+    newest = db.execute("SELECT MAX(timestamp) FROM usage_events").fetchone()[0]
+    if newest is None:
+        return 0
+    # Age counts from the newest row too, so a clock set far ahead cannot erase history.
+    cursor = db.execute("DELETE FROM usage_events WHERE timestamp < ?", (min(now, newest) - days * 86400,))
+    db.commit()
+    return cursor.rowcount
+
+
+def trim_log(path, limit=LOG_LIMIT):
+    # launchd holds the file open with O_APPEND, so truncating in place is safe.
+    try:
+        if path.stat().st_size > limit:
+            shutil.copyfile(path, path.with_name(path.name + ".1"))
+            os.truncate(path, 0)
+    except OSError:
+        pass
+
+
+def write_status(directory, status):
+    temp = directory / "collector-status.tmp"
+    temp.write_text(json.dumps(status))
+    temp.replace(directory / "collector-status.json")
+
+
 def serve(directory, port):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     token = (directory / "collector-token").read_text().strip()
     db = sqlite3.connect(directory / "account-usage.sqlite")
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    try:
+        status = json.loads((directory / "collector-status.json").read_text())
+    except (OSError, ValueError):
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    # Keep lastBatchAt across restarts; version/startedAt say which copy is running.
+    status.update(version=VERSION, startedAt=time.time())
+    write_status(directory, status)
+    catalog = directory.parent / "usage-prices.json"  # Written by the app (LocalUsageStore).
+    cached = {"stamp": None, "prices": None}
+
+    def current_prices():
+        try:
+            stamp = catalog.stat().st_mtime_ns
+        except OSError:
+            return None
+        if stamp != cached["stamp"]:
+            cached.update(stamp=stamp, prices=load_prices(catalog))
+        return cached["prices"]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -167,11 +258,9 @@ def serve(directory, port):
                 payload = json.loads(raw)
                 if not isinstance(payload, dict):
                     raise ValueError("object required")
-                accepted = ingest(db, payload)
-                status = {"lastBatchAt": time.time(), "accepted": accepted}
-                temp = directory / "collector-status.tmp"
-                temp.write_text(json.dumps(status))
-                temp.replace(directory / "collector-status.json")
+                accepted = ingest(db, payload, current_prices())
+                status.update(lastBatchAt=time.time(), accepted=accepted)
+                write_status(directory, status)
             except (ValueError, TypeError, KeyError, AttributeError, TimeoutError):
                 db.rollback()
                 self.send_error(400)
@@ -187,6 +276,20 @@ def serve(directory, port):
             self.wfile.write(b"{}")
 
     class CollectorServer(HTTPServer):
+        maintained = 0
+
+        def service_actions(self):
+            # serve_forever calls this between requests (about every 0.5 s); hourly is enough.
+            now = time.time()
+            if now - self.maintained < 3600:
+                return
+            self.maintained = now
+            try:
+                prune(db, now)
+            except sqlite3.Error:
+                db.rollback()
+            trim_log(directory / "collector-errors.log")
+
         def get_request(self):
             connection, address = super().get_request()
             # Apply before BaseHTTPRequestHandler reads the request line/headers.

@@ -80,7 +80,7 @@ enum AccountChromeActions {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
             message: adapter.id == "agy"
-                ? "A Terminal window should open for Antigravity. If you already use agy, we copy that session — wait a moment."
+                ? "A Terminal window opens for Antigravity. Sign in there, then close it. This window waits up to 3 minutes."
                 : "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
             vendorID: adapter.id,
             onCancel: {
@@ -165,11 +165,18 @@ enum AccountChromeActions {
             return
         }
 
+        let message: String
+        switch account.vendorID {
+        case "claude":
+            message = "Extending this Claude session. Browser sign-in only if the refresh token is dead."
+        case "agy":
+            message = "Extending this Antigravity session. A Terminal sign-in opens only if the stored session no longer works."
+        default:
+            message = "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds."
+        }
         IslandDialogController.shared.showProgress(
             title: "Reauthenticate",
-            message: account.vendorID == "claude"
-                ? "Extending this Claude session. Browser sign-in only if the refresh token is dead."
-                : "Old credentials for this account were cleared. Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes).",
+            message: message,
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()
@@ -180,11 +187,18 @@ enum AccountChromeActions {
         addTask?.cancel()
         addTask = Task {
             defer { IslandDialogController.shared.hideProgress() }
+            // No poll while the adapter has the session files moved aside; a
+            // poll there left a red "reauth" for 30m after Cancel.
+            await UsageOrchestrator.shared.beginReauth(accountID: account.id)
+            var replaced = false
+            defer { UsageOrchestrator.shared.endReauth(accountID: account.id, succeeded: replaced) }
+            if Task.isCancelled { return }
             do {
                 let newRef = try await adapter.reauthenticate(account.credentialRef)
+                // The folder holds the new session now, even if Cancel came late.
+                replaced = true
                 if Task.isCancelled { return }
                 try AccountStore.shared.markAuthenticated(id: account.id, credentialRef: newRef)
-                UsageOrchestrator.shared.refresh(accountID: account.id)
             } catch is CancellationError {
                 // ignored
             } catch {

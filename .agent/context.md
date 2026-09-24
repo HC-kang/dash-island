@@ -584,3 +584,75 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Biggest product gap vs market (CodexBar, codenotch, codex-island, Pulse, Codex Pulse variants): compact island shows no data; no threshold alerts; no ETA text; no Sparkle/CI. "Codex Pulse" is 11+ unrelated repos, not one product.
 - Privacy scrub (2026-09-23, chore/scrub-sensitive): the repo is PUBLIC and tracks this file. Removed employer name, account ID prefixes, identity hashes, work repo/branch names, session UUID, PIDs, spend amounts, and `/Users/<name>` paths from this file, docs, test fixtures, and code comments. Old values remain in git history until a history rewrite is decided.
 - Rule: never write real account IDs, identity hashes, PIDs, session IDs, work repo/branch names, employer names, spend amounts, or absolute home paths into tracked files. Use placeholders (`<acct>`, `ABCDEF12`, `~/`).
+
+## Phase 1 auth stream (2026-09-23, branch p1/auth)
+
+- `LoginProcess.supervise` / `waitForExit`: every CLI child (login, logout, ping, `security`) ends on return, throw and task cancel. Old loops skipped terminate when cancel hit `try await Task.sleep`, and `try?` sleep loops spun to their deadline.
+- Agy add/reauth: visible `agy` in Terminal with HOME = managed folder (`.dash-island-agy-login.command` writes its PID so Cancel can kill it). No `agy --print` model ping on the login path. Reauth tries HTTP refresh first; login only if Google rejects, with old files moved aside and `isAcceptableLogin` rejecting the prior session. Unverified live: whether `agy` in a fresh HOME reads the global `gemini/antigravity` Keychain item instead of showing sign-in.
+- Reauth never deletes a working session: `CredentialStore.PriorFiles` moves files to `<name>.prior`, restore on failure/cancel, discard on success (Codex, Grok, Agy). A `.prior` left by a crash is adopted by the next stash.
+- `TokenHostFailure.classify` is the one token-endpoint classifier: only invalid_grant / invalid_token / refresh_token_* reject; 429/5xx/network/unknown are soft "token quiet" with retryAt (429 capped 15m). Grok 429 is no longer a usage 429; Codex busy host is no longer red "reconnect".
+- Credential writes go through `CredentialStore.writeSecret` (atomic, 0600, read-back). Claude deletes its hashed Keychain item only after the file verifies. New account folders are 0700; old 0755 folders tighten only when `createDirectory` runs (reauth). `credentialRef` "", ".", ".." or with "/" is refused, so remove cannot wipe the accounts root.
+- Supersedes Task 9: Grok Add no longer copies `~/.grok/auth.json` when the CLI is missing (shared refresh family). Claude setup-token paste code removed (no UI used it); stored long-lived files still work.
+- Missing windows: Claude null `seven_day` → no weekly ring; no window at all → `reported = false`. A null `five_hour` beside a live week stays 0% (idle window, unverified API shape). Agy daily/unlabeled → `.unknown`; resetTime without remainingFraction → exhausted.
+- Tests: `StubHTTP` (URLProtocol) answers `URLSession.shared` in-process, so adapter refresh paths are tested with temp dirs and no vendor traffic.
+
+## Phase 1 stream polling (2026-09-23, branch p1/polling)
+
+- Local burn scan runs in a detached utility task. `ClaudeActivity.LogCache` keeps an (inode, offset) cursor and parsed events (15m retention) per file, so an unchanged file costs one `stat`. The sampler no longer skips while a poll runs: both timers fire on the same second, and that guard dropped most samples of a busy account.
+- Fetch uses `forEachBounded`: 2 in flight, each result applied on arrival. Usage GET `timeoutInterval = 20` (Claude/Codex/Grok; Agy already 12).
+- The Claude CLI ping runs detached (`startBackgroundCLIPing`). While it runs, `CLIPingRegistry` makes polls return "refresh pending" and `discardCLIKeychainCopy` does nothing. Reason: the CLI may delete `.credentials.json` during the ping, and a poll then read "no credentials" (false red reauth + 30m auth cooldown). Keep this guard if the ping moves again.
+- Cadence: `lastFetchAt` = fetch start; `isDue` tolerance = half a tick. A cadence test must walk an absolute tick grid with jitter. Walking `lastFetch + k·tick` hid the 80s aliasing.
+- Network errors back off 1/2/4/8m (`networkFailureStreak`); any other answer resets the streak.
+- `PollGenerations`: reauth (`refresh(accountID:)`) bumps it and in-flight results are dropped. Event polls that meet a running poll are queued (`queuedPoll`); timer ticks are not.
+- Reauth clears the projection identity, projection, primary delta, and burn. Last-good (memory + file) goes only when both identities are known and differ.
+- Wake: `WakeScheduling` holds polls 60s (manual refresh bypasses it). A tick >120s late counts as a wake and clears `systemAsleep`.
+- `UsageProjection.applyRead` drops a SQLite read when a poll re-anchored during the await.
+
+## Island UI pass — Phase 1 stream `ui` (2026-09-23, branch p1/ui)
+
+- Canvas is not Animatable. `withAnimation` on @State that only a Canvas reads never interpolates. The ring/needle "springs" (Task 10, Burn motion UI) only blanked the rings ~80 ms per expand, then snapped (pixel probe). GaugeRingView now draws its inputs directly. To animate Canvas drawing, use an Animatable wrapper or TimelineView math.
+- `MotionPolicy` (Domain, tested) sets frame intervals. Compact rim: still unless a fetch is in flight. Expanded rim: 30 fps. Gauge: still at rest (energy < 0.05, jitter < 0.25pt), 15/30 fps above. Everything is still under Reduce Motion, Low Power, an occluded window, or sleeping displays. A TimelineView keeps ticking in an ordered-out window, so pause it explicitly. Scratch host: still rim 0.0% CPU, animated rim 4.1%.
+- Correction to 2026-07-19 ("activate on hover") and 2026-09-15 ("Hover itself may activate the app"): on macOS 15+ hover no longer activates. SwiftUI hover tracking areas are `.activeAlways`, the add Menu's popup button accepts first mouse, and clicks reach SwiftUI via `allowsWindowActivationEvents`. macOS 13/14 keep hover activation (not runtime-tested). Hover expands after 200 ms. After a pointer collapse, the previously frontmost app gets focus back. A space change clears that app, because activating it would swipe spaces.
+- A closed NSPanel keeps its SwiftUI view mounted, so `.task` loops keep running. Set `contentViewController = nil` on close. The detail panel reloaded usage every 15 s forever before this.
+- Floating panels hide on deactivate, but `isOpen` stayed true and held the island open. Prefs and details now close on resign active. Dialogs release the island on resign active and hold it again on become active.
+- Destructive confirm: Return = Cancel, Remove is click-only, Escape goes through `DialogPanel.cancelOperation`. A scratch key-event check confirmed Return removed before the fix.
+- `IslandGeometry` (Domain, tested) owns island geometry. Non-notch displays show a 64×4 top-edge handle. The handle and its hit area are hidden while a layer-0 window covers the display (CGWindowList bounds only, no window names, no permission prompt).
+- Known limits: `.help` tooltips and the pointing-hand cursor may not show while the app is inactive. `check-widget-render.sh` and `check-detail-toggle.sh` are not executable in git; run them with `bash`.
+
+## Phase 1 stream `data` (2026-09-23, branch p1/data)
+
+- core-08 status: exact component names only (`VendorStatusStore.claudeComponents`, `openAIComponents` = Codex API, Codex Web, Codex in ChatGPT Desktop, CLI, VS Code extension; names checked on the live page, CLI/VS Code share creation IDs with the Codex entries). Incidents count only when their `components` list one of ours. The page-wide indicator is used only when none of our names is on the page.
+- core-12 persistence: accounts.json decodes per row; a bad row is skipped, backed up and logged at warn; an all-bad list still throws (AccountStore folder rebuild). `UsageSnapshot` and `LocalUsageArchive.Archive` decode missing defaulted keys. Rule: a persisted Codable type with a defaulted non-optional field needs a `decodeIfPresent` `init(from:)` (in an extension, to keep the memberwise init).
+- core-15 log: `LogFile` opens with O_APPEND and reopens when the path inode differs from the fd inode (the other process rotated). This supersedes "each append seeks to end". Sink off is reported once to the unified log through the `report` closure, never through `Log.write` (the lock is not reentrant).
+- core-11 projection: `capturedDollars` prices NULL-dollar rows by model from `AccountUsageReader.prices` (cache, else bundle; loaded once; shared with LocalUsageStore). Unknown models stay unpriced. Not done (orchestrator file): a COUNT-based active-poll signal for unpriced rows.
+- core-10 errors: `UnavailableReason` is the one classifier for `.unavailable` text; a bare "rate" no longer matches ("generate"). `UsageOrchestrator.caption/detailCaption` still run their own substring checks; switch them to `error.unavailableReason` when that file is next changed. `.parse` keeps the red dot (behavior kept).
+- core-06 archive: only Grok logs resume from the last complete line (`Stamp.inode` + `readThrough`). Codex lines depend on earlier session lines and Claude parse drops lines newer than `now` itself, so both keep full reads. The archive is written only on change; events older than 90 days and stamps of unseen files are pruned. An event dated after the refresh's `now` keeps the old stamp, so the next refresh reads it again.
+- core-16: PreferencesStore writes to the injected defaults. `ServiceLevel`/`VendorServiceSnapshot` live in Domain. Left: `WidgetViewModel.hoverLines` still calls `UsageOrchestrator.formatResetRemaining` (move its body to Domain from the orchestrator side).
+
+## Scripts hardening — Phase 1 stream `scripts` (2026-09-23, branch p1/scripts)
+
+- Collector carries `VERSION` (now 2) and writes `version`/`startedAt` to `tracking/collector-status.json` at start (`lastBatchAt` survives restarts). `connect-usage.py` replaces an installed copy with a lower version and keeps a newer one. Bump `VERSION` on every collector behavior change. The app does not read the status file yet (Phase 2 `health` can compare it with the bundled script).
+- The installed collector on a real Mac stays stale until someone reruns the connector. Never rerun it from an agent session without explicit user approval.
+- Codex rows are priced at ingest from the app's cached `usage-prices.json` (the parent of `tracking/`, reloaded on mtime change). Same rule as `UsagePriceCatalog.price(for:)`: exact model, else strip `-YYYYMMDD`. Unknown model or no catalog → NULL. Claude keeps the CLI's `cost_usd`. Rows written before this change stay NULL; read-time pricing (stream `data`) covers them.
+- Connector order: validate every config → write token/script/launcher/plist → start the LaunchAgent (bootstrap retried) → back up → write configs. A failed start changes no config. Each write first re-reads the file; a concurrent edit aborts and rolls back. Writes go through symlinks.
+- `--disconnect`: strips the Codex BEGIN/END block and only the Claude env values that still equal ours. A key the file had before connecting gets its value from the earliest backup manifest. A file the connector created is deleted when nothing else remains. It keeps the DB and backups, and removes the plist and token.
+- Decision: disconnect does NOT restore backup files wholesale. Claude Code rewrites settings.json (permissions etc.), so a wholesale restore loses user changes.
+- Tests must never call real `launchctl` or use the real HOME/env: `install(home, environ, run)` and `disconnect(...)` take a fake `run`, and `environ={}` (CODEX_HOME is often set in agent shells).
+- `agy` has no home variable other than `$HOME` (checked the binary strings), so account-cli must replace HOME. It sets `GIT_CONFIG_GLOBAL` to the user's git config; other `~` configs are not available inside that session (README documents this).
+- DB: index `(provider, timestamp)`; hourly prune of rows older than 400 days, counted from min(now, newest row); `collector-errors.log` copied to `.1` and truncated above 1 MB.
+
+## Phase 1 integration (2026-09-23, branch feat/improve-phase1)
+
+- Merge order: auth → polling → ui → data → scripts. Conflicts only in this file, `Tests/TestMain.swift` (suite lines, keep all) and the `ClaudeAdapter` CLI ping region.
+- `ClaudeAdapter` resolution: the polling background ping (`startBackgroundCLIPing` + `CLIPingRegistry`) stays; the child ends through `LoginProcess.waitForExit`; the `refreshPingSpawner` hook is gone (auth removed it as dead). Constraint: no test may drive the Claude oauth/token refresh to a 429/5xx. That path starts a real `claude -p` and a `security` Keychain read in the background. Inject a spawner first if such a test is needed.
+- Verified: 284 Swift tests pass (two runs), `python3 scripts/test-usage-collector.py` passes, `./build.sh` passes with only the old `kSecUseAuthenticationUI*` deprecation warnings. The app was not launched.
+- Left for later: `clearCreds` logs in all four adapters still print the absolute folder path (`dir=`). `UsageOrchestrator.caption/detailCaption` still match substrings instead of `error.unavailableReason`. Not checked live: the island collapses while the Agy Terminal login has the focus (ui dialog release).
+
+## Phase 1 review fixes (2026-09-23, branch feat/improve-phase1)
+
+- Reauth hold: `UsageOrchestrator.beginReauth` / `endReauth` wrap every Reauthenticate (`EdgeAddChrome`). While held (`PollGenerations.hold`, counted), the account is not polled and takes no result. Reason: the adapters move session files to `.prior`, and a poll in that gap read "no credentials" and left a red "reauth" with a 30m cooldown after Cancel. `beginReauth` also waits (≤30s) for a fetch already running, because its token refresh could write a file that the login wait takes for the new sign-in. Only a success calls `refresh(accountID:)`.
+- Soft `retryAt` is a due time now (`retryDueAt`, `isDue(retryAt:)`), with `minPoll` as the floor. Before, an idle account waited the 15m interval after the cooldown ended.
+- Claude: `refreshThenProbe` returns the ping's "refresh pending" when a CLI ping runs. The proactive step starts the ping, and a second refresh only met the gate that step closed (+15m). A test may call `refreshThenProbe` only with a ping registered for its temp folder (then no `claude` can spawn).
+- Agy: `TokenRefreshResult.clientRejected` (every pair refused the client, or no client in the binary). Reauth goes on to sign-in for it; polls stay soft "retrying". A refused cached pair falls back to every embedded pair. Timeout copy is split: Add "not added", reauth "stored session was kept"; no folder path, no Terminal step.
+- Follow cursor: `IslandGeometry.pointer(_:isOn:)` (`NSMouseInRect`) counts the top edge (y == maxY). A failed candidate clears `lastPointerScreenFrame`.
+- Left: Codex/Grok/Claude timeout copy still names the folder, which Add deletes (older issue).

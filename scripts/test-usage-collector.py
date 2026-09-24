@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import sqlite3
 import json
@@ -72,18 +74,221 @@ for vendor, variable in [('codex','CODEX_HOME'),('claude','CLAUDE_CONFIG_DIR'),(
     env = launcher.launch_environment({'vendorID':vendor},Path('/tmp/account-a'),{'HOME':'/real','KEEP':'yes','OPENAI_API_KEY':'wrong','ANTHROPIC_API_KEY':'wrong'})
     assert env[variable] == '/tmp/account-a' and env['KEEP'] == 'yes'
     assert 'OPENAI_API_KEY' not in env and 'ANTHROPIC_API_KEY' not in env
+assert launcher.account_directory(Path('/base'), {'credentialRef': 'ref-a'}) == Path('/base/accounts/ref-a')
+for reference in ['', '.', '..', '../x', None]:
+    try:
+        launcher.account_directory(Path('/base'), {'credentialRef': reference})
+        raise AssertionError('invalid credentialRef %r must not select the accounts root' % reference)
+    except SystemExit:
+        pass
+routing = {'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'OPENAI_BASE_URL'}
+env = launcher.launch_environment({'vendorID': 'claude'}, Path('/tmp/account-a'), {name: '1' for name in routing})
+assert not routing & set(env), 'provider routing would bypass the selected subscription account'
+try:
+    launcher.launch_environment({'vendorID': 'other'}, Path('/tmp/account-a'), {})
+    raise AssertionError('unknown vendors must fail clearly')
+except SystemExit as error:
+    assert 'other' in str(error)
+with tempfile.TemporaryDirectory() as real:
+    # agy only reads $HOME, so HOME must move; keep the user's git identity for the agent's commands.
+    assert 'GIT_CONFIG_GLOBAL' not in launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    (Path(real) / '.config/git').mkdir(parents=True)
+    (Path(real) / '.config/git/config').write_text('[user]\n')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    assert env['HOME'] == '/tmp/account-a' and env['GIT_CONFIG_GLOBAL'] == str(Path(real) / '.config/git/config')
+    (Path(real) / '.gitconfig').write_text('[user]\n')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real})
+    assert env['GIT_CONFIG_GLOBAL'] == str(Path(real) / '.gitconfig')
+    env = launcher.launch_environment({'vendorID': 'agy'}, Path('/tmp/account-a'), {'HOME': real, 'GIT_CONFIG_GLOBAL': '/mine'})
+    assert env['GIT_CONFIG_GLOBAL'] == '/mine'
+    assert 'GIT_CONFIG_GLOBAL' not in launcher.launch_environment({'vendorID': 'codex'}, Path('/tmp/account-a'), {'HOME': real})
 print('PASS: account isolation, duplicates, cache/reasoning, malformed events, Claude cost, safe/idempotent config merge')
+
+# Codex reports no cost. Price it at ingest from the app's cached catalog so projection has dollars.
+rates = {'inputPerMillion': 1, 'outputPerMillion': 10, 'cacheCreationPerMillion': 2, 'cacheReadPerMillion': 0.1}
+with tempfile.TemporaryDirectory() as temporary:
+    catalog = Path(temporary) / 'usage-prices.json'
+    assert c.load_prices(catalog) is None
+    catalog.write_text(json.dumps({'schemaVersion': 1, 'generatedAt': 'x', 'models': {'gpt-test': rates}}))
+    prices = c.load_prices(catalog)
+    for invalid in [{'schemaVersion': 2, 'models': {'gpt-test': rates}}, {'schemaVersion': 1, 'models': {}},
+                    {'schemaVersion': 1, 'models': {'gpt-test': dict(rates, outputPerMillion=-1)}}, []]:
+        catalog.write_text(json.dumps(invalid))
+        assert c.load_prices(catalog) is None, invalid
+expected = (60 * 1 + 20 * 10 + 10 * 2 + 30 * 0.1) / 1e6
+assert c.estimate(prices, 'gpt-test', [60, 20, 10, 30]) == expected
+assert c.estimate(prices, 'gpt-test-20260101', [1_000_000, 0, 0, 0]) == 1
+assert c.estimate(prices, 'gpt-other', [1, 1, 1, 1]) is None and c.estimate(None, 'gpt-test-20260101', [1, 1, 1, 1]) is None
+priced = sqlite3.connect(':memory:')
+priced.executescript(c.SCHEMA)
+unpriced_claude = record('unused', **{'event.name': 'api_request', 'user.account_uuid': 'claude-b', 'model': 'gpt-test',
+    'input_tokens': 5, 'output_tokens': 6, 'request_id': 'req-b'})
+logs = [record('priced', model='gpt-test'), record('unknown-model', model='other'), unpriced_claude]
+assert c.ingest(priced, {'resourceLogs': [{'scopeLogs': [{'logRecords': logs}]}]}, prices) == 3
+assert dict(priced.execute('select provider || model, dollars from usage_events')) == {
+    'codexgpt-test': expected, 'codexother': None, 'claudegpt-test': None}
+print('PASS: Codex rows are priced from the cached catalog; unknown models and Claude stay as reported')
+
+# The app reads by provider and time range; old rows are pruned; the stderr log stays bounded.
+plan = ' '.join(str(row) for row in db.execute(
+    'EXPLAIN QUERY PLAN SELECT event_id FROM usage_events WHERE provider=? AND timestamp>=? AND timestamp<=?', ('codex', 0, 1)))
+assert 'usage_events_time' in plan, plan
+aged = sqlite3.connect(':memory:')
+aged.executescript(c.SCHEMA)
+now = 1_800_000_000
+for name, days in [('old', c.RETENTION_DAYS + 1), ('kept', c.RETENTION_DAYS - 1), ('new', 0)]:
+    aged.execute("INSERT INTO usage_events VALUES ('codex','id',?,?,'m',1,0,0,0,NULL)", (name, now - days * 86400))
+assert c.prune(aged, now + 1000 * 86400) == 1, 'age counts from the newest row, so a clock jump cannot erase history'
+assert sorted(row[0] for row in aged.execute('SELECT event_id FROM usage_events')) == ['kept', 'new']
+empty = sqlite3.connect(':memory:')
+empty.executescript(c.SCHEMA)
+assert c.prune(aged, now) == 0 and c.prune(empty, now) == 0
+with tempfile.TemporaryDirectory() as temporary:
+    log = Path(temporary) / 'collector-errors.log'
+    c.trim_log(log, 100)
+    log.write_bytes(b'x' * 100)
+    c.trim_log(log, 100)
+    assert log.read_bytes() == b'x' * 100
+    log.write_bytes(b'y' * 101)
+    c.trim_log(log, 100)
+    assert log.read_bytes() == b'' and (Path(temporary) / 'collector-errors.log.1').read_bytes() == b'y' * 101
+print('PASS: time index, 400-day retention, bounded error log')
+
+
+def quiet(function, *args):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return function(*args)
+
+
+def launchctl(calls, fail=False, before=None):
+    # Tests never run the real launchctl: it would stop the user's installed collector.
+    def run(args, **_):
+        assert args[0] == 'launchctl'
+        calls.append(args[1])
+        if before:
+            before(args)
+        failed = fail and args[1] == 'bootstrap'
+        return subprocess.CompletedProcess(args, 5 if failed else 0, b'', b'boom' if failed else b'')
+    return run
+
+
+source_collector = Path(c.__file__).read_bytes()
+assert i.collector_version('x = 1\nVERSION = 7\n') == 7 and i.collector_version('') == 0
+assert i.collector_version(source_collector.decode()) == c.VERSION > 1
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    tracking = home / 'Library/Application Support/DashIsland/tracking'
+    calls = []
+    quiet(i.install, home, {}, launchctl(calls))
+    installed = tracking / 'usage-collector.py'
+    assert installed.read_bytes() == source_collector and calls == ['bootout', 'bootstrap']
+    installed.write_text('VERSION = %d\n' % (c.VERSION + 1))
+    quiet(i.install, home, {}, launchctl(calls))
+    assert installed.read_text() == 'VERSION = %d\n' % (c.VERSION + 1), 'a newer installed collector is kept'
+    installed.write_text('VERSION = 1\n')
+    quiet(i.install, home, {}, launchctl(calls))
+    assert installed.read_bytes() == source_collector, 'an older installed collector is replaced'
+print('PASS: connector installs the repo collector unless the installed copy is newer')
+
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    tracking = home / 'Library/Application Support/DashIsland/tracking'
+    plist = home / 'Library/LaunchAgents/dev.dashisland.usage-collector.plist'
+    codex_path, claude_path, custom = home / '.codex/config.toml', home / '.claude/settings.json', home / 'custom'
+    codex_path.parent.mkdir()
+    codex_path.write_text('model="keep"\n')
+    claude_path.parent.mkdir()
+    claude_path.write_text('{"env": {"KEEP": "yes", "OTEL_LOG_USER_PROMPTS": "1"}}')
+    originals = {path: path.read_bytes() for path in (codex_path, claude_path)}
+    environ = {'CLAUDE_CONFIG_DIR': str(custom)}
+    calls = []
+    try:
+        quiet(i.install, home, environ, launchctl(calls, fail=True))
+        raise AssertionError('a collector that cannot start must stop the connector')
+    except SystemExit as error:
+        assert 'boom' in str(error)
+    assert {path: path.read_bytes() for path in originals} == originals and not (custom / 'settings.json').exists()
+    assert not (tracking / 'config-backups').exists(), 'nothing was changed, so nothing is backed up'
+    started = []
+    quiet(i.install, home, environ, launchctl(calls, before=lambda _: started.append('otel' in codex_path.read_text())))
+    assert started == [False, False], 'the collector runs before any CLI config points at it'
+    assert json.loads(claude_path.read_text())['env']['OTEL_LOG_USER_PROMPTS'] == '0'
+    assert (custom / 'settings.json').exists()
+    # Edits made after connecting belong to the user and survive a disconnect.
+    settings = json.loads(claude_path.read_text())
+    settings['env']['OTEL_LOG_TOOL_DETAILS'] = '1'
+    settings['permissions'] = {'allow': ['Bash(ls)']}
+    claude_path.write_text(json.dumps(settings))
+    (tracking / 'account-usage.sqlite').write_bytes(b'kept')
+    calls = []
+    quiet(i.disconnect, home, {}, launchctl(calls))
+    assert codex_path.read_bytes() == originals[codex_path]
+    assert json.loads(claude_path.read_text()) == {'env': {'KEEP': 'yes', 'OTEL_LOG_USER_PROMPTS': '1', 'OTEL_LOG_TOOL_DETAILS': '1'},
+                                                   'permissions': {'allow': ['Bash(ls)']}}
+    assert not (custom / 'settings.json').exists(), 'a file the connector created is removed (found via the manifest)'
+    assert calls == ['bootout'] and not plist.exists() and not (tracking / 'collector-token').exists()
+    assert (tracking / 'account-usage.sqlite').read_bytes() == b'kept'
+    quiet(i.disconnect, home, {}, launchctl(calls))
+    assert codex_path.read_bytes() == originals[codex_path], 'disconnect is idempotent'
+print('PASS: connector starts the collector first, changes nothing when it fails, and disconnect undoes only its own settings')
+
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary) / 'home'
+    target = Path(temporary) / 'dotfiles/settings.json'
+    target.parent.mkdir()
+    target.write_text('{"env": {"KEEP": "yes"}}')
+    target.chmod(0o644)
+    link = home / '.claude/settings.json'
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    codex_path = home / '.codex/config.toml'
+    quiet(i.install, home, {}, launchctl([]))
+    assert link.is_symlink() and link.resolve() == target.resolve(), 'a dotfile symlink stays a symlink'
+    assert json.loads(target.read_text())['env']['OTEL_LOGS_EXPORTER'] == 'otlp'
+    # Both files now hold the collector token.
+    assert target.stat().st_mode & 0o777 == 0o600 and codex_path.stat().st_mode & 0o777 == 0o600
+    quiet(i.disconnect, home, {}, launchctl([]))
+    assert link.is_symlink() and json.loads(target.read_text()) == {'env': {'KEEP': 'yes'}}
+    assert not codex_path.exists()
+    # A file edited between validation and writing is not overwritten; earlier writes roll back.
+    codex_path.write_text('model="keep"\n')
+    edit = lambda args: args[1] == 'bootstrap' and target.write_text('{"env": {"EDITED": "1"}}')
+    try:
+        quiet(i.install, home, {}, launchctl([], before=edit))
+        raise AssertionError('a config edited during connect must not be overwritten')
+    except RuntimeError as error:
+        assert 'changed' in str(error)
+    assert json.loads(target.read_text()) == {'env': {'EDITED': '1'}} and codex_path.read_text() == 'model="keep"\n'
+print('PASS: connector writes through symlinks, keeps token files 0600, and refuses to overwrite a concurrent edit')
+
+# Stock macOS python3 is 3.9: say what is needed instead of a tomllib traceback. Only the
+# module body runs (not __main__), so this can never reach install().
+old_python = "import runpy, sys; sys.version_info = (3, 9, 6, 'final', 0); runpy.run_path(%r)" % str(Path(i.__file__))
+with tempfile.TemporaryDirectory() as temporary:
+    result = subprocess.run([sys.executable, '-c', old_python], capture_output=True, text=True,
+                            env={'HOME': temporary, 'PATH': '/nonexistent'})
+assert result.returncode == 1 and 'Python 3.11' in result.stderr and 'Traceback' not in result.stderr, result.stderr
+print('PASS: connector explains the Python 3.11 requirement')
 
 # A client can connect and disappear before sending headers. The collector must
 # still accept the next export rather than waiting indefinitely on that socket.
 with tempfile.TemporaryDirectory() as temporary:
-    directory = Path(temporary)
+    # Same layout as the app: tracking/ sits next to the cached usage-prices.json.
+    directory = Path(temporary) / 'tracking'
+    directory.mkdir()
     (directory / 'collector-token').write_text('test-token')
+    (Path(temporary) / 'usage-prices.json').write_text(json.dumps({'schemaVersion': 1, 'models': {'gpt-test': rates}}))
+    seeded = sqlite3.connect(directory / 'account-usage.sqlite')
+    seeded.executescript(c.SCHEMA)
+    seeded.executemany("INSERT INTO usage_events VALUES ('claude','id',?,?,'m',1,0,0,0,NULL)",
+                       [('expired', time.time() - (c.RETENTION_DAYS + 1) * 86400), ('recent', time.time())])
+    seeded.commit()
+    seeded.close()
     with socket.socket() as reserved:
         reserved.bind(('127.0.0.1', 0))
         port = reserved.getsockname()[1]
     process = subprocess.Popen([sys.executable, str(Path(__file__).with_name('usage-collector.py')),
-                                '--directory', temporary, '--port', str(port)],
+                                '--directory', str(directory), '--port', str(port)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     idle = None
     client = http.client.HTTPConnection('127.0.0.1', port, timeout=8)
@@ -96,13 +301,17 @@ with tempfile.TemporaryDirectory() as temporary:
             except OSError:
                 assert time.monotonic() < deadline, 'collector did not start'
                 time.sleep(0.05)
-        payload = json.dumps({'resourceLogs': [{'scopeLogs': [{'logRecords': [record('http')]}]}]})
+        payload = json.dumps({'resourceLogs': [{'scopeLogs': [{'logRecords': [record('http', model='gpt-test')]}]}]})
         client.request('POST', '/v1/logs', body=payload,
                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'})
         response = client.getresponse()
         assert response.status == 200 and response.read() == b'{}'
         with sqlite3.connect(directory / 'account-usage.sqlite') as captured:
-            assert captured.execute('SELECT COUNT(*) FROM usage_events').fetchone()[0] == 1
+            assert captured.execute("SELECT COUNT(*), SUM(dollars) FROM usage_events WHERE provider='codex'").fetchone() == (1, expected)
+            # Maintenance ran between the idle connection and this export.
+            assert [row[0] for row in captured.execute("SELECT event_id FROM usage_events WHERE provider='claude'")] == ['recent']
+        status = json.loads((directory / 'collector-status.json').read_text())
+        assert status['version'] == c.VERSION and status['startedAt'] <= status['lastBatchAt']
     finally:
         client.close()
         if idle:

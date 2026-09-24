@@ -7,7 +7,8 @@ import Foundation
 /// island account owns that folder; falls back to host-wide `~/.claude/projects`
 /// only for the account that matches the host login (`~/.claude.json`).
 ///
-/// Does **not** touch Keychain or network.
+/// Does **not** touch Keychain or network. Reads files, so call it off the
+/// main actor; pass one long-lived `LogCache` so each scan reads only new bytes.
 enum ClaudeActivity {
     /// Lookback for "are you burning right now".
     static let defaultWindow: TimeInterval = 3 * 60
@@ -22,9 +23,10 @@ enum ClaudeActivity {
     static func liveBurnRatio(
         window: TimeInterval = defaultWindow,
         now: Date = Date(),
-        configDir: URL? = nil
+        configDir: URL? = nil,
+        cache: LogCache = LogCache()
     ) -> Double {
-        let tokens = recentWeightedTokens(window: window, now: now, configDir: configDir)
+        let tokens = recentWeightedTokens(window: window, now: now, configDir: configDir, cache: cache)
         guard tokens > 0 else { return 0 }
         // Tuned so a normal assistant turn with a few k new tokens moves the needle,
         // while a heavy burst pegs toward redline.
@@ -36,20 +38,22 @@ enum ClaudeActivity {
     /// Whether the last signal used managed-folder logs (vs host-wide fallback).
     static func usedScopedLogs(configDir: URL?, window: TimeInterval = defaultWindow, now: Date = Date()) -> Bool {
         guard let configDir else { return false }
-        return recentWeightedTokens(window: window, now: now, roots: projectRoots(for: configDir)) > 0
+        return recentWeightedTokens(window: window, now: now, roots: projectRoots(for: configDir), cache: LogCache()) > 0
     }
 
     static func recentWeightedTokens(
         window: TimeInterval = defaultWindow,
         now: Date = Date(),
         configDir: URL? = nil,
-        hostHome: URL = FileManager.default.homeDirectoryForCurrentUser
+        hostHome: URL = FileManager.default.homeDirectoryForCurrentUser,
+        cache: LogCache = LogCache()
     ) -> Int {
         if let configDir {
             let scoped = recentWeightedTokens(
                 window: window,
                 now: now,
-                roots: projectRoots(for: configDir)
+                roots: projectRoots(for: configDir),
+                cache: cache
             )
             if scoped > 0 { return scoped }
             // Host logs belong to the host login only — never lift every account's needle.
@@ -58,7 +62,87 @@ enum ClaudeActivity {
             else { return 0 }
         }
         // Host-wide fallback (user's normal `claude` without CLAUDE_CONFIG_DIR).
-        return recentWeightedTokens(window: window, now: now, roots: hostProjectRoots(home: hostHome))
+        return recentWeightedTokens(window: window, now: now, roots: hostProjectRoots(home: hostHome), cache: cache)
+    }
+
+    /// Per-file read position plus the recent events already parsed from it.
+    /// An unchanged file costs one `stat`; a grown file costs only its new bytes.
+    final class LogCache: @unchecked Sendable {
+        /// Oldest event kept. A caller's `window` must not exceed this.
+        // ponytail: fixed retention; only `defaultWindow` (3m) is used today.
+        static let retention: TimeInterval = 15 * 60
+        /// First read of a file (or a jump past this many new bytes) reads the tail only.
+        static let maxTailBytes: UInt64 = 1_500_000
+
+        private struct Entry {
+            var inode: UInt64
+            var offset: UInt64 = 0
+            var events: [(at: Date, weight: Int)] = []
+            var lastSeen: Date = .distantPast
+        }
+
+        private let lock = NSLock()
+        private var entries: [String: Entry] = [:]
+        private var readCount = 0
+
+        init() {}
+
+        /// Total bytes read from disk so far. For tests.
+        var bytesRead: Int {
+            lock.lock(); defer { lock.unlock() }
+            return readCount
+        }
+
+        func forget(_ url: URL) {
+            lock.lock(); defer { lock.unlock() }
+            entries[url.path] = nil
+        }
+
+        /// Drop files not seen since `date` (deleted or moved while warm).
+        func evict(unseenSince date: Date) {
+            lock.lock(); defer { lock.unlock() }
+            entries = entries.filter { $0.value.lastSeen >= date }
+        }
+
+        func weightedTokens(in url: URL, since cutoff: Date, now: Date) -> Int {
+            var st = stat()
+            guard stat(url.path, &st) == 0 else { return 0 }
+            let inode = UInt64(st.st_ino)
+            let size = UInt64(max(0, st.st_size))
+
+            lock.lock(); defer { lock.unlock() }
+            var entry = entries[url.path] ?? Entry(inode: inode)
+            // Replaced (new inode) or truncated: the old offset means nothing.
+            if entry.inode != inode || size < entry.offset {
+                entry = Entry(inode: inode)
+            }
+            if size > entry.offset {
+                var from = entry.offset
+                var midLine = false
+                if size - from > Self.maxTailBytes {
+                    from = size - Self.maxTailBytes
+                    midLine = true
+                }
+                if let data = Self.read(url: url, from: from) {
+                    readCount += data.count
+                    let parsed = ClaudeActivity.parseEvents(data, dropFirstLine: midLine)
+                    entry.events += parsed.events
+                    entry.offset = from + UInt64(parsed.consumed)
+                }
+            }
+            let keepFrom = now.addingTimeInterval(-Self.retention)
+            entry.events.removeAll { $0.at < keepFrom }
+            entry.lastSeen = now
+            entries[url.path] = entry
+            return entry.events.reduce(0) { $1.at >= cutoff ? $0 + $1.weight : $0 }
+        }
+
+        private static func read(url: URL, from offset: UInt64) -> Data? {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+            try? handle.seek(toOffset: offset)
+            return try? handle.readToEnd()
+        }
     }
 
     // MARK: - Internals
@@ -66,7 +150,8 @@ enum ClaudeActivity {
     private static func recentWeightedTokens(
         window: TimeInterval,
         now: Date,
-        roots: [URL]
+        roots: [URL],
+        cache: LogCache
     ) -> Int {
         let cutoff = now.addingTimeInterval(-window)
         var total = 0
@@ -84,9 +169,10 @@ enum ClaudeActivity {
                 guard vals?.isRegularFile == true else { continue }
                 // Skip cold files (no writes in lookback + 1h slack).
                 if let m = vals?.contentModificationDate, m < cutoff.addingTimeInterval(-3600) {
+                    cache.forget(item)
                     continue
                 }
-                total += weightedTokens(in: item, since: cutoff)
+                total += cache.weightedTokens(in: item, since: cutoff, now: now)
             }
         }
         return total
@@ -108,57 +194,59 @@ enum ClaudeActivity {
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    private static func weightedTokens(in url: URL, since cutoff: Date) -> Int {
-        guard let data = tailData(url: url, maxBytes: 1_500_000), !data.isEmpty else { return 0 }
-        var sum = 0
+    private static let assistantMarker = Data(#""assistant""#.utf8)
+    private static let usageMarker = Data(#""usage""#.utf8)
+
+    /// Assistant usage events in `data`, and how many bytes were whole lines.
+    /// A last line without its newline stays unconsumed unless it already parses,
+    /// so a half-written line is read again on the next scan and counted once.
+    private static func parseEvents(
+        _ data: Data,
+        dropFirstLine: Bool
+    ) -> (events: [(at: Date, weight: Int)], consumed: Int) {
+        var events: [(at: Date, weight: Int)] = []
         var start = data.startIndex
+        var consumed = 0
         let isoFrac = ISO8601DateFormatter()
         isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
 
         // If we jumped into the middle of a file, drop the partial first line.
-        if let firstNL = data.firstIndex(of: UInt8(ascii: "\n")),
-           (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 > data.count
-        {
+        if dropFirstLine, let firstNL = data.firstIndex(of: UInt8(ascii: "\n")) {
             start = data.index(after: firstNL)
+            consumed = start - data.startIndex
         }
 
         while start < data.endIndex {
             let slice: Data
+            let complete: Bool
             if let nl = data[start...].firstIndex(of: UInt8(ascii: "\n")) {
                 slice = data[start..<nl]
                 start = data.index(after: nl)
+                complete = true
             } else {
                 slice = data[start...]
                 start = data.endIndex
+                complete = false
             }
-            guard !slice.isEmpty,
-                  let obj = try? JSONSerialization.jsonObject(with: slice) as? [String: Any],
-                  obj["type"] as? String == "assistant"
+            // Cheap byte checks first; most lines are not assistant usage.
+            let candidate = slice.range(of: assistantMarker) != nil && slice.range(of: usageMarker) != nil
+            let obj = candidate || !complete
+                ? (try? JSONSerialization.jsonObject(with: slice)) as? [String: Any]
+                : nil
+            // Half-written last line: leave it for the next scan.
+            if !complete, obj == nil { break }
+            consumed = start - data.startIndex
+            guard candidate,
+                  let obj,
+                  obj["type"] as? String == "assistant",
+                  let ts = parseTimestamp(obj["timestamp"], isoFrac: isoFrac, iso: iso),
+                  let usage = assistantUsage(obj)
             else { continue }
-
-            guard let ts = parseTimestamp(obj["timestamp"], isoFrac: isoFrac, iso: iso),
-                  ts >= cutoff
-            else { continue }
-
-            guard let usage = assistantUsage(obj) else { continue }
-            sum += weight(usage)
+            events.append((at: ts, weight: weight(usage)))
         }
-        return sum
-    }
-
-    private static func tailData(url: URL, maxBytes: Int) -> Data? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-        let size = Int((try? handle.seekToEnd()) ?? 0)
-        if size <= 0 { return nil }
-        if size > maxBytes {
-            try? handle.seek(toOffset: UInt64(size - maxBytes))
-        } else {
-            try? handle.seek(toOffset: 0)
-        }
-        return try? handle.readToEnd()
+        return (events, consumed)
     }
 
     private static func assistantUsage(_ obj: [String: Any]) -> [String: Any]? {

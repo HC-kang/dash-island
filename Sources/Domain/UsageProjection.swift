@@ -96,6 +96,25 @@ struct UsageProjection: Equatable, Sendable {
         spentSinceAnchor = 0
     }
 
+    /// Apply a captured-spend read that was started for `readAnchor` and
+    /// `learnFrom`. The read runs off the main actor; if a fresh API sample
+    /// re-anchored meanwhile, its `since` would add spend the new value already
+    /// counts and its `learn` would fit the wrong pair. Then drop it and return
+    /// false; the next tick reads again.
+    mutating func applyRead(
+        learn: Double?,
+        since: Double?,
+        anchorAt readAnchor: Date,
+        learnFrom: Date?,
+        now: Date
+    ) -> Bool {
+        guard anchorAt == readAnchor, pendingPreviousAt == learnFrom else { return false }
+        if let learn { self.learn(dollarsBetween: learn) }
+        spentSinceAnchor = since ?? 0
+        projected = since.flatMap { projectedFraction(spentSinceAnchor: $0, now: now) }
+        return true
+    }
+
     /// Consume a pending pair once the caller has summed the spend across it.
     mutating func learn(dollarsBetween: Double) {
         guard let previous = pendingPreviousFraction, let since = pendingPreviousAt else { return }

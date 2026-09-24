@@ -20,6 +20,18 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         super.init(window: panel)
         panel.delegate = self
+        // Cmd-Tab away hides the panel without a click for the outside monitor;
+        // close it so `isOpen` does not hold the island expanded.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                let details = UsageDetailPanel.shared
+                if details.isOpen { details.close() }
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -72,6 +84,9 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
 
     private func clear() {
         guard isOpen else { return }
+        // Unmount the view: its 15 s `.task` reload otherwise keeps reading usage
+        // history while the panel is closed. `show` builds a fresh view.
+        window?.contentViewController = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         localMonitor = nil
@@ -99,6 +114,8 @@ private struct UsageDetailView: View {
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
+    @State private var moreBelow = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var activityLoading: Bool { local.loading.contains(liveTracking ? provider : sourceKey) }
 
     private var model: WidgetViewModel { usage.widgets.first { $0.id == initial.id } ?? initial }
@@ -128,15 +145,30 @@ private struct UsageDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    quotas
-                    Divider().overlay(Color.white.opacity(0.05))
-                    activity
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        quotas
+                        Divider().overlay(Color.white.opacity(0.05))
+                        activity
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
+                    // SwiftUI preferences do not leave the NSScrollView-backed ScrollView
+                    // on macOS 13, so read the clip view directly.
+                    .background(ScrollCueProbe { more in
+                        if more != moreBelow { moreBelow = more }
+                    })
+                    Color.clear.frame(height: 0).id(Self.bottomAnchor)
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
+                // A connected mouse makes "Automatic" draw the legacy tracked scroller,
+                // which clashes with the dark panel. Scrolling still works.
+                .scrollIndicators(.never)
+                .overlay(alignment: .bottom) {
+                    if moreBelow { scrollCue(proxy) }
+                }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: moreBelow)
             }
         }
         .background(Color(white: 0.045))
@@ -408,5 +440,87 @@ private struct UsageDetailView: View {
     }
     private static func money(_ amount: Double) -> String {
         amount.formatted(.currency(code: "USD").precision(.fractionLength(2)).locale(Locale(identifier: "en_US")))
+    }
+}
+
+/// Reports whether the enclosing NSScrollView has content below the visible area.
+/// Watches clip-view scrolling and document resizing (usage rows load late).
+private struct ScrollCueProbe: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> ProbeView { ProbeView(onChange: onChange) }
+    func updateNSView(_ view: ProbeView, context: Context) { view.onChange = onChange }
+
+    final class ProbeView: NSView {
+        var onChange: (Bool) -> Void
+        private var observers: [NSObjectProtocol] = []
+
+        init(onChange: @escaping (Bool) -> Void) {
+            self.onChange = onChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard window != nil, let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
+            scroll.contentView.postsBoundsChangedNotifications = true
+            doc.postsFrameChangedNotifications = true
+            let center = NotificationCenter.default
+            for (name, object) in [(NSView.boundsDidChangeNotification, scroll.contentView as NSView),
+                                   (NSView.frameDidChangeNotification, doc)] {
+                observers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.report() }
+                })
+            }
+            DispatchQueue.main.async { [weak self] in self?.report() }
+        }
+
+        private func report() {
+            guard let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
+            let visible = scroll.documentVisibleRect
+            let below = doc.isFlipped ? doc.bounds.height - visible.maxY : visible.minY
+            onChange(IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height))
+        }
+    }
+}
+
+extension UsageDetailView {
+    fileprivate static let bottomAnchor = "usageDetailBottom"
+
+    /// Soft fade over the last line plus a quiet chevron; click scrolls to the end.
+    /// Static on purpose: no idle animation (see MotionPolicy).
+    @ViewBuilder
+    fileprivate func scrollCue(_ proxy: ScrollViewProxy) -> some View {
+        ZStack(alignment: .bottom) {
+            LinearGradient(
+                colors: [Color(white: 0.045).opacity(0), Color(white: 0.045).opacity(0.92)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 56)
+            .allowsHitTesting(false)
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) {
+                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                }
+            } label: {
+                Image(systemName: "chevron.compact.down")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .frame(width: 44, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 6)
+            .accessibilityLabel("Scroll to more usage details")
+        }
+        .transition(.opacity)
     }
 }

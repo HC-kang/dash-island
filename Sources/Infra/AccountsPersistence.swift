@@ -12,7 +12,8 @@ struct AccountsPersistence: Sendable {
     }
 
     /// Load accounts; missing file → empty list.
-    /// Corrupt file → leave it in place (backed up) and throw so callers can decide.
+    /// A bad row is skipped (file backed up) so one damaged entry cannot drop every label.
+    /// Corrupt file or no readable row → leave it in place (backed up) and throw so callers can decide.
     func load() throws -> [Account] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: fileURL.path) else {
@@ -25,7 +26,15 @@ struct AccountsPersistence: Sendable {
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode([Account].self, from: data)
+            let rows = try decoder.decode([LossyRow].self, from: data)
+            let accounts = rows.compactMap(\.account)
+            let skipped = rows.count - accounts.count
+            if skipped > 0 {
+                guard !accounts.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+                try? backupCorruptFile(data: data)
+                Log.accounts.warn("load skipped=\(skipped) kept=\(accounts.count)")
+            }
+            return accounts
         } catch {
             // Never silently destroy a corrupt list — keep original + sidecar backup.
             try? backupCorruptFile(data: data)
@@ -54,6 +63,12 @@ struct AccountsPersistence: Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(accounts)
         try data.write(to: fileURL, options: .atomic)
+    }
+
+    /// One array element; a row that does not decode becomes nil instead of failing the list.
+    private struct LossyRow: Decodable {
+        let account: Account?
+        init(from decoder: Decoder) throws { account = try? Account(from: decoder) }
     }
 
     private func backupCorruptFile(data: Data) throws {

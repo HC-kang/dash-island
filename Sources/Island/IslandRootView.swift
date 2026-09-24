@@ -6,6 +6,7 @@ struct IslandRootView: View {
     @ObservedObject private var accountStore = AccountStore.shared
     @ObservedObject private var orchestrator = UsageOrchestrator.shared
     @ObservedObject private var preferences = PreferencesStore.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var prefsOpen = false
     @State private var dialogOpen = false
@@ -15,6 +16,7 @@ struct IslandRootView: View {
     @State private var dragActive = false
     @State private var pointerInside = false
     @State private var collapseTask: Task<Void, Never>?
+    @State private var hoverExpandTask: Task<Void, Never>?
     /// Dwell before lazy network refresh on expand (avoids hover-flick burns).
     @State private var expandRefreshTask: Task<Void, Never>?
     /// Expanded chrome/content visibility — decoupled from `model.state` window size
@@ -22,6 +24,9 @@ struct IslandRootView: View {
     @State private var showExpandedShell = false
 
     private let bodyOutset: CGFloat = 1.0
+    /// Hover must rest this long before expanding — a pointer crossing the
+    /// notch on its way to the menu bar should not open the island.
+    private let hoverExpandDwellNs: UInt64 = 200_000_000
     /// Match add-rail dwell philosophy — intentional expand, not mouse graze.
     private let expandRefreshDwellNs: UInt64 = 400_000_000
     /// Re-ask while the island stays open. `expandInterval` is the real gate.
@@ -37,7 +42,6 @@ struct IslandRootView: View {
             || statusPanelOpen
             || detailsOpen
             || dragActive
-            || IslandDialogController.shared.isProgressOpen
     }
 
     var body: some View {
@@ -61,23 +65,19 @@ struct IslandRootView: View {
             // Must not participate in expand/collapse animations — otherwise the
             // notch fill rides the size spring and looks like it bobs vertically.
             compactNotchBase
+                .opacity(model.compactHidden ? 0 : 1)
                 .allowsHitTesting(!showExpandedShell)
-                .accessibilityHidden(showExpandedShell)
+                .accessibilityHidden(showExpandedShell || model.compactHidden)
                 .transaction { $0.animation = nil }
 
             if showExpandedShell {
                 expandedChrome
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .offset(y: -8)),
-                        removal: .opacity.combined(with: .offset(y: -40))
-                    ))
+                    .transition(shellTransition(insertY: -8, removeY: -40))
                 expandedContent
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .offset(y: -6)),
-                        removal: .opacity.combined(with: .offset(y: -44))
-                    ))
+                    .transition(shellTransition(insertY: -6, removeY: -44))
             }
         }
+        .environment(\.islandMotion, motion)
         // Hover target = black body (not bleed). Outer frames only reserve canvas space.
         .frame(width: hoverWidth, height: hoverHeight, alignment: .top)
         .contentShape(Rectangle())
@@ -172,10 +172,9 @@ struct IslandRootView: View {
     /// Physical-notch cover only. Geometry from `notch` alone — never tracks
     /// expanded panel height, so hover in/out must not move it vertically.
     private var compactNotchBase: some View {
-        let nw = model.notch.width
-        let nh = model.notch.height
-        let bodyW = nw + bodyOutset * 2
-        let bodyH = nh + bodyOutset
+        let notch = model.notch
+        let bodyW = notch.width + bodyOutset * 2
+        let bodyH = notch.height + bodyOutset
         let radius = cornerRadius(forHeight: bodyH)
 
         return ZStack {
@@ -186,7 +185,13 @@ struct IslandRootView: View {
                 lineWidth: 1.35,
                 peakOpacity: 0.95,
                 baseOpacity: 0.28,
-                accent: preferences.rimAccent.color
+                accent: preferences.rimAccent.color,
+                // Hidden under the expanded body while the shell is up.
+                frameInterval: MotionPolicy.rimFrameInterval(
+                    motion,
+                    expanded: false,
+                    fetching: orchestrator.loading && !showExpandedShell && !model.compactHidden
+                )
             )
         }
         .frame(width: bodyW, height: bodyH, alignment: .top)
@@ -220,7 +225,8 @@ struct IslandRootView: View {
                 peakOpacity: 0.92,
                 baseOpacity: 0.24,
                 period: 3.2,
-                accent: preferences.rimAccent.color
+                accent: preferences.rimAccent.color,
+                frameInterval: MotionPolicy.rimFrameInterval(motion, expanded: true, fetching: false)
             )
         }
         // Black body only; parent hover frame is the same width.
@@ -270,6 +276,23 @@ struct IslandRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
+    private var motion: MotionPolicy.Conditions {
+        MotionPolicy.Conditions(
+            reduceMotion: reduceMotion,
+            lowPower: model.lowPower,
+            hidden: model.windowHidden
+        )
+    }
+
+    /// Reduce Motion: fade only, no slide.
+    private func shellTransition(insertY: CGFloat, removeY: CGFloat) -> AnyTransition {
+        if reduceMotion { return .opacity }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: insertY)),
+            removal: .opacity.combined(with: .offset(y: removeY))
+        )
+    }
+
     private func cornerRadius(forHeight h: CGFloat) -> CGFloat {
         min(16, max(11, h * 0.40))
     }
@@ -301,18 +324,38 @@ struct IslandRootView: View {
             && accountStore.accounts.count < AccountStore.maxAccounts
     }
 
+    /// Hover expands after a short dwell and never activates the app: the
+    /// frontmost app keeps keyboard focus. A click activates (AppKit does that),
+    /// and clicks reach SwiftUI via `allowsWindowActivationEvents`.
     private func handleHover(_ hovering: Bool) {
         pointerInside = hovering
+        hoverExpandTask?.cancel()
+        hoverExpandTask = nil
         if hovering {
             collapseTask?.cancel()
             collapseTask = nil
-            expandOpen()
-            // Key + activate so SwiftUI Menu / contextMenu can present.
-            if !detailsOpen {
-                NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
+            // Re-entry while still open (tips, collapse grace) must not wait.
+            if model.state == .expanded {
+                expandOpen()
+                requestKeyOnLegacyOS()
+                return
+            }
+            hoverExpandTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: hoverExpandDwellNs)
+                guard !Task.isCancelled, pointerInside else { return }
+                expandOpen()
+                requestKeyOnLegacyOS()
             }
         } else if !blockingOverlay {
             scheduleCollapse()
+        }
+    }
+
+    /// macOS 13/14 lack `allowsWindowActivationEvents`: SwiftUI drops the click
+    /// that activates the window, so keep the old hover activation there.
+    private func requestKeyOnLegacyOS() {
+        if #unavailable(macOS 15.0), !detailsOpen {
+            NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
         }
     }
 
@@ -338,7 +381,10 @@ struct IslandRootView: View {
             }
             try? await Task.sleep(nanoseconds: collapseShellNs)
             guard !Task.isCancelled, !blockingOverlay, !pointerInside else { return }
+            guard model.state == .expanded else { return }
             model.setState(.compact)
+            // Pointer left and nothing is open: hand focus back if a click took it.
+            NotificationCenter.default.post(name: .dashIslandPointerCollapsed, object: nil)
         }
     }
 
