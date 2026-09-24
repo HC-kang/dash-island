@@ -112,6 +112,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var local = LocalUsageStore.shared
     @ObservedObject private var accounts = AccountStore.shared
     @ObservedObject private var preferences = PreferencesStore.shared
+    @ObservedObject private var vendorStatus = VendorStatusStore.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -208,8 +209,24 @@ private struct UsageDetailView: View {
         .padding(24)
     }
 
+    /// Vendor-side incident from the official status page, kept apart from account
+    /// errors so "is it me or them?" has an answer.
+    @ViewBuilder
+    private var incidentBanner: some View {
+        if let service = vendorStatus.byVendor[provider], service.level >= .degraded {
+            Label(service.summary, systemImage: service.level == .outage ? "bolt.horizontal.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(service.level == .outage ? Color.red : Color.orange)
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+                .help("From the vendor's public status page")
+        }
+    }
+
     private var quotas: some View {
         VStack(alignment: .leading, spacing: 15) {
+            incidentBanner
             if let first = windows.first {
                 HStack(alignment: .firstTextBaseline) {
                     Text("\(shownPercent(first))%")
