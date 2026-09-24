@@ -33,6 +33,12 @@ enum AccountHoverTips {
                         .font(.system(size: 10, weight: .regular, design: .monospaced))
                         .foregroundStyle(Color(white: 0.90))
                 }
+                ForEach([model.paceLine(now: context.date)].compactMap { $0 }, id: \.self) { line in
+                    Text(line)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.78))
+                        .padding(.top, 2)
+                }
                 if let count = model.usageSnapshot?.resetCreditsAvailable {
                     Text("Resets  \(count) available")
                         .font(.system(size: 10, design: .monospaced))

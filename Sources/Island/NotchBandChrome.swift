@@ -6,6 +6,9 @@ import SwiftUI
 struct NotchBandChrome: View {
     let notchWidth: CGFloat
     let notchHeight: CGFloat
+    /// Worst account (or total) and reset, shown in the free space beside the notch.
+    var glance: IslandGlance? = nil
+    var glanceDot: Color = .clear
     var onOpenPrefs: () -> Void
 
     @ObservedObject private var orchestrator = UsageOrchestrator.shared
@@ -15,9 +18,19 @@ struct NotchBandChrome: View {
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
+        f.locale = .ui
         f.unitsStyle = .abbreviated
         return f
     }()
+
+    private func bandText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.78))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .layoutPriority(-1)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -37,6 +50,16 @@ struct NotchBandChrome: View {
             .help("Preferences")
             .padding(.leading, 10)
 
+            if let leading = glance?.leading {
+                HStack(spacing: 5) {
+                    Circle().fill(glanceDot).frame(width: 5, height: 5)
+                    bandText(leading)
+                }
+                .padding(.leading, 4)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(glance?.accessibility ?? leading)
+            }
+
             Spacer(minLength: 4)
 
             // Physical notch dead zone — leave empty
@@ -44,6 +67,10 @@ struct NotchBandChrome: View {
                 .frame(width: notchWidth, height: notchHeight)
 
             Spacer(minLength: 4)
+
+            if let trailing = glance?.trailing {
+                bandText(trailing).padding(.trailing, 2)
+            }
 
             // Trailing ear — last poll age; click opens per-source status.
             Button {
@@ -146,7 +173,7 @@ struct NotchBandChrome: View {
     }
 
     private func statusLabel(relativeTo now: Date) -> String {
-        if isLoading { return "polling…" }
+        if isLoading { return String(localized: "polling…") }
         if let updated = effectiveUpdated {
             return Self.relativeFormatter.localizedString(for: updated, relativeTo: now)
         }
@@ -164,6 +191,7 @@ private struct FetchStatusPopover: View {
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
+        f.locale = .ui
         f.unitsStyle = .abbreviated
         return f
     }()

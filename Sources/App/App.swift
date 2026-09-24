@@ -20,11 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.level = Log.resolveLevel(env: env, defaults: .standard)
         Log.startFile(at: Log.defaultFileURL)
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let commit = Bundle.main.object(forInfoDictionaryKey: "DashIslandCommit") as? String ?? "?"
         Log.app.info(
-            "launch version=\(version) pid=\(ProcessInfo.processInfo.processIdentifier) level=\(Log.level) demo=\(env["DASHISLAND_DEMO"] == "1") support=\(CredentialStore.appSupportURL.path) file=\(Log.fileURL?.path ?? "off")"
+            "launch version=\(version) commit=\(commit) pid=\(ProcessInfo.processInfo.processIdentifier) level=\(Log.level) demo=\(env["DASHISLAND_DEMO"] == "1") support=\(CredentialStore.appSupportURL.path) file=\(Log.fileURL?.path ?? "off")"
         )
         AccountStore.shared.load()
         UsageOrchestrator.shared.startAutoRefresh()
+        AlertCenter.shared.start()
+        StatusFile.shared.start()
+        CollectorUpdater.shared.updateIfOutdated()
         island = IslandWindowController()
         island?.show()
     }

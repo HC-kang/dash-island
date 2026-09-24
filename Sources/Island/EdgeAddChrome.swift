@@ -11,11 +11,16 @@ struct CenteredAddButton: View {
         Menu {
             VendorMenuItems(onSelect: onSelectVendor)
         } label: {
-            GlassPlusLabel(size: 40, symbolSize: 16)
+            // First run showed only a bare "+"; say what it does (ui-13). A borderless
+            // Menu flattens its label to one line, so keep it to icon + text.
+            Label("Add an account", systemImage: "plus")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.85))
         }
         .menuStyle(.borderlessButton)
         .frame(maxWidth: .infinity, minHeight: AccountWidget.cellHeight)
         .accessibilityLabel("Add account")
+        .help("Add a Claude, Codex, Grok, or Antigravity account")
     }
 }
 
@@ -36,29 +41,6 @@ struct VendorMenuItems: View {
     }
 }
 
-/// Quiet glass circle with a plus glyph.
-struct GlassPlusLabel: View {
-    var size: CGFloat = 28
-    var symbolSize: CGFloat = 12
-
-    var body: some View {
-        Image(systemName: "plus")
-            .font(.system(size: symbolSize, weight: .semibold))
-            .foregroundStyle(Color.white.opacity(0.88))
-            .frame(width: size, height: size)
-            .background {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Circle()
-                            .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
-            }
-            .contentShape(Circle())
-    }
-}
-
 // MARK: - Add / manage helpers
 
 @MainActor
@@ -72,16 +54,34 @@ enum AccountChromeActions {
     /// and Anthropic rejects it for usage with 403.
     static func beginAdd(adapter: any VendorAdapter) {
         activateForUI()
-        addTask?.cancel()
         beginAddBrowserLogin(adapter: adapter)
     }
 
+    /// Cancel the running add/reauth and hand back its handle. The next task awaits
+    /// it first, so the old cleanup (hideProgress, .prior restore, folder discard)
+    /// cannot land on top of the new flow.
+    private static func cancelRunning() -> Task<Void, Never>? {
+        let previous = addTask
+        previous?.cancel()
+        addTask = nil
+        return previous
+    }
+
     private static func beginAddBrowserLogin(adapter: any VendorAdapter) {
+        let previous = cancelRunning()
+        addTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await runAdd(adapter: adapter)
+        }
+    }
+
+    private static func runAdd(adapter: any VendorAdapter) async {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
             message: adapter.id == "agy"
                 ? "A Terminal window opens for Antigravity. Sign in there, then close it. This window waits up to 3 minutes."
-                : "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes.",
+                : String(localized: "Complete \(adapter.displayName) login in the browser or terminal. This window waits up to 3 minutes."),
             vendorID: adapter.id,
             onCancel: {
                 addTask?.cancel()
@@ -89,7 +89,7 @@ enum AccountChromeActions {
             }
         )
 
-        addTask = Task {
+        do {
             var createdRef: CredentialRef?
             defer {
                 IslandDialogController.shared.hideProgress()
@@ -128,7 +128,7 @@ enum AccountChromeActions {
             } catch let error as AccountStoreError where error == .maxAccountsReached {
                 presentAlert(
                     title: "Account limit",
-                    message: "You can add up to \(AccountStore.maxAccounts) accounts."
+                    message: String(localized: "You can add up to \(AccountStore.maxAccounts) accounts.")
                 )
             } catch {
                 if !Task.isCancelled {
@@ -160,7 +160,7 @@ enum AccountChromeActions {
         guard let adapter = VendorRegistry.adapter(for: account.vendorID) else {
             presentAlert(
                 title: "Reauthenticate",
-                message: "No adapter for vendor “\(account.vendorID)”."
+                message: String(localized: "No adapter for vendor “\(account.vendorID)”.")
             )
             return
         }
@@ -172,20 +172,22 @@ enum AccountChromeActions {
         case "agy":
             message = "Extending this Antigravity session. A Terminal sign-in opens only if the stored session no longer works."
         default:
-            message = "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds."
+            message = String(localized: "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds.")
         }
-        IslandDialogController.shared.showProgress(
-            title: "Reauthenticate",
-            message: message,
-            vendorID: adapter.id,
-            onCancel: {
-                addTask?.cancel()
-                addTask = nil
-            }
-        )
-
-        addTask?.cancel()
+        let previous = cancelRunning()
         addTask = Task {
+            // Let a cancelled flow finish its cleanup before this one shows or stashes.
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            IslandDialogController.shared.showProgress(
+                title: "Reauthenticate",
+                message: message,
+                vendorID: adapter.id,
+                onCancel: {
+                    addTask?.cancel()
+                    addTask = nil
+                }
+            )
             defer { IslandDialogController.shared.hideProgress() }
             // No poll while the adapter has the session files moved aside; a
             // poll there left a red "reauth" for 30m after Cancel.
@@ -214,7 +216,7 @@ enum AccountChromeActions {
         DispatchQueue.main.async {
             activateForUI()
             let ok = IslandDialogController.shared.runConfirm(
-                title: "Remove \(label)?",
+                title: String(localized: "Remove \(label)?"),
                 message: "This removes the account from Dash Island and deletes its stored credentials.",
                 confirmTitle: "Remove",
                 isDestructive: true,

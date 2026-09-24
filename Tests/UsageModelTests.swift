@@ -84,6 +84,16 @@ enum UsageModelSuite {
             }
         }
 
+        failures += check("captions follow UnavailableReason, not word matching") {
+            // "refresh" in a login-family message used to read as a soft "token quiet".
+            try assertEqual(UsageOrchestrator.caption(for: .unavailable("invalid_grant: refresh token revoked"), vendorID: "codex"), "need browser login")
+            try assertEqual(UsageOrchestrator.caption(for: .unavailable("missing user:profile scope"), vendorID: "claude"), "need browser login")
+            try assertEqual(UsageOrchestrator.caption(for: .unavailable("token quiet · retry 12m"), vendorID: "claude"), "token quiet")
+            try assertTrue(UsageOrchestrator.caption(for: .unavailable("refresh pending"), vendorID: "claude") == nil)
+            let detail = UsageOrchestrator.detailCaption(for: .unavailable("invalid_grant"), vendorID: "codex", credentialRef: "ABCDEF12") ?? ""
+            try assertTrue(detail.contains("CODEX_HOME="), detail)
+            try assertTrue(!detail.contains("CLAUDE_CONFIG_DIR"), detail)
+        }
         return failures
     }
 }

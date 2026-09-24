@@ -8,8 +8,8 @@ macOS 노치·메뉴바 아일랜드 — **여러 벤더·여러 계정** AI 사
 
 | | |
 |--|--|
-| Vendors / 벤더 | **Claude** · **Codex** · **Grok** |
-| Accounts / 계정 | Up to **5** (center-aligned gauges) |
+| Vendors / 벤더 | **Claude** · **Codex** · **Grok** · **Antigravity** |
+| Accounts / 계정 | Up to **20** stored, **5** visible at once (scroll for more) |
 | Store / 스토어 | **Not** on the Mac App Store — build from source (GitHub) |
 | Sign / 서명 | Ad-hoc (`codesign -s -`) |
 
@@ -96,6 +96,8 @@ To connect account tracking for both ordinary CLI sessions and Orca sessions, ru
 
 For an explicitly selected account in either a normal terminal or an Orca terminal, run `"$HOME/Library/Application Support/DashIsland/tracking/account-cli" <account-id-prefix> [CLI arguments]`. Running it without arguments lists accounts; Grok/Antigravity empty states also provide “Copy command for this account”. This selects the account's CLI home and removes competing API-key and provider-routing variables (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY`). Other variables, proxies, and files outside that home stay shared. Antigravity reads its login only from `$HOME`, so the whole `agy` session runs with the account folder as `HOME`: git keeps your global config through `GIT_CONFIG_GLOBAL`, but other tools the agent runs do not find their `~` settings. Plain Grok/Antigravity launches outside that home are not attributed to the selected account.
 
+A CLI launched through `account-cli` and the app share the account folder, and both can rotate its refresh token. The app takes an advisory lock (`.dash-refresh.lock` in the folder) and reads the credential file again before each Codex, Grok or Claude token refresh. If the refresh token in the file is newer than the one the app last read, the app uses that file and does not refresh. `account-cli` takes no lock, because the vendor CLIs do not know it. The app yields to the newer file instead.
+
 To undo the connection, run `python3 scripts/connect-usage.py --disconnect`. It removes only the settings it added: a value that existed before connecting comes back, and later edits stay. It also stops and removes the LaunchAgent and deletes the collector token. Captured usage and config backups stay in `tracking/`.
 
 The connector writes the local collector token into each CLI config file (`config.toml`, `settings.json`) and sets those files to mode 0600. The token only allows writes to the loopback collector, but do not commit these files to a dotfiles repository. A symlinked config file is written through its link.
@@ -125,12 +127,31 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (default `3`).
 
+### Privacy and network
+
+Dash Island has no telemetry and no server of its own. It talks only to:
+
+| What | Hosts |
+|--|--|
+| Usage readings (your own accounts) | `api.anthropic.com`, `chatgpt.com`, `cli-chat-proxy.grok.com`, `cloudcode-pa.googleapis.com` |
+| Token refresh for managed accounts | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
+| Vendor status pages | `status.claude.com`, `status.openai.com`, `status.x.ai` |
+| Model price catalog (API-equivalent cost), cached daily | `ericjypark.github.io` (codex-island's public catalog; the bundled copy is used offline) |
+| USD→KRW rate, only while KRW display is selected, cached daily | `open.er-api.com` |
+| Local usage collector (optional) | `127.0.0.1:43190` only |
+
+Credentials stay in `~/Library/Application Support/DashIsland/accounts/` (folders 0700, files 0600). Logs and `status.json` never contain tokens or response bodies.
+
 ### Logs
 
 - File: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 rotation). Also mirrored to the unified log (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
 - Level: `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` (or `DASHISLAND_LOG=debug` in the env). Values: `debug info warn error`. Default `info`. Restart the app to apply.
 - Tail: `scripts/logs.sh`, follow: `scripts/logs.sh -f`, filter: `scripts/logs.sh -f fetch`.
 - The log never contains tokens or response bodies.
+
+### Status file
+
+`~/Library/Application Support/DashIsland/status.json` mirrors what the island shows, for scripts (sketchybar, tmux, Raycast). It is rewritten after each update, owner-only (0600), and holds only account id (8 chars), label, vendor, health, window percents, reset times, and freshness. No tokens.
 
 ### Tests
 
@@ -164,7 +185,7 @@ Optional later: GitHub Release zips → notarized Developer ID → Sparkle → H
 
 ### License
 
-TBD — set before a public release tag (MIT is a common choice).
+MIT — see [LICENSE](LICENSE). Third-party code and marks: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -251,6 +272,8 @@ CLI 설정 파일(`config.toml`, `settings.json`)에는 로컬 수집기 토큰�
 
 특정 계정으로 CLI를 실행하려면 `"$HOME/Library/Application Support/DashIsland/tracking/account-cli" <계정-ID-접두어> [CLI 인수]`를 실행합니다. 이 명령은 계정의 CLI 홈을 선택하고, API 키와 라우팅 변수(`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY`)를 제거합니다. 그 밖의 환경 변수, 프록시, 홈 밖의 파일은 공유됩니다. Antigravity는 `$HOME`에서만 로그인을 찾습니다. 그래서 `agy` 세션 전체가 계정 폴더를 `HOME`으로 봅니다. git은 `GIT_CONFIG_GLOBAL`로 사용자 전역 설정을 유지하지만, 에이전트가 실행하는 다른 도구는 `~` 설정을 찾지 못합니다.
 
+`account-cli`로 실행한 CLI와 앱은 같은 계정 폴더를 사용하고, 둘 다 refresh token을 교체할 수 있습니다. 앱은 Codex, Grok, Claude 토큰을 갱신하기 전에 폴더의 권고 잠금(`.dash-refresh.lock`)을 잡고 자격 증명 파일을 다시 읽습니다. 파일의 refresh token이 앱이 마지막으로 읽은 것과 다르면, 앱은 그 파일을 사용하고 갱신하지 않습니다. `account-cli`는 잠금을 잡지 않습니다. 벤더 CLI가 그 잠금을 모르기 때문입니다. 대신 앱이 더 새로운 파일에 양보합니다.
+
 #### Claude 인증 (중요)
 
 | 방식 | 사용량 미터에 사용 가능? |
@@ -272,12 +295,31 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (기본 `3`).
 
+### 개인정보와 네트워크
+
+Dash Island는 텔레메트리를 보내지 않고, 자체 서버도 없습니다. 앱은 다음 주소와만 통신합니다.
+
+| 용도 | 호스트 |
+|--|--|
+| 사용량 조회(사용자 본인 계정) | `api.anthropic.com`, `chatgpt.com`, `cli-chat-proxy.grok.com`, `cloudcode-pa.googleapis.com` |
+| 관리 계정의 토큰 갱신 | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
+| 벤더 상태 페이지 | `status.claude.com`, `status.openai.com`, `status.x.ai` |
+| 모델 가격표(API 환산 비용), 하루 한 번 캐시 | `ericjypark.github.io` (codex-island의 공개 가격표; 오프라인에서는 동봉 사본 사용) |
+| USD→KRW 환율, KRW 표시를 고른 경우에만, 하루 한 번 캐시 | `open.er-api.com` |
+| 로컬 사용량 수집기(선택) | `127.0.0.1:43190`만 사용 |
+
+자격 증명은 `~/Library/Application Support/DashIsland/accounts/`에 저장됩니다(폴더 0700, 파일 0600). 로그와 `status.json`에는 토큰과 응답 본문이 기록되지 않습니다.
+
 ### 로그
 
 - 파일: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 회전). 통합 로그에도 같은 내용이 기록됩니다 (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
 - 레벨: `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` 또는 환경 변수 `DASHISLAND_LOG=debug`. 값은 `debug info warn error`이고 기본값은 `info`입니다. 앱을 다시 시작해야 적용됩니다.
 - 보기: `scripts/logs.sh`, 따라가기: `scripts/logs.sh -f`, 필터: `scripts/logs.sh -f fetch`.
 - 로그에는 토큰과 응답 본문이 기록되지 않습니다.
+
+### 상태 파일
+
+`~/Library/Application Support/DashIsland/status.json`에는 island가 보여 주는 값이 기록됩니다. sketchybar, tmux, Raycast 같은 스크립트가 이 파일을 읽을 수 있습니다. 갱신할 때마다 다시 쓰고, 권한은 소유자 전용(0600)입니다. 계정 ID(8자), 라벨, 벤더, 상태, 창별 사용률, 리셋 시각, 갱신 여부만 담고, 토큰은 담지 않습니다.
 
 ### 테스트
 
@@ -309,4 +351,4 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 ### 라이선스
 
-TBD — 공개 릴리스 태그 전에 정하세요 (이런 도구는 MIT가 흔합니다).
+MIT — [LICENSE](LICENSE)를 보세요. 외부 코드와 상표는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.

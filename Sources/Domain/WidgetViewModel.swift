@@ -20,8 +20,8 @@ enum AccountHealth: Equatable, Sendable {
     var defaultLabel: String {
         switch self {
         case .ok: return "ok"
-        case .warn: return "warning"
-        case .error: return "error"
+        case .warn: return String(localized: "warning")
+        case .error: return String(localized: "error")
         }
     }
 
@@ -56,25 +56,25 @@ enum AccountHealth: Equatable, Sendable {
         // Account / credentials.
         if awaitingFirst {
             health = maxHealth(health, .warn)
-            parts.append("waiting for first sample")
+            parts.append(String(localized: "waiting for first sample"))
         }
         if let error {
             switch error {
             case .authRequired:
                 health = maxHealth(health, .error)
-                parts.append(authCaption ?? "auth required")
+                parts.append(authCaption ?? String(localized: "auth required"))
             case .rateLimited:
                 health = maxHealth(health, .warn)
-                parts.append("rate limited")
+                parts.append(String(localized: "rate limited"))
             case .network(let m):
                 health = maxHealth(health, .warn)
-                parts.append(m.isEmpty ? "network error" : m)
+                parts.append(m.isEmpty ? String(localized: "network error") : m)
             case .parse(let m):
                 health = maxHealth(health, .error)
-                parts.append(m.isEmpty ? "parse error" : m)
+                parts.append(m.isEmpty ? String(localized: "parse error") : m)
             case .unavailable(let m):
                 health = maxHealth(health, .warn)
-                parts.append(m.isEmpty ? "unavailable" : m)
+                parts.append(m.isEmpty ? String(localized: "unavailable") : m)
             }
         }
         if let notice, !notice.isEmpty {
@@ -193,6 +193,8 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     /// from locally captured calls, not a vendor reading. Nil when we cannot build
     /// one, which is the normal state right after a poll.
     var projectedPrimaryFraction: Double? = nil
+    /// Credentials were rejected; the caption becomes a Reauthenticate action.
+    var needsReauth: Bool = false
 
     /// Flat strings for accessibility / demos.
     var hoverLines: [String] {

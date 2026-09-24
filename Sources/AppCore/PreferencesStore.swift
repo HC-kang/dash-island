@@ -65,6 +65,12 @@ final class PreferencesStore: ObservableObject {
         static let compactRim = "DashIsland.rimCompact"
         static let expandedRim = "DashIsland.rimExpanded"
         static let pollSeconds = "DashIsland.pollSeconds"
+        static let glanceRim = "DashIsland.glanceRim"
+        static let glanceEars = "DashIsland.glanceEars"  // legacy Bool, migrated below
+        static let glanceEarsMode = "DashIsland.glanceEarsMode"
+        static let alertNotifications = "DashIsland.alertNotifications"
+        static let glanceTotalVendors = "DashIsland.glanceTotalVendors"
+        static let displayCurrency = "DashIsland.displayCurrency"
     }
 
     /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
@@ -84,8 +90,44 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    /// Compact rim turns amber/red when an account nears its limit or needs sign-in.
+    @Published var glanceRim: Bool {
+        didSet { defaults.set(glanceRim, forKey: Keys.glanceRim) }
+    }
+
+    /// When the compact ears (worst account / total, reset countdown) draw.
+    @Published var glanceEarsMode: IslandGlance.EarsMode {
+        didSet { defaults.set(glanceEarsMode.rawValue, forKey: Keys.glanceEarsMode) }
+    }
+
+    /// macOS notifications at 80% / 95%, after a reset, and when sign-in is needed.
+    @Published var alertNotifications: Bool {
+        didSet { defaults.set(alertNotifications, forKey: Keys.alertNotifications) }
+    }
+
+    /// Vendors whose accounts the left ear sums ("212/500%"). Empty: show the worst account.
+    @Published var glanceTotalVendors: [String] {
+        didSet { defaults.set(glanceTotalVendors, forKey: Keys.glanceTotalVendors) }
+    }
+
+    /// API-equivalent cost display. KRW converts at a daily rate (see ExchangeRateStore).
+    @Published var displayCurrency: CurrencyDisplay.Currency {
+        didSet { defaults.set(displayCurrency.rawValue, forKey: Keys.displayCurrency) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
+        if let raw = defaults.string(forKey: Keys.glanceEarsMode), let mode = IslandGlance.EarsMode(rawValue: raw) {
+            self.glanceEarsMode = mode
+        } else {
+            // Someone who turned the old toggle off keeps them off; everyone else gets Auto.
+            self.glanceEarsMode = (defaults.object(forKey: Keys.glanceEars) as? Bool) == false ? .never : .auto
+        }
+        self.alertNotifications = defaults.object(forKey: Keys.alertNotifications) as? Bool ?? true
+        self.glanceTotalVendors = defaults.stringArray(forKey: Keys.glanceTotalVendors) ?? []
+        self.displayCurrency = defaults.string(forKey: Keys.displayCurrency)
+            .flatMap(CurrencyDisplay.Currency.init(rawValue:)) ?? .usd
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 

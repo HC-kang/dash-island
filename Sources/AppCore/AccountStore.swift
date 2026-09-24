@@ -33,6 +33,10 @@ final class AccountStore: ObservableObject {
             // Only scan the live Application Support tree when this store owns it.
             // (Unit tests use temp `accounts.json` paths — never pull real orphans in.)
             if isLivePersistence {
+                let priorFixed = CredentialStore.recoverPriorFiles()
+                if priorFixed > 0 { Log.accounts.warn("prior credentials recovered files=\(priorFixed)") }
+                let tightened = CredentialStore.tightenPermissions()
+                if tightened > 0 { Log.accounts.info("permissions tightened folders=\(tightened) mode=0700") }
                 let recovered = recoverOrphans(existing: loaded)
                 if !recovered.isEmpty {
                     loaded.append(contentsOf: recovered)
@@ -119,6 +123,9 @@ final class AccountStore: ObservableObject {
         let dir = CredentialStore.directoryURL(for: removed.credentialRef)
         switch removed.vendorID {
         case "claude":
+            // A background CLI ping could recreate the folder after deletion,
+            // and orphan recovery would then bring the account back.
+            ClaudeAdapter.cliPings.cancel(dir.path)
             ClaudeAdapter.clearManagedCredentials(configDir: dir)
         case "codex":
             CodexAdapter.clearManagedCredentials(codexHome: dir)
@@ -130,6 +137,7 @@ final class AccountStore: ObservableObject {
             break
         }
         try? CredentialStore.removeDirectory(for: removed.credentialRef)
+        QuotaHistoryStore.shared.remove(accountID: removed.id)
     }
 
     func rename(id: AccountID, label: String) throws {

@@ -111,6 +111,11 @@ private struct UsageDetailView: View {
     @ObservedObject private var usage = UsageOrchestrator.shared
     @ObservedObject private var local = LocalUsageStore.shared
     @ObservedObject private var accounts = AccountStore.shared
+    @ObservedObject private var preferences = PreferencesStore.shared
+    @ObservedObject private var vendorStatus = VendorStatusStore.shared
+    @ObservedObject private var quotaHistory = QuotaHistoryStore.shared
+    @ObservedObject private var rates = ExchangeRateStore.shared
+    @ObservedObject private var collector = CollectorUpdater.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -176,6 +181,11 @@ private struct UsageDetailView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         .colorScheme(.dark)
         .tint(accent)
+        .onAppear {
+            _ = quotaHistory.history(for: initial.id)
+            if preferences.displayCurrency == .krw { rates.refreshIfNeeded() }
+            collector.updateIfOutdated()
+        }
         .task(id: sourceKey) {
             repeat {
                 await local.load(provider: provider, accountID: initial.id)
@@ -207,24 +217,41 @@ private struct UsageDetailView: View {
         .padding(24)
     }
 
+    /// Vendor-side incident from the official status page, kept apart from account
+    /// errors so "is it me or them?" has an answer.
+    @ViewBuilder
+    private var incidentBanner: some View {
+        if let service = vendorStatus.byVendor[provider], service.level >= .degraded {
+            Label(service.summary, systemImage: service.level == .outage ? "bolt.horizontal.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(service.level == .outage ? Color.red : Color.orange)
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+                .help("From the vendor's public status page")
+        }
+    }
+
     private var quotas: some View {
         VStack(alignment: .leading, spacing: 15) {
+            incidentBanner
             if let first = windows.first {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(Int(((1 - first.usedFraction) * 100).rounded()))%")
+                    Text("\(shownPercent(first))%")
                         .font(.system(size: 38, weight: .medium, design: .rounded)).monospacedDigit()
-                    Text("left").font(.system(size: 14)).foregroundStyle(.secondary)
+                    Text(shownWord).font(.system(size: 14)).foregroundStyle(.secondary)
                     Spacer()
                     Text(label(first)).font(.system(size: 12, weight: .medium)).foregroundStyle(accent)
                 }
                 quotaBar(first)
                 resetLabel(first).padding(.top, -8)
+                trend(first)
                 ForEach(Array(windows.dropFirst().enumerated()), id: \.offset) { _, window in
                     VStack(spacing: 6) {
                         HStack {
                             Text(label(window)).fontWeight(.medium)
                             Spacer()
-                            Text("\(Int(((1 - window.usedFraction) * 100).rounded()))% left").monospacedDigit()
+                            Text("\(shownPercent(window))% \(shownWord)").monospacedDigit()
                         }.font(.system(size: 12))
                         quotaBar(window)
                         resetLabel(window)
@@ -246,8 +273,12 @@ private struct UsageDetailView: View {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.system(size: 11)).foregroundStyle(Color.orange)
             }
+            ForEach([model.paceLine(now: Date())].compactMap { $0 }, id: \.self) { line in
+                Label(line, systemImage: "gauge.with.dots.needle.33percent")
+                    .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.72))
+            }
             if let date = model.lastSuccessAt {
-                Text("Last quota reading \(date.formatted(date: .abbreviated, time: .shortened))")
+                Text("Last quota reading \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui)))")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
@@ -256,21 +287,80 @@ private struct UsageDetailView: View {
     private func label(_ window: WindowUsage) -> String {
         let period: String
         switch window.kind {
-        case .fiveHour: period = "Session"
-        case .weekly: period = "Weekly"
-        case .monthly: period = "Monthly"
-        case .unknown: period = "Usage"
+        case .fiveHour: period = String(localized: "Session")
+        case .weekly: period = String(localized: "Weekly")
+        case .monthly: period = String(localized: "Monthly")
+        case .unknown: period = String(localized: "Usage")
         }
         guard let name = window.labelOverride else { return period }
-        return name.hasSuffix(" wk") ? String(name.dropLast(3)) + " Weekly" : name
+        return name.hasSuffix(" wk") ? String(localized: "\(String(name.dropLast(3))) Weekly") : name
     }
+
+    /// Seven days of the headline window from QuotaHistory, in the display mode.
+    @ViewBuilder
+    private func trend(_ window: WindowUsage) -> some View {
+        let now = Date()
+        let span: TimeInterval = 7 * 86_400
+        let points = (quotaHistory.byAccount[initial.id] ?? QuotaHistory())
+            .series(window: window.displayLabel, days: 7, now: now)
+        if points.count >= 2 {
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { g in
+                    let xy: (QuotaHistory.Sample) -> CGPoint = { p in
+                        let x = g.size.width * CGFloat(1 - now.timeIntervalSince(p.at) / span)
+                        let v = showsUsed ? p.used : 1 - p.used
+                        return CGPoint(x: x, y: g.size.height * CGFloat(1 - v))
+                    }
+                    let line = Path { path in
+                        path.move(to: xy(points[0]))
+                        for p in points.dropFirst() { path.addLine(to: xy(p)) }
+                    }
+                    ZStack {
+                        Path { p in
+                            p.move(to: CGPoint(x: 0, y: g.size.height / 2))
+                            p.addLine(to: CGPoint(x: g.size.width, y: g.size.height / 2))
+                        }
+                        .stroke(Color.white.opacity(0.06), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        Path { p in
+                            p.addPath(line)
+                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: g.size.height))
+                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: g.size.height))
+                            p.closeSubpath()
+                        }
+                        .fill(accent.opacity(0.14))
+                        line.stroke(accent.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                        let end = xy(points[points.count - 1])
+                        Circle().fill(accent).frame(width: 5, height: 5).position(end)
+                    }
+                }
+                .frame(height: 36)
+                HStack {
+                    Text("7 days ago")
+                    Spacer()
+                    Text("now")
+                }
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(window.displayLabel) over the last 7 days")
+        }
+    }
+
+    /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).
+    private var showsUsed: Bool { preferences.displayMode == .used }
+    private var shownWord: String { showsUsed ? String(localized: "used") : String(localized: "left") }
+    private func shownFraction(_ window: WindowUsage) -> Double {
+        let used = min(1, max(0, window.usedFraction))
+        return showsUsed ? used : 1 - used
+    }
+    private func shownPercent(_ window: WindowUsage) -> Int { Int((shownFraction(window) * 100).rounded()) }
 
     private func quotaBar(_ window: WindowUsage) -> some View {
         GeometryReader { proxy in
             Capsule().fill(Color.white.opacity(0.09))
                 .overlay(alignment: .leading) {
                     Capsule().fill(accent.opacity(0.9))
-                        .frame(width: proxy.size.width * min(1, max(0, 1 - window.usedFraction)))
+                        .frame(width: proxy.size.width * shownFraction(window))
                 }
         }.frame(height: 5).accessibilityHidden(true)
     }
@@ -278,7 +368,7 @@ private struct UsageDetailView: View {
     private func resetLabel(_ window: WindowUsage) -> some View {
         HStack {
             if let date = window.resetAt {
-                Text(date > Date() ? "Resets \(date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))" : "Awaiting next reading")
+                Text(date > Date() ? "Resets \(date.formatted(.dateTime.month(.abbreviated).day().hour().minute().locale(.ui)))" : "Awaiting next reading")
             } else { Text("Reset time unavailable") }
             Spacer()
         }.font(.system(size: 11)).foregroundStyle(.secondary)
@@ -298,7 +388,7 @@ private struct UsageDetailView: View {
                     ForEach(UsagePeriod.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden()
                 if liveTracking {
-                    Text("Captured calls only. Reopen older Orca/CLI sessions to include their new usage.")
+                    Text("Counts calls from CLI sessions started with tracking on. Restart older sessions to include them.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -306,7 +396,7 @@ private struct UsageDetailView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(activityLoading ? "Reading local usage…" : (liveTracking ? "No captured calls in this period" : "No account-linked activity in this period"))
                         .font(.system(size: 16, weight: .medium))
-                    Text(liveTracking ? "Only calls linked to this account appear here. Earlier unlinked history is excluded."
+                    Text(liveTracking ? "Only calls linked to this account appear here."
                          : "Start the CLI with this account’s dedicated home to record its activity.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     if !liveTracking {
@@ -325,10 +415,10 @@ private struct UsageDetailView: View {
                 }.padding(.vertical, 8)
             } else {
                 HStack(alignment: .top) {
-                    metric(Self.tokens(summary.tokens.total), caption: liveTracking ? "Captured tokens, incl. cache" : "Tokens, including cache")
+                    metric(Self.tokens(summary.tokens.total), caption: liveTracking ? String(localized: "Captured tokens, incl. cache") : String(localized: "Tokens, including cache"))
                     Spacer()
-                    metric(summary.dollars.map(Self.money) ?? "—", caption: (provider == "grok" ? "Recorded API value" : "API estimate")
-                           + (summary.unpricedTokens > 0 ? " · partial" : ""))
+                    metric(summary.dollars.map(money) ?? "—", caption: (provider == "grok" ? String(localized: "Recorded API value") : String(localized: "API estimate"))
+                           + (summary.unpricedTokens > 0 ? String(localized: " · partial") : ""))
                 }
                 trend(summary.trend)
                 VStack(spacing: 14) {
@@ -350,8 +440,31 @@ private struct UsageDetailView: View {
                 }
                 Text(liveTracking ? "Attributed by the account ID reported with each call. Earlier unlinked history is excluded."
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
+                if liveTracking {
+                    let health = AccountUsageReader.collectorHealth()
+                    if collector.status == .running {
+                        Label("Updating the tracking collector…", systemImage: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(Color.secondary)
+                    } else {
+                        Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
+                            .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
+                    }
+                    if case .failed(let reason) = collector.status {
+                        Text(reason).foregroundStyle(Color.orange)
+                    }
+                    // Outdated updates itself (no CLI config change); only a first connection
+                    // edits CLI configs, so that one waits for this click.
+                    if health.state == .notConnected {
+                        Button("Connect tracking") { collector.connect() }
+                            .buttonStyle(.plain).foregroundStyle(accent)
+                            .disabled(collector.status == .running)
+                    } else if health.state == .outdated, collector.status != .running {
+                        Button("Retry update") { collector.updateIfOutdated() }
+                            .buttonStyle(.plain).foregroundStyle(accent)
+                    }
+                }
                 if liveTracking, let date = local.snapshots[sourceKey]?.events.map(\.date).max() {
-                    Text("Last captured call \(date.formatted(date: .abbreviated, time: .shortened))")
+                    Text("Last captured call \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui)))")
                 }
                 Text(provider == "grok" ? "Values reported by Grok are not subscription charges."
                      : "API estimates use standard rates, not subscription charges.")
@@ -382,11 +495,11 @@ private struct UsageDetailView: View {
                         .fill(point.tokens == 0 ? Color.white.opacity(0.06) : accent.opacity(0.7))
                         .frame(maxWidth: .infinity)
                         .frame(height: max(2, 42 * Double(point.tokens) / Double(peak)))
-                        .help("\(point.date.formatted()) · \(Self.tokens(point.tokens)) tokens")
+                        .help("\(point.date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui))) · \(Self.tokens(point.tokens)) tokens")
                 }
             }.frame(height: 42, alignment: .bottom)
             HStack {
-                Text(period == .today ? "00:00" : points.first?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")
+                Text(period == .today ? "00:00" : points.first?.date.formatted(.dateTime.month(.abbreviated).day().locale(.ui)) ?? "")
                 Spacer()
                 Text(period == .today ? "24:00" : "Today")
             }.font(.system(size: 9)).foregroundStyle(.secondary)
@@ -404,11 +517,11 @@ private struct UsageDetailView: View {
                     Text(row.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(Self.tokens(row.tokens.total)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Text(row.dollars.map { Self.money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
+                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
                         .font(.system(size: 11)).lineLimit(1).frame(minWidth: 54, alignment: .trailing)
                 }.monospacedDigit().contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(Self.money) ?? "unpriced")")
+                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? "unpriced")")
                 .accessibilityValue(expandedModels.contains(row.id) ? "Expanded" : "Collapsed")
                 .accessibilityHint("Show input, output and cache tokens")
             GeometryReader { proxy in
@@ -438,8 +551,8 @@ private struct UsageDetailView: View {
     private static func tokens(_ count: Int64) -> String {
         count.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)).locale(Locale(identifier: "en_US")))
     }
-    private static func money(_ amount: Double) -> String {
-        amount.formatted(.currency(code: "USD").precision(.fractionLength(2)).locale(Locale(identifier: "en_US")))
+    private func money(_ amount: Double) -> String {
+        CurrencyDisplay.format(usd: amount, currency: preferences.displayCurrency, krwPerUSD: rates.krwPerUSD)
     }
 }
 
@@ -486,7 +599,10 @@ private struct ScrollCueProbe: NSViewRepresentable {
             guard let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
             let visible = scroll.documentVisibleRect
             let below = doc.isFlipped ? doc.bounds.height - visible.maxY : visible.minY
-            onChange(IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height))
+            let more = IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height)
+            // Frame-change notifications arrive mid-layout; SwiftUI drops state writes made
+            // during a view update, so hand the result over on the next run-loop turn.
+            DispatchQueue.main.async { [weak self] in self?.onChange(more) }
         }
     }
 }

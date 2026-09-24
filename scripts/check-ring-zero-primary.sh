@@ -61,15 +61,17 @@ struct Probe: View {
         settle(0.6)
         let late = steelPixels(0)
         print("weekly ring pixels — at mount: \(mounted), after late data: \(late)")
-        guard mounted > 500, late > 500 else { print("FAIL: weekly ring blank while 5h is 0%"); exit(1) }
+        // Pixel counts scale with the square of the backing scale; 400 at 1x is
+        // ~70% of the measured 575, so 1x displays no longer pass by a 15% hair.
+        let k = host.bitmapImageRepForCachingDisplay(in: host.bounds)!.pixelsWide / 192
+        let minimum = 400 * k * k
+        guard mounted > minimum, late > minimum else { print("FAIL: weekly ring blank while 5h is 0% (need > \(minimum))"); exit(1) }
         print("PASS: rings paint with 5h at 0%")
         exit(0)
     }
 }
 SWIFT
-swiftc -parse-as-library -target arm64-apple-macos13.0 -O \
-    -framework SwiftUI -framework AppKit -framework Combine -framework Security \
-    -framework ServiceManagement -framework CoreGraphics \
-    $(find Sources -name '*.swift' ! -path 'Sources/App/App.swift' | sort) \
-    "$CHECK_DIR/Check.swift" -o "$CHECK_DIR/check"
+# shellcheck source=scripts/check-build.sh
+. scripts/check-build.sh
+compile_check "$CHECK_DIR/Check.swift" "$CHECK_DIR/check"
 env -u DASHISLAND_DEMO "$CHECK_DIR/check"

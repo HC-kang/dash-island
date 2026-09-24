@@ -413,68 +413,6 @@ final class UsageOrchestrator: ObservableObject {
         )
     }
 
-    // MARK: - Due helper (pure, testable)
-
-    /// Whether an account should be fetched at `now`.
-    ///
-    /// Due if never fetched, or `now - lastFetch >= max(userInterval, minPoll) - tolerance`.
-    /// `retryAt` is the retry time a soft failure named (token gate, CLI ping).
-    /// It is due then, even when the idle interval is longer; `minPoll` stays
-    /// the floor.
-    nonisolated static func isDue(
-        lastFetch: Date?,
-        now: Date,
-        userInterval: TimeInterval,
-        minPoll: TimeInterval,
-        tolerance: TimeInterval = 0,
-        retryAt: Date? = nil
-    ) -> Bool {
-        guard let lastFetch else { return true }
-        if let retryAt, now >= retryAt,
-           now.timeIntervalSince(lastFetch) >= minPoll - tolerance
-        {
-            return true
-        }
-        let interval = max(userInterval, minPoll)
-        guard interval > 0 else { return true }
-        return now.timeIntervalSince(lastFetch) >= interval - tolerance
-    }
-
-    /// Slack for `isDue`. Ticks land on a fixed grid with run-loop jitter, and a
-    /// fetch may start a few seconds after its tick; an exact comparison missed
-    /// the 60s slot by milliseconds and polled at 80s. Half a tick can never
-    /// pull a poll a whole tick early.
-    nonisolated static let dueTolerance: TimeInterval = schedulerTickSeconds / 2
-
-    /// Interval used for expand lazy-refresh: never below `expandDebounceFloor`
-    /// or the vendor's `minPollSeconds`.
-    nonisolated static func expandInterval(minPoll: TimeInterval) -> TimeInterval {
-        max(expandDebounceFloor, minPoll)
-    }
-
-    /// Cooldown seconds after a rate limit. Local 2h/4h/6h backoff is capped;
-    /// an explicit vendor `Retry-After` is authoritative even when longer.
-    nonisolated static func rateLimitWait(
-        streak: Int,
-        retryAfter: Date?,
-        now: Date
-    ) -> TimeInterval {
-        let vendor = retryAfter.map { $0.timeIntervalSince(now) } ?? 0
-        // First 429 with an explicit Retry-After: the vendor knows its own window.
-        if streak <= 1, vendor > 0 { return max(60, vendor) }
-        // Repeats double: 15m, 30m, 1h, 2h, 4h — capped locally, never below the
-        // vendor's own ask.
-        let steps = max(0, min(streak, 5) - 1)
-        let local = min(rateLimitCooldownMax, rateLimitCooldown * pow(2, Double(steps)))
-        return max(60, max(local, vendor))
-    }
-
-    /// Spacing after `streak` network errors in a row: 1m, 2m, 4m, then 8m.
-    nonisolated static func transientRetryWait(streak: Int) -> TimeInterval {
-        let steps = max(0, min(streak, 4) - 1)
-        return min(transientRetryMax, transientRetryBase * pow(2, Double(steps)))
-    }
-
     // MARK: - Polling
 
     private func rescheduleTimer() {
@@ -614,7 +552,7 @@ final class UsageOrchestrator: ObservableObject {
             guard let snapshot = Self.loadLastGood(from: url) else { continue }
             lastGood[account.id] = snapshot
             lastSuccessAt[account.id] = snapshot.fetchedAt
-            lastNotice[account.id] = "saved last-good · checking live usage"
+            lastNotice[account.id] = String(localized: "saved last-good · checking live usage")
             lastUpdated = max(lastUpdated ?? .distantPast, snapshot.fetchedAt)
             restored += 1
         }
@@ -629,38 +567,6 @@ final class UsageOrchestrator: ObservableObject {
         ) {
             Log.accounts.warn("lastGood persist failed account=\(accountID.short)")
         }
-    }
-
-    nonisolated static func encodeLastGood(_ snapshot: UsageSnapshot) -> Data? {
-        guard snapshot.error == nil, snapshot.primary.isReported else { return nil }
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        return try? encoder.encode(snapshot)
-    }
-
-    nonisolated static func decodeLastGood(_ data: Data) -> UsageSnapshot? {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
-        guard let snapshot = try? decoder.decode(UsageSnapshot.self, from: data),
-              snapshot.error == nil
-        else { return nil }
-        return snapshot
-    }
-
-    @discardableResult
-    nonisolated static func saveLastGood(_ snapshot: UsageSnapshot, to url: URL) -> Bool {
-        guard let data = encodeLastGood(snapshot) else { return false }
-        do {
-            try data.write(to: url, options: .atomic)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    nonisolated static func loadLastGood(from url: URL) -> UsageSnapshot? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return decodeLastGood(data)
     }
 
     private func pollDueAccounts(mode: PollMode = .background, forceActive: Bool = false) async {
@@ -888,7 +794,12 @@ final class UsageOrchestrator: ObservableObject {
         if case .network = snapshot.error {
             let streak = (networkFailureStreak[accountID] ?? 0) + 1
             networkFailureStreak[accountID] = streak
-            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(Self.transientRetryWait(streak: streak)))s")
+            // isDue floors every interval at the vendor's minPoll, so log the wait that
+            // actually applies (agy: 300 s), not the raw backoff step.
+            let vendor = accountStore.accounts.first { $0.id == accountID }?.vendorID ?? ""
+            let minPoll = TimeInterval(VendorRegistry.adapter(for: vendor)?.minPollSeconds ?? 300)
+            let wait = max(Self.transientRetryWait(streak: streak), minPoll)
+            Log.poll.info("retry account=\(accountID.short) kind=network streak=\(streak) in=\(Int(wait))s")
         } else {
             networkFailureStreak[accountID] = nil
         }
@@ -963,40 +874,9 @@ final class UsageOrchestrator: ObservableObject {
         }
         lastGood[accountID] = snapshot
         persistLastGood(accountID: accountID, snapshot: snapshot)
+        QuotaHistoryStore.shared.record(accountID: accountID, snapshot: snapshot, at: now)
         pushBurn(accountID: accountID, snapshot: snapshot)
         anchorProjection(accountID: accountID, snapshot: snapshot, now: now)
-    }
-
-    /// Background spacing for one account: fast while it burns or just after its
-    /// window rolls over, slow while it sits still.
-    ///
-    /// Two independent activity signals, because neither alone is complete —
-    /// captured calls are accurate but blind to web use and to processes that
-    /// predate telemetry, while the last API step is always available but one
-    /// sample behind.
-    nonisolated static func backgroundInterval(
-        spentSinceAnchor: Double?,
-        lastPrimaryDelta: Double?,
-        windowResetAt: Date?,
-        screenLocked: Bool,
-        networkFailures: Int = 0,
-        now: Date
-    ) -> TimeInterval {
-        // A failing network is its own schedule: sooner than idle, later than busy.
-        if networkFailures > 0 { return transientRetryWait(streak: networkFailures) }
-        if let windowResetAt, now >= windowResetAt,
-           now.timeIntervalSince(windowResetAt) <= postResetGrace
-        {
-            return activePollSeconds
-        }
-        // A locked screen does not stop an agent from burning tokens, and this
-        // user's longest runs happen while they are away from the Mac. The
-        // inactive floor is for accounts that are genuinely doing nothing.
-        if let spentSinceAnchor, spentSinceAnchor > 0 { return activePollSeconds }
-        if let lastPrimaryDelta, lastPrimaryDelta >= activeDeltaThreshold { return activePollSeconds }
-        return screenLocked
-            ? max(backgroundPollSeconds, inactivePollFloor)
-            : backgroundPollSeconds
     }
 
     private func backgroundInterval(for account: Account, now: Date, screenLocked: Bool = false) -> TimeInterval {
@@ -1194,7 +1074,7 @@ final class UsageOrchestrator: ObservableObject {
             perHour += weight * (3600.0 / interval)
         }
         let n = Int(perHour.rounded(.up))
-        return "≤\(n) API calls/h all busy · 1m busy / 15m idle · \(accounts.count) acct"
+        return String(localized: "≤\(n) API calls/h all busy · 1m busy / 15m idle · \(accounts.count) acct")
     }
 
     private func makeViewModel(
@@ -1273,355 +1153,8 @@ final class UsageOrchestrator: ObservableObject {
             isAwaitingFirstSample: awaiting,
             health: healthPair.health,
             healthTooltip: healthPair.tooltip,
-            projectedPrimaryFraction: projected
+            projectedPrimaryFraction: projected,
+            needsReauth: err == .authRequired
         )
     }
-
-    /// Map used-fraction through display mode. Result always 0...1.
-    nonisolated static func displayFraction(
-        used: Double,
-        mode: PreferencesStore.DisplayMode
-    ) -> Double {
-        let u = min(1, max(0, used))
-        switch mode {
-        case .used: return u
-        case .remaining: return 1 - u
-        }
-    }
-
-    nonisolated static func tint(for vendorID: VendorID) -> VendorTint {
-        switch vendorID {
-        case "claude": return .claude
-        case "codex": return .codex
-        case "grok": return .grok
-        case "agy": return .agy
-        default: return .neutral
-        }
-    }
-
-    /// Short under-widget line (truncated by the cell).
-    nonisolated static func caption(for error: UsageError?, vendorID: VendorID = "") -> String? {
-        guard let error else { return nil }
-        let kind = UsageSnapshotMerge.failureKind(error)
-        switch error {
-        case .authRequired:
-            switch vendorID {
-            case "claude": return "reconnect account"
-            case "codex": return "reauth: codex"
-            case "grok": return "reauth: grok"
-            case "agy": return "reauth: agy"
-            default: return "reauth needed"
-            }
-        case .rateLimited:
-            return vendorID == "claude" ? "oauth rate limited" : "rate limited"
-        case .network(let message):
-            return message.isEmpty ? "network error" : message
-        case .parse(let message):
-            return message.isEmpty ? "parse error" : message
-        case .unavailable(let message):
-            let lower = message.lowercased()
-            if lower.contains("setup-token") || lower.contains("user:profile") {
-                return "need browser login"
-            }
-            // Self-scheduled retry: rings stay, no red line. Notice/tooltip carry the age.
-            if lower.contains("refresh pending") { return nil }
-            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
-                return "token quiet"
-            }
-            if lower.contains("refresh") {
-                return "token quiet"
-            }
-            return message.isEmpty ? "unavailable" : message
-        }
-    }
-
-    /// Full explanation for the downward hover tooltip.
-    nonisolated static func detailCaption(
-        for error: UsageError?,
-        vendorID: VendorID,
-        credentialRef: CredentialRef
-    ) -> String? {
-        guard let error else { return nil }
-        let home = CredentialStore.directoryURL(for: credentialRef).path
-        let kind = UsageSnapshotMerge.failureKind(error)
-        switch error {
-        case .authRequired:
-            switch vendorID {
-            case "claude":
-                return """
-                Claude rejected this account’s token (invalid login or missing user:profile).
-                setup-token cannot read usage — use full browser OAuth.
-                Widget menu → Reauthenticate this account only (other accounts stay put).
-                Or: CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
-                """
-            case "codex":
-                return """
-                Codex session rejected. Widget menu → Reauthenticate, or:
-                CODEX_HOME='\(home)' codex login
-                """
-            case "grok":
-                return """
-                Grok session rejected. Widget menu → Reauthenticate, or:
-                GROK_HOME='\(home)' grok login --oauth
-                """
-            case "agy":
-                return """
-                Antigravity session rejected. Widget menu → Reauthenticate, or:
-                HOME='\(home)' agy
-                """
-            default:
-                return "Reauthenticate from the widget menu."
-            }
-        case .rateLimited:
-            if vendorID == "claude" {
-                return """
-                Claude OAuth token host is rate-limited (not your 5h/wk usage quota).
-                Long quiet window — last-good rings stay. No re-login required yet.
-                Each account uses its own credentials file; reconnect only if this never recovers.
-                """
-            }
-            return """
-            Vendor rate-limited (usage API or OAuth token refresh).
-            Long quiet window; last-good numbers stay on the rings. No re-login needed yet.
-            """
-        case .network(let message):
-            return message.isEmpty
-                ? "Network error — will retry on next poll. Last-good rings stay if present."
-                : message
-        case .parse(let message):
-            return message.isEmpty ? "Could not parse vendor response." : message
-        case .unavailable(let message):
-            let lower = message.lowercased()
-            if lower.contains("setup-token") || lower.contains("user:profile") {
-                return """
-                \(message)
-                Widget menu → Reauthenticate (browser login for this account only).
-                CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
-                """
-            }
-            if kind == .soft || lower.contains("token quiet") || lower.contains("access expired") {
-                return """
-                \(message)
-                Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
-                If this persists for hours, widget menu → Reauthenticate this account only.
-                """
-            }
-            if lower.contains("refresh") {
-                return """
-                \(message)
-                Soft failure — will retry on the next poll. Last-good rings stay if present.
-                """
-            }
-            return message.isEmpty ? "Temporarily unavailable." : message
-        }
-    }
-
-    /// Relative age: `3m ago`, `2h ago`, `1d ago`.
-    nonisolated static func formatAgeAgo(since date: Date, now: Date = Date()) -> String {
-        let seconds = max(0, now.timeIntervalSince(date))
-        let total = Int(seconds.rounded(.down))
-        if total < 60 { return "<1m ago" }
-        let days = total / 86_400
-        let hours = (total % 86_400) / 3_600
-        let mins = (total % 3_600) / 60
-        if days > 0 {
-            return hours > 0 ? "\(days)d \(hours)h ago" : "\(days)d ago"
-        }
-        if hours > 0 {
-            return mins > 0 ? "\(hours)h \(mins)m ago" : "\(hours)h ago"
-        }
-        return "\(mins)m ago"
-    }
-
-    /// Compact age for under-widget captions: `3m`, `2h`, `1d`.
-    nonisolated static func formatCompactAge(since date: Date, now: Date = Date()) -> String {
-        let seconds = max(0, now.timeIntervalSince(date))
-        let total = Int(seconds.rounded(.down))
-        if total < 60 { return "<1m" }
-        let days = total / 86_400
-        let hours = (total % 86_400) / 3_600
-        let mins = (total % 3_600) / 60
-        if days > 0 { return "\(days)d" }
-        if hours > 0 { return "\(hours)h" }
-        return "\(mins)m"
-    }
-
-    /// Freshness line for a healthy widget. Without this a 14-minute-old ring and
-    /// a one-second-old ring look identical, which is what made the numbers feel
-    /// wrong long before the poll interval was the suspect.
-    /// `projectedFraction` is already display-mode mapped, so this line agrees with
-    /// the usage rows above it instead of quietly reporting Used inside Remaining.
-    nonisolated static func formatFreshnessLine(
-        lastSuccessAt: Date?,
-        projectedFraction: Double?,
-        now: Date = Date()
-    ) -> String? {
-        guard let lastSuccessAt else { return nil }
-        let age = formatAgeAgo(since: lastSuccessAt, now: now)
-        guard let projectedFraction else { return "checked \(age)" }
-        let percent = Int((min(1, max(0, projectedFraction)) * 100).rounded())
-        return "checked \(age) · ≈\(percent)% est. from local calls"
-    }
-
-    /// Timing lines for error tips: checked / retry / last ok.
-    nonisolated static func formatErrorTimingLines(
-        lastCheckedAt: Date?,
-        lastSuccessAt: Date?,
-        retryAt: Date?,
-        now: Date = Date()
-    ) -> [String] {
-        var lines: [String] = []
-        if let checked = lastCheckedAt {
-            lines.append("checked \(formatAgeAgo(since: checked, now: now))")
-        }
-        if let retry = retryAt, retry > now,
-           let remaining = formatResetRemaining(until: retry, now: now)
-        {
-            lines.append("retry in \(remaining)")
-        } else if lastCheckedAt != nil, retryAt == nil {
-            lines.append("retry on next poll")
-        }
-        if let ok = lastSuccessAt {
-            lines.append("last ok \(formatAgeAgo(since: ok, now: now))")
-        }
-        return lines
-    }
-
-    /// Hover rows: primary + secondary + tertiary rings, then remaining extras.
-    nonisolated static func hoverWindows(
-        snapshot: UsageSnapshot?,
-        mode: PreferencesStore.DisplayMode
-    ) -> [HoverWindowLine] {
-        guard let snapshot else { return [] }
-        var lines: [HoverWindowLine] = []
-        lines.append(windowLine(window: snapshot.primary, mode: mode))
-        if let secondary = snapshot.secondary {
-            lines.append(windowLine(window: secondary, mode: mode))
-        }
-        if let tertiary = snapshot.tertiary {
-            lines.append(windowLine(window: tertiary, mode: mode))
-        }
-        for extra in snapshot.extras {
-            lines.append(windowLine(window: extra, mode: mode))
-        }
-        return lines
-    }
-
-    nonisolated private static func windowLine(
-        window: WindowUsage,
-        mode: PreferencesStore.DisplayMode
-    ) -> HoverWindowLine {
-        let label = window.displayLabel
-        let usage: String
-        if let used = window.usedTokens, let limit = window.limitTokens, limit > 0 {
-            usage = "\(formatTokens(used)) / \(formatTokens(limit))"
-        } else {
-            let fraction = displayFraction(used: window.usedFraction, mode: mode)
-            let pct = Int((fraction * 100).rounded())
-            usage = "\(pct)%"
-        }
-        return HoverWindowLine(label: label, usage: usage, resetAt: window.resetAt)
-    }
-
-    /// Compact remaining time until reset: `1d 5h`, `5h 12m`, `42m`, `<1m`.
-    nonisolated static func formatResetRemaining(
-        until resetAt: Date,
-        now: Date = Date()
-    ) -> String? {
-        let seconds = resetAt.timeIntervalSince(now)
-        if seconds <= 0 { return "now" }
-        let total = Int(seconds.rounded(.down))
-        let days = total / 86_400
-        let hours = (total % 86_400) / 3_600
-        let mins = (total % 3_600) / 60
-        if days > 0 {
-            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
-        }
-        if hours > 0 {
-            return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
-        }
-        if mins > 0 { return "\(mins)m" }
-        return "<1m"
-    }
-
-    /// Compact token count for hover (k / m).
-    nonisolated static func formatTokens(_ n: Int64) -> String {
-        let v = Double(n)
-        if n < 1_000 {
-            return "\(n)"
-        }
-        if n < 10_000 {
-            return String(format: "%.1fk", v / 1_000)
-        }
-        if n < 1_000_000 {
-            return String(format: "%.0fk", v / 1_000)
-        }
-        if n < 10_000_000 {
-            return String(format: "%.1fm", v / 1_000_000)
-        }
-        return String(format: "%.0fm", v / 1_000_000)
-    }
-}
-
-// MARK: - Poll generations
-
-/// Per-account counter bumped when an account's credentials change under a
-/// running poll (reauth). A result is applied only when the generation it
-/// started under is still current and the account still exists.
-///
-/// A hold covers a running Reauthenticate: the adapter moves the session
-/// files aside, so a poll would read "no credentials". Held accounts are not
-/// polled and take no result. Holds count, so overlapping reauths nest.
-struct PollGenerations: Equatable {
-    private var values: [AccountID: Int] = [:]
-    private var holds: [AccountID: Int] = [:]
-
-    func current(_ id: AccountID) -> Int { values[id] ?? 0 }
-
-    mutating func bump(_ id: AccountID) { values[id] = current(id) + 1 }
-
-    func isHeld(_ id: AccountID) -> Bool { (holds[id] ?? 0) > 0 }
-
-    /// Drops results already in flight and stops new polls for `id`.
-    mutating func hold(_ id: AccountID) {
-        holds[id, default: 0] += 1
-        bump(id)
-    }
-
-    mutating func release(_ id: AccountID) {
-        let left = (holds[id] ?? 0) - 1
-        holds[id] = left > 0 ? left : nil
-    }
-
-    func accepts(_ id: AccountID, generation: Int, live: Set<AccountID>) -> Bool {
-        live.contains(id) && !isHeld(id) && current(id) == generation
-    }
-
-    mutating func prune(live: Set<AccountID>) {
-        values = values.filter { live.contains($0.key) }
-        holds = holds.filter { live.contains($0.key) }
-    }
-}
-
-// MARK: - Per-account fetch status (status popover)
-
-struct AccountFetchStatus: Identifiable, Equatable, Sendable {
-    enum Outcome: Equatable, Sendable {
-        case never
-        case success
-        case failure(String)
-    }
-
-    var id: AccountID
-    var label: String
-    var vendorID: VendorID
-    /// When we last hit the vendor API for this account (ok or fail).
-    var lastAttemptAt: Date?
-    /// When we last got a clean snapshot.
-    var lastSuccessAt: Date?
-    /// Active cooldown end (429 / auth), if any.
-    var cooldownUntil: Date? = nil
-    /// Next scheduled attempt (cooldown or interval).
-    var nextDueAt: Date? = nil
-    var outcome: Outcome
 }

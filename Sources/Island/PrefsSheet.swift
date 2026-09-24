@@ -37,11 +37,65 @@ struct PrefsSheet: View {
                     )
                 }
 
+                prefBlock(title: "COST") {
+                    segmented(
+                        selection: $preferences.displayCurrency,
+                        options: [(.usd, "USD"), (.krw, "KRW")]
+                    )
+                    Text("API-equivalent estimates. KRW uses a daily rate from open.er-api.com, fetched only while KRW is selected.")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.40))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .onChange(of: preferences.displayCurrency) { currency in
+                    if currency == .krw { ExchangeRateStore.shared.refreshIfNeeded() }
+                }
+
                 prefBlock(title: "RIM") {
                     rimSwatches(selection: $preferences.rimAccent)
                     Text("Neon edge glow (compact + expanded).")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))
+                }
+
+                prefBlock(title: "AT A GLANCE") {
+                    prefToggle("Warning color on the rim", isOn: $preferences.glanceRim)
+                    HStack {
+                        Text("Usage beside the notch")
+                            .font(Typography.settingsRow)
+                            .foregroundStyle(.white.opacity(0.88))
+                        Spacer()
+                        Picker("Usage beside the notch", selection: $preferences.glanceEarsMode) {
+                            Text("Auto").tag(IslandGlance.EarsMode.auto)
+                            Text("Always").tag(IslandGlance.EarsMode.always)
+                            Text("Never").tag(IslandGlance.EarsMode.never)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 170)
+                    }
+                    prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
+                    Text("Left ear: total across accounts of")
+                        .font(Typography.settingsRow)
+                        .foregroundStyle(.white.opacity(0.88))
+                    HStack(spacing: 12) {
+                        ForEach([("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"), ("agy", "Agy")], id: \.0) { id, name in
+                            Toggle(name, isOn: Binding(
+                                get: { preferences.glanceTotalVendors.contains(id) },
+                                set: { on in
+                                    var next = preferences.glanceTotalVendors.filter { $0 != id }
+                                    if on { next.append(id) }
+                                    preferences.glanceTotalVendors = next
+                                }
+                            ))
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 11))
+                        }
+                    }
+                    Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left ear sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.40))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 prefBlock(title: "SCREEN") {
@@ -53,7 +107,7 @@ struct PrefsSheet: View {
                 }
 
                 prefBlock(title: "UPDATES") {
-                    Text("Background poll every 15m · fresh data when you expand the island.")
+                    Text("Busy accounts every 1m, idle ones every 15m · fresh data when you expand the island.")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.45))
                         .fixedSize(horizontal: false, vertical: true)
@@ -65,7 +119,7 @@ struct PrefsSheet: View {
                             .font(Typography.settingsRow)
                             .foregroundStyle(.white.opacity(0.88))
                         Spacer()
-                        Toggle("", isOn: Binding(
+                        Toggle("Launch at Login", isOn: Binding(
                             get: { launchAtLogin.isEnabled },
                             set: { launchAtLogin.setEnabled($0) }
                         ))
@@ -166,11 +220,11 @@ struct PrefsSheet: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(selected ? IslandColor.liveTeal : Color.white.opacity(0.28))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(LocalizedStringKey(title))
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
-                    Text(subtitle)
+                    Text(LocalizedStringKey(subtitle))
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))
                         .lineLimit(1)
@@ -197,9 +251,23 @@ struct PrefsSheet: View {
         .padding(.horizontal, 14)
     }
 
+    private func prefToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack {
+            Text(LocalizedStringKey(title))
+                .font(Typography.settingsRow)
+                .foregroundStyle(.white.opacity(0.88))
+            Spacer()
+            Toggle(LocalizedStringKey(title), isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .tint(IslandColor.liveTeal)
+        }
+    }
+
     private func prefBlock<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(Typography.settingsSection)
                 .tracking(0.8)
                 .foregroundStyle(.white.opacity(0.45))
@@ -243,7 +311,7 @@ struct PrefsSheet: View {
                 Button {
                     selection.wrappedValue = opt.0
                 } label: {
-                    Text(opt.1)
+                    Text(LocalizedStringKey(opt.1))
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(selected ? 0.95 : 0.45))
                         .frame(maxWidth: .infinity)

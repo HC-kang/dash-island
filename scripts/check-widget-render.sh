@@ -96,9 +96,11 @@ struct Probe: View {
         }
         let error = difference / Double(samplesRead)
         print("Gauge render difference: \(error); visible text pixels: \(bright)")
-        let output = URL(fileURLWithPath: "/tmp/dash-widget-render-check.png")
-        try! bitmap.representation(using: .png, properties: [:])!.write(to: output)
         guard bright > 20, error < 0.004 else {
+            // Keep the render only on failure, at a path no parallel run shares.
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-widget-render-\(UUID().uuidString).png")
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: output)
             print("FAIL: reordered/updated gauge differs from the current-value reference; \(output.path)")
             exit(1)
         }
@@ -148,8 +150,13 @@ struct Probe: View {
         }
         rowDifference /= Double(Int(120 * scale) * bitmap.pixelsWide * 3)
         print("Dropped row render difference: \(rowDifference)")
-        try! bitmap.representation(using: .png, properties: [:])!.write(to: output)
-        guard rowDifference < 0.004 else { print("FAIL: drop lost concurrent changes"); exit(1) }
+        guard rowDifference < 0.004 else {
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("dash-widget-drop-\(UUID().uuidString).png")
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: output)
+            print("FAIL: drop lost concurrent changes; \(output.path)")
+            exit(1)
+        }
         mouse(.leftMouseDown, x: 50)
         mouse(.leftMouseDragged, x: 65)
         mouse(.leftMouseDragged, x: 80)
@@ -212,9 +219,7 @@ struct Probe: View {
     }
 }
 SWIFT
-swiftc -parse-as-library -target arm64-apple-macos13.0 -O \
-    -framework SwiftUI -framework AppKit -framework Combine -framework Security \
-    -framework ServiceManagement -framework CoreGraphics \
-    $(find Sources -name '*.swift' ! -path 'Sources/App/App.swift' | sort) \
-    "$CHECK_DIR/Check.swift" -o "$CHECK_DIR/check"
+# shellcheck source=scripts/check-build.sh
+. scripts/check-build.sh
+compile_check "$CHECK_DIR/Check.swift" "$CHECK_DIR/check"
 DASHISLAND_DEMO=1 "$CHECK_DIR/check"

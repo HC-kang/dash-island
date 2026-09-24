@@ -103,12 +103,72 @@ enum CredentialStore {
 
     /// Write a credential file: atomic, owner-only (0600), then read back.
     /// A rotated refresh token that silently fails to land is gone for good.
+    /// One-time migration: folders created before 0700 was enforced stay 0755
+    /// until a reauth. Tighten the root and every account folder; returns how many changed.
+    @discardableResult
+    static func tightenPermissions(root: URL = rootURL) -> Int {
+        let fm = FileManager.default
+        let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        let dirs = [root] + children.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        var changed = 0
+        for dir in dirs {
+            let mode = (try? fm.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)?.intValue
+            guard let mode, mode != 0o700 else { continue }
+            if (try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)) != nil { changed += 1 }
+        }
+        return changed
+    }
+
     static func writeSecret(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         guard (try? Data(contentsOf: url)) == data else {
             throw CocoaError(.fileWriteUnknown)
         }
+    }
+
+    /// Advisory `flock` on `<folder>/.dash-refresh.lock`, held across a
+    /// refresh token's read → POST → write. A second app copy (dev build and
+    /// installed app) or a second poll waits, then reads the rotated file
+    /// instead of POSTing a spent single-use token. The vendor CLIs that
+    /// account-cli launches do not take it; the re-read inside covers them.
+    static let refreshLockFileName = ".dash-refresh.lock"
+
+    final class RefreshLock {
+        private var fd: Int32
+
+        fileprivate init(fd: Int32) { self.fd = fd }
+
+        func release() {
+            guard fd >= 0 else { return }
+            flock(fd, LOCK_UN)
+            close(fd)
+            fd = -1
+        }
+
+        deinit { release() }
+    }
+
+    /// `nil` when another holder kept the lock past `timeout`, or on cancel.
+    /// A folder where the lock file cannot be created (read-only) runs unlocked.
+    static func acquireRefreshLock(in dir: URL, timeout: TimeInterval = 20) async -> RefreshLock? {
+        let path = dir.appendingPathComponent(refreshLockFileName, isDirectory: false).path
+        let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            Log.auth.warn("refreshLock outcome=unavailable errno=\(errno)")
+            return RefreshLock(fd: -1)
+        }
+        let lock = RefreshLock(fd: fd)
+        let deadline = Date().addingTimeInterval(timeout)
+        // Non-blocking tries: a blocking flock would pin a cooperative thread.
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK, Date() < deadline, !Task.isCancelled else {
+                lock.release()
+                return nil
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return lock
     }
 
     /// Reauth keeps the live session until the new login is accepted.
@@ -155,6 +215,29 @@ enum CredentialStore {
                 try? FileManager.default.removeItem(at: Self.priorURL(for: path))
             }
         }
+    }
+
+    /// Launch-time cleanup after a crash mid-reauth: a lone `x.prior` goes back to
+    /// `x`; a `.prior` next to a live file is stale (the new login landed) and is
+    /// removed. Returns how many files changed.
+    @discardableResult
+    static func recoverPriorFiles(root: URL = rootURL) -> Int {
+        let fm = FileManager.default
+        var changed = 0
+        let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        for dir in dirs {
+            let files = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            for name in files where name.hasSuffix(".prior") {
+                let prior = dir.appendingPathComponent(name)
+                let live = dir.appendingPathComponent(String(name.dropLast(".prior".count)))
+                if fm.fileExists(atPath: live.path) {
+                    if (try? fm.removeItem(at: prior)) != nil { changed += 1 }
+                } else if (try? fm.moveItem(at: prior, to: live)) != nil {
+                    changed += 1
+                }
+            }
+        }
+        return changed
     }
 
     /// Subdirectories under `accounts/` (each name is a potential `CredentialRef`).

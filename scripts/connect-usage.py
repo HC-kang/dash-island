@@ -242,6 +242,27 @@ def install(home, environ, run):
     print('Undo with: python3 %s --disconnect' % Path(__file__).name)
 
 
+def update(home, run):
+    """Replace an older installed collector and restart it. Never touches CLI configs
+    and never connects on its own: the app runs this automatically."""
+    directory = home / 'Library/Application Support/DashIsland/tracking'
+    script = directory / 'usage-collector.py'
+    plist = home / 'Library/LaunchAgents' / (LABEL + '.plist')
+    if not script.exists() or not plist.exists():
+        print('Not connected; nothing to update.')
+        return 'not-connected'
+    collector = Path(__file__).with_name('usage-collector.py').read_bytes()
+    ours = collector_version(collector.decode())
+    theirs = collector_version(script.read_text(errors='replace'))
+    if theirs >= ours:
+        print('Collector is current (version %d).' % theirs)
+        return 'current'
+    atomic_write(script, collector)
+    start_collector(run, plist)
+    print('Updated the collector from version %d to %d.' % (theirs, ours))
+    return 'updated'
+
+
 def disconnect(home, environ, run):
     directory = home / 'Library/Application Support/DashIsland/tracking'
     token_path = directory / 'collector-token'
@@ -276,6 +297,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--disconnect', action='store_true',
                         help='remove the Dash Island telemetry settings and stop the collector')
+    parser.add_argument('--update', action='store_true',
+                        help='replace an older installed collector only; change no CLI config')
     arguments = parser.parse_args()
     os.umask(0o077)
-    (disconnect if arguments.disconnect else install)(Path.home(), os.environ, subprocess.run)
+    if arguments.update:
+        update(Path.home(), subprocess.run)
+    else:
+        (disconnect if arguments.disconnect else install)(Path.home(), os.environ, subprocess.run)

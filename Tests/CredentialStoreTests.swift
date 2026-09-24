@@ -103,6 +103,42 @@ enum CredentialStoreSuite {
             try assertEqual(try Data(contentsOf: live), Data("old".utf8))
         }
 
+        failures += check("tightenPermissions makes the root and existing account folders 0700") {
+            let root = fm.temporaryDirectory.appendingPathComponent("tighten-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for name in ["", "a", "b"] {
+                let dir = name.isEmpty ? root : root.appendingPathComponent(name)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+            }
+            try Data("x".utf8).write(to: root.appendingPathComponent("a/file"))
+            try assertEqual(CredentialStore.tightenPermissions(root: root), 3)
+            for name in ["", "a", "b"] {
+                let path = (name.isEmpty ? root : root.appendingPathComponent(name)).path
+                let mode = (try fm.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue
+                try assertEqual(mode, 0o700)
+            }
+            try assertEqual(CredentialStore.tightenPermissions(root: root), 0)  // idempotent
+        }
+
+        failures += check("recoverPriorFiles restores a lone .prior and drops a stale one") {
+            let root = fm.temporaryDirectory.appendingPathComponent("prior-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            let a = root.appendingPathComponent("a"), b = root.appendingPathComponent("b")
+            try fm.createDirectory(at: a, withIntermediateDirectories: true)
+            try fm.createDirectory(at: b, withIntermediateDirectories: true)
+            // a: crash mid-reauth left only the stash.
+            try Data("old-a".utf8).write(to: a.appendingPathComponent("auth.json.prior"))
+            // b: the new login landed before the crash; the stash is stale.
+            try Data("new-b".utf8).write(to: b.appendingPathComponent("auth.json"))
+            try Data("old-b".utf8).write(to: b.appendingPathComponent("auth.json.prior"))
+            try assertEqual(CredentialStore.recoverPriorFiles(root: root), 2)
+            try assertEqual(String(decoding: try Data(contentsOf: a.appendingPathComponent("auth.json")), as: UTF8.self), "old-a")
+            try assertEqual(String(decoding: try Data(contentsOf: b.appendingPathComponent("auth.json")), as: UTF8.self), "new-b")
+            try assertEqual(fm.fileExists(atPath: a.appendingPathComponent("auth.json.prior").path), false)
+            try assertEqual(fm.fileExists(atPath: b.appendingPathComponent("auth.json.prior").path), false)
+            try assertEqual(CredentialStore.recoverPriorFiles(root: root), 0)
+        }
+
         return failures
     }
 

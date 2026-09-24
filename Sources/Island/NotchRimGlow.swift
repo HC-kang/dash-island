@@ -16,18 +16,24 @@ struct NotchRimGlow: View {
 
     /// Still rim: highlight parked at the bottom center (peak stop 0.54 → 90°).
     private static let restPhase = 0.96
+    /// When the sweep started, so it departs from the parked highlight instead of
+    /// jumping to a wall-clock phase.
+    @State private var sweepStart = Date()
 
     var body: some View {
         Group {
             if let frameInterval {
                 TimelineView(.animation(minimumInterval: frameInterval)) { context in
-                    let phase = context.date.timeIntervalSinceReferenceDate
-                        .truncatingRemainder(dividingBy: period) / period
+                    let elapsed = context.date.timeIntervalSince(sweepStart)
+                    let phase = (Self.restPhase + elapsed / period).truncatingRemainder(dividingBy: 1)
                     rim(phase: phase)
                 }
             } else {
                 rim(phase: Self.restPhase)
             }
+        }
+        .onChange(of: frameInterval != nil) { moving in
+            if moving { sweepStart = Date() }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

@@ -1,0 +1,32 @@
+name: PR checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-build-smoke:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # build.sh deletes build/, which holds the test binary: run these in order.
+      - name: Swift tests
+        run: scripts/run-tests.sh
+      - name: Collector tests
+        run: python3 scripts/test-usage-collector.py
+      - name: Build
+        run: ./build.sh
+      - name: Launch smoke (isolated empty home, 3 s)
+        run: |
+          home="$(mktemp -d)"
+          CFFIXED_USER_HOME="$home" build/DashIsland.app/Contents/MacOS/DashIsland &
+          pid=$!
+          sleep 3
+          kill -0 "$pid"  # still running
+          kill "$pid"
+          grep -q '\[app\] launch' "$home/Library/Application Support/DashIsland/logs/dashisland.log"

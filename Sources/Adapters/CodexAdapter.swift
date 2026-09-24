@@ -100,8 +100,13 @@ struct CodexAdapter: VendorAdapter {
     }
 
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
+        await Self.fetchUsage(codexHome: CredentialStore.directoryURL(for: ref))
+    }
+
+    /// One poll of a managed folder. Tests call it with a temp folder.
+    static func fetchUsage(codexHome dir: URL) async -> UsageSnapshot {
         let now = Date()
-        let dir = CredentialStore.directoryURL(for: ref)
+        let ref = dir.lastPathComponent
         guard var creds = Self.readCredentials(codexHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }
@@ -109,7 +114,7 @@ struct CodexAdapter: VendorAdapter {
         // the last one). Any failure keeps the current access: the probe decides.
         var quiet: UsageSnapshot?
         var refreshDead = false
-        switch await Self.refreshManagedCredentials(codexHome: dir) {
+        switch await Self.refreshManagedCredentials(codexHome: dir, knownRefreshToken: creds.refreshToken) {
         case .success(let refreshed):
             if refreshed.accessToken != creds.accessToken {
                 Log.auth.info("refresh vendor=codex outcome=ok ref=\(String(ref.prefix(8)))")
@@ -130,7 +135,9 @@ struct CodexAdapter: VendorAdapter {
         guard case .authRequired = snap.error, !refreshDead else { return snap }
         // A busy token host is not a dead login: soft quiet, never red "reconnect".
         if let quiet { return quiet }
-        switch await Self.refreshManagedCredentials(codexHome: dir, force: true) {
+        switch await Self.refreshManagedCredentials(
+            codexHome: dir, force: true, knownRefreshToken: creds.refreshToken
+        ) {
         case .success(let refreshed):
             snap = await Self.probeUsage(
                 token: refreshed.accessToken,
@@ -165,7 +172,7 @@ struct CodexAdapter: VendorAdapter {
         for path in authFiles(codexHome: codexHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
-        Log.auth.info("clearCreds vendor=codex dir=\(codexHome.path)")
+        Log.auth.info("clearCreds vendor=codex ref=\(String(codexHome.lastPathComponent.prefix(8)))")
     }
 
     /// `priorToken` is never accepted as the new login's result.
@@ -190,6 +197,8 @@ struct CodexAdapter: VendorAdapter {
         // Keep stdin open so the CLI does not see immediate EOF.
         task.standardInput = Pipe()
 
+        // Cancelled while we got here: do not open a browser login nobody waits for.
+        try Task.checkCancellation()
         do {
             try task.run()
         } catch {
@@ -301,15 +310,26 @@ struct CodexAdapter: VendorAdapter {
 
     /// Refresh managed auth.json. Without `force`, skip the POST while the last
     /// refresh is under 45 minutes old (Codex does not always store expiry).
+    /// `knownRefreshToken` is the one the caller read: a different one in the
+    /// file means `codex` (account-cli) rotated it, so adopt and skip the POST.
     static func refreshManagedCredentials(
         codexHome: URL,
-        force: Bool = false
+        force: Bool = false,
+        knownRefreshToken: String? = nil
     ) async -> RefreshOutcome {
+        guard let lock = await CredentialStore.acquireRefreshLock(in: codexHome) else {
+            return .unavailable("token quiet — refresh busy", retryAt: nil)
+        }
+        defer { lock.release() }
         guard let creds = readCredentials(codexHome: codexHome),
               let refresh = creds.refreshToken, !refresh.isEmpty,
               let path = creds.filePath,
               let existing = try? Data(contentsOf: path)
         else { return .skipped }
+        if let knownRefreshToken, refresh != knownRefreshToken {
+            Log.auth.info("refresh vendor=codex outcome=adopted ref=\(String(codexHome.lastPathComponent.prefix(8)))")
+            return .success(creds)
+        }
 
         // Without force, skip network if last_refresh is very recent (< 30m)
         // and access token still works often enough — but we can't know without

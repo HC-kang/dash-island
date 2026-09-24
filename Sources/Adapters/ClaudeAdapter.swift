@@ -104,7 +104,13 @@ struct ClaudeAdapter: VendorAdapter {
     ]
 
     /// Serializes OAuth refresh so two Claude accounts cannot 429 the token host.
-    private static let refreshGate = ClaudeRefreshGate()
+    /// `var` only so tests can swap in a gate on throwaway defaults.
+    nonisolated(unsafe) static var refreshGate = ClaudeRefreshGate()
+    /// Starts the detached CLI ping after a failed token host. Tests replace
+    /// it: a real ping spawns `claude` and reads the Keychain.
+    nonisolated(unsafe) static var backgroundPing: (URL, String?) -> Date? = {
+        startBackgroundCLIPing(configDir: $0, failedAccessToken: $1)
+    }
 
     // MARK: VendorAdapter
 
@@ -461,10 +467,11 @@ struct ClaudeAdapter: VendorAdapter {
         let slot = cliPings.reserve(key, until: now.addingTimeInterval(cliPingBudget), now: now)
         guard slot.started else { return slot.end }
         Log.auth.info("cliPing vendor=claude outcome=started ref=\(String(configDir.lastPathComponent.prefix(8))) mode=background")
-        Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             _ = await pingCLIThenAdopt(configDir: configDir, failedAccessToken: failedAccessToken)
             cliPings.finish(key)
         }
+        cliPings.attach(key, task: task)
         return slot.end
     }
 
@@ -486,9 +493,11 @@ struct ClaudeAdapter: VendorAdapter {
         markPingAttempted(configDir: configDir)
         let before = readCredentialsFile(configDir: configDir)?.accessToken
         guard await spawnManagedRefreshPing(configDir: configDir) else { return nil }
+        // Cancelled (account removed): write nothing into a folder being deleted.
+        guard !Task.isCancelled else { return nil }
         // Darwin CLI writes Keychain and often *deletes* `.credentials.json`.
         // Harvest via `/usr/bin/security` (no Dash password sheet), then file.
-        if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir) {
+        if let harvested = await harvestScopedCredentialsViaSecurity(configDir: configDir), !Task.isCancelled {
             commitHarvestedCredentials(creds: harvested, configDir: configDir)
             if harvested.accessToken != failedAccessToken,
                harvested.accessToken != before
@@ -613,7 +622,7 @@ struct ClaudeAdapter: VendorAdapter {
         try? FileManager.default.removeItem(at: credFile)
         CredentialStore.removeLastGoodUsage(inDirectory: configDir)
         deleteScopedKeychainItem(configDir: configDir)
-        Log.auth.info("clearCreds vendor=claude dir=\(configDir.path)")
+        Log.auth.info("clearCreds vendor=claude ref=\(String(configDir.lastPathComponent.prefix(8)))")
     }
 
     /// Best-effort CLI logout so the next login cannot reuse the scoped session.
@@ -697,6 +706,8 @@ struct ClaudeAdapter: VendorAdapter {
         // Keep stdin open so the CLI does not see immediate EOF.
         task.standardInput = Pipe()
 
+        // Cancelled while we got here: do not open a browser login nobody waits for.
+        try Task.checkCancellation()
         do {
             try task.run()
         } catch {
@@ -962,6 +973,13 @@ struct ClaudeAdapter: VendorAdapter {
             return .deferred(waitUntil)
         }
 
+        // Held across read → POST → write: a second app copy refreshing this
+        // folder finishes first, and the read below adopts what it wrote.
+        guard let lock = await CredentialStore.acquireRefreshLock(in: configDir) else {
+            return .deferred(Date().addingTimeInterval(60))
+        }
+        defer { lock.release() }
+
         // Fresh read after waiting — another poll may have healed the file.
         guard let data = try? Data(contentsOf: path),
               let creds = parseCredentialsJSON(data)
@@ -1062,7 +1080,7 @@ struct ClaudeAdapter: VendorAdapter {
         // HTTP oauth/token 429s for days; the Claude CLI still refreshes. The
         // ping runs in the background; look again once it could have landed.
         let pingEnd = (saw429 || lastStatus > 0)
-            ? startBackgroundCLIPing(configDir: configDir, failedAccessToken: failedAccessToken ?? creds.accessToken)
+            ? backgroundPing(configDir, failedAccessToken ?? creds.accessToken)
             : nil
         if saw429 {
             let retry = retry429 ?? Date().addingTimeInterval(globalRefresh429Quiet)
@@ -1522,8 +1540,22 @@ struct ClaudeAdapter: VendorAdapter {
 final class CLIPingRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var until: [String: Date] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]
 
     init() {}
+
+    func attach(_ key: String, task: Task<Void, Never>) {
+        lock.lock(); defer { lock.unlock() }
+        tasks[key] = task
+    }
+
+    /// Account removed: stop its ping (the child CLI is terminated by
+    /// `LoginProcess` on cancellation) and free the slot.
+    func cancel(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        tasks.removeValue(forKey: key)?.cancel()
+        until[key] = nil
+    }
 
     /// Reserve `key` until `date`. When a ping already runs there, keep it and
     /// return its end with `started == false`.
@@ -1544,6 +1576,7 @@ final class CLIPingRegistry: @unchecked Sendable {
     func finish(_ key: String) {
         lock.lock(); defer { lock.unlock() }
         until[key] = nil
+        tasks[key] = nil
     }
 }
 
