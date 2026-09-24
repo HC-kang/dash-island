@@ -54,11 +54,29 @@ enum AccountChromeActions {
     /// and Anthropic rejects it for usage with 403.
     static func beginAdd(adapter: any VendorAdapter) {
         activateForUI()
-        addTask?.cancel()
         beginAddBrowserLogin(adapter: adapter)
     }
 
+    /// Cancel the running add/reauth and hand back its handle. The next task awaits
+    /// it first, so the old cleanup (hideProgress, .prior restore, folder discard)
+    /// cannot land on top of the new flow.
+    private static func cancelRunning() -> Task<Void, Never>? {
+        let previous = addTask
+        previous?.cancel()
+        addTask = nil
+        return previous
+    }
+
     private static func beginAddBrowserLogin(adapter: any VendorAdapter) {
+        let previous = cancelRunning()
+        addTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await runAdd(adapter: adapter)
+        }
+    }
+
+    private static func runAdd(adapter: any VendorAdapter) async {
         IslandDialogController.shared.showProgress(
             title: "Sign in",
             message: adapter.id == "agy"
@@ -71,7 +89,7 @@ enum AccountChromeActions {
             }
         )
 
-        addTask = Task {
+        do {
             var createdRef: CredentialRef?
             defer {
                 IslandDialogController.shared.hideProgress()
@@ -156,18 +174,20 @@ enum AccountChromeActions {
         default:
             message = "Complete a fresh \(adapter.displayName) sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds."
         }
-        IslandDialogController.shared.showProgress(
-            title: "Reauthenticate",
-            message: message,
-            vendorID: adapter.id,
-            onCancel: {
-                addTask?.cancel()
-                addTask = nil
-            }
-        )
-
-        addTask?.cancel()
+        let previous = cancelRunning()
         addTask = Task {
+            // Let a cancelled flow finish its cleanup before this one shows or stashes.
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            IslandDialogController.shared.showProgress(
+                title: "Reauthenticate",
+                message: message,
+                vendorID: adapter.id,
+                onCancel: {
+                    addTask?.cancel()
+                    addTask = nil
+                }
+            )
             defer { IslandDialogController.shared.hideProgress() }
             // No poll while the adapter has the session files moved aside; a
             // poll there left a red "reauth" for 30m after Cancel.
