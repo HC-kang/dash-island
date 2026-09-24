@@ -312,7 +312,7 @@ private struct UsageDetailView: View {
                     ForEach(UsagePeriod.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden()
                 if liveTracking {
-                    Text("Captured calls only. Reopen older Orca/CLI sessions to include their new usage.")
+                    Text("Counts calls from CLI sessions started with tracking on. Restart older sessions to include them.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -320,7 +320,7 @@ private struct UsageDetailView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(activityLoading ? "Reading local usage…" : (liveTracking ? "No captured calls in this period" : "No account-linked activity in this period"))
                         .font(.system(size: 16, weight: .medium))
-                    Text(liveTracking ? "Only calls linked to this account appear here. Earlier unlinked history is excluded."
+                    Text(liveTracking ? "Only calls linked to this account appear here."
                          : "Start the CLI with this account’s dedicated home to record its activity.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     if !liveTracking {
