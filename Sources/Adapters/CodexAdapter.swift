@@ -165,7 +165,7 @@ struct CodexAdapter: VendorAdapter {
         for path in authFiles(codexHome: codexHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
-        Log.auth.info("clearCreds vendor=codex dir=\(codexHome.path)")
+        Log.auth.info("clearCreds vendor=codex ref=\(String(codexHome.lastPathComponent.prefix(8)))")
     }
 
     /// `priorToken` is never accepted as the new login's result.

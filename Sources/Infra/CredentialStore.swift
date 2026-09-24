@@ -103,6 +103,22 @@ enum CredentialStore {
 
     /// Write a credential file: atomic, owner-only (0600), then read back.
     /// A rotated refresh token that silently fails to land is gone for good.
+    /// One-time migration: folders created before 0700 was enforced stay 0755
+    /// until a reauth. Tighten the root and every account folder; returns how many changed.
+    @discardableResult
+    static func tightenPermissions(root: URL = rootURL) -> Int {
+        let fm = FileManager.default
+        let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        let dirs = [root] + children.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        var changed = 0
+        for dir in dirs {
+            let mode = (try? fm.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)?.intValue
+            guard let mode, mode != 0o700 else { continue }
+            if (try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)) != nil { changed += 1 }
+        }
+        return changed
+    }
+
     static func writeSecret(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

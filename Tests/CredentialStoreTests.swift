@@ -103,6 +103,23 @@ enum CredentialStoreSuite {
             try assertEqual(try Data(contentsOf: live), Data("old".utf8))
         }
 
+        failures += check("tightenPermissions makes the root and existing account folders 0700") {
+            let root = fm.temporaryDirectory.appendingPathComponent("tighten-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for name in ["", "a", "b"] {
+                let dir = name.isEmpty ? root : root.appendingPathComponent(name)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+            }
+            try Data("x".utf8).write(to: root.appendingPathComponent("a/file"))
+            try assertEqual(CredentialStore.tightenPermissions(root: root), 3)
+            for name in ["", "a", "b"] {
+                let path = (name.isEmpty ? root : root.appendingPathComponent(name)).path
+                let mode = (try fm.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue
+                try assertEqual(mode, 0o700)
+            }
+            try assertEqual(CredentialStore.tightenPermissions(root: root), 0)  // idempotent
+        }
+
         return failures
     }
 

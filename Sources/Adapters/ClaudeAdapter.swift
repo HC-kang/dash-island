@@ -613,7 +613,7 @@ struct ClaudeAdapter: VendorAdapter {
         try? FileManager.default.removeItem(at: credFile)
         CredentialStore.removeLastGoodUsage(inDirectory: configDir)
         deleteScopedKeychainItem(configDir: configDir)
-        Log.auth.info("clearCreds vendor=claude dir=\(configDir.path)")
+        Log.auth.info("clearCreds vendor=claude ref=\(String(configDir.lastPathComponent.prefix(8)))")
     }
 
     /// Best-effort CLI logout so the next login cannot reuse the scoped session.

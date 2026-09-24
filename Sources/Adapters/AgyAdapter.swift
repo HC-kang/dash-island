@@ -214,7 +214,7 @@ struct AgyAdapter: VendorAdapter {
             try? fm.removeItem(at: path)
         }
         CredentialStore.removeLastGoodUsage(inDirectory: home)
-        Log.auth.info("clearCreds vendor=agy dir=\(home.path)")
+        Log.auth.info("clearCreds vendor=agy ref=\(String(home.lastPathComponent.prefix(8)))")
     }
 
     static func isAcceptableLogin(

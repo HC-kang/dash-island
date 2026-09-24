@@ -33,6 +33,8 @@ final class AccountStore: ObservableObject {
             // Only scan the live Application Support tree when this store owns it.
             // (Unit tests use temp `accounts.json` paths — never pull real orphans in.)
             if isLivePersistence {
+                let tightened = CredentialStore.tightenPermissions()
+                if tightened > 0 { Log.accounts.info("permissions tightened folders=\(tightened) mode=0700") }
                 let recovered = recoverOrphans(existing: loaded)
                 if !recovered.isEmpty {
                     loaded.append(contentsOf: recovered)

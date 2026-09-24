@@ -169,7 +169,7 @@ struct GrokAdapter: VendorAdapter {
         for path in authFiles(grokHome: grokHome) where fm.fileExists(atPath: path.path) {
             try? fm.removeItem(at: path)
         }
-        Log.auth.info("clearCreds vendor=grok dir=\(grokHome.path)")
+        Log.auth.info("clearCreds vendor=grok ref=\(String(grokHome.lastPathComponent.prefix(8)))")
     }
 
     /// `priorToken` is never accepted as the new login's result.
