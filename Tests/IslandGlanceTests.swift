@@ -80,6 +80,13 @@ enum IslandGlanceSuite {
             try assertEqual(IslandGlance.EarsMode.always.shows(hasNotch: true), true)
             try assertEqual(IslandGlance.EarsMode.never.shows(hasNotch: false), false)
         }
+        f += check("total mode: a full model-scoped window does not block the account") {
+            // Fable 100% limits one model only; the account's own windows decide.
+            let g = IslandGlance.make(accounts: [
+                A(title: "a", used: 1.0, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.1, shortResetAt: nil, longUsed: 0.3),
+            ], now: now, totalVendors: ["claude"])
+            try assertEqual(g.leading, "10/100%")
+        }
         f += check("total mode leaves out accounts with nothing reported") {
             let g = IslandGlance.make(accounts: [
                 A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.40, shortResetAt: nil),

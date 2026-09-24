@@ -22,6 +22,9 @@ struct IslandGlance: Equatable, Sendable {
         /// The account's shortest reported window, for the total across accounts.
         var shortUsed: Double? = nil
         var shortResetAt: Date? = nil
+        /// Highest of the account's own windows (5h / wk / mo), without
+        /// model-scoped extras such as Fable; nil falls back to `used`.
+        var longUsed: Double? = nil
     }
 
     static let warnAt = 0.80
@@ -87,7 +90,7 @@ struct IslandGlance: Equatable, Sendable {
     /// so only a blocking long window overrides.)
     private static func effectiveShort(_ a: Account) -> Double {
         let short = a.shortUsed ?? 0
-        guard let top = a.used, top >= criticalAt else { return short }
+        guard let top = a.longUsed ?? a.used, top >= criticalAt else { return short }
         return max(short, top)
     }
 
@@ -114,9 +117,13 @@ extension WidgetViewModel {
             ([s.primary] + [s.secondary, s.tertiary].compactMap { $0 } + s.extras).filter(\.isReported)
         } ?? []
         let top = windows.max { $0.usedFraction < $1.usedFraction }
-        let shortest = windows.min { $0.kind.nominalDuration < $1.kind.nominalDuration }
+        // The total uses the account's own windows only; model-scoped extras
+        // (Fable, reserve) limit one model, not the account.
+        let own = usageSnapshot.map { s in [s.primary, s.secondary].compactMap { $0 }.filter(\.isReported) } ?? []
+        let shortest = own.min { $0.kind.nominalDuration < $1.kind.nominalDuration }
         return .init(title: title, used: top?.usedFraction, resetAt: top?.resetAt,
                      health: health, awaiting: isAwaitingFirstSample, window: top?.displayLabel,
-                     vendor: vendorID, shortUsed: shortest?.usedFraction, shortResetAt: shortest?.resetAt)
+                     vendor: vendorID, shortUsed: shortest?.usedFraction, shortResetAt: shortest?.resetAt,
+                     longUsed: own.map(\.usedFraction).max())
     }
 }
