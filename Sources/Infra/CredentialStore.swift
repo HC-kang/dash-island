@@ -173,6 +173,29 @@ enum CredentialStore {
         }
     }
 
+    /// Launch-time cleanup after a crash mid-reauth: a lone `x.prior` goes back to
+    /// `x`; a `.prior` next to a live file is stale (the new login landed) and is
+    /// removed. Returns how many files changed.
+    @discardableResult
+    static func recoverPriorFiles(root: URL = rootURL) -> Int {
+        let fm = FileManager.default
+        var changed = 0
+        let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        for dir in dirs {
+            let files = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            for name in files where name.hasSuffix(".prior") {
+                let prior = dir.appendingPathComponent(name)
+                let live = dir.appendingPathComponent(String(name.dropLast(".prior".count)))
+                if fm.fileExists(atPath: live.path) {
+                    if (try? fm.removeItem(at: prior)) != nil { changed += 1 }
+                } else if (try? fm.moveItem(at: prior, to: live)) != nil {
+                    changed += 1
+                }
+            }
+        }
+        return changed
+    }
+
     /// Subdirectories under `accounts/` (each name is a potential `CredentialRef`).
     static func listCredentialRefs() -> [CredentialRef] {
         let fm = FileManager.default
