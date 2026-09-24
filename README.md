@@ -8,8 +8,8 @@ macOS 노치·메뉴바 아일랜드 — **여러 벤더·여러 계정** AI 사
 
 | | |
 |--|--|
-| Vendors / 벤더 | **Claude** · **Codex** · **Grok** |
-| Accounts / 계정 | Up to **5** (center-aligned gauges) |
+| Vendors / 벤더 | **Claude** · **Codex** · **Grok** · **Antigravity** |
+| Accounts / 계정 | Up to **20** stored, **5** visible at once (scroll for more) |
 | Store / 스토어 | **Not** on the Mac App Store — build from source (GitHub) |
 | Sign / 서명 | Ad-hoc (`codesign -s -`) |
 
@@ -125,6 +125,20 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (default `3`).
 
+### Privacy and network
+
+Dash Island has no telemetry and no server of its own. It talks only to:
+
+| What | Hosts |
+|--|--|
+| Usage readings (your own accounts) | `api.anthropic.com`, `chatgpt.com`, `cli-chat-proxy.grok.com`, `cloudcode-pa.googleapis.com` |
+| Token refresh for managed accounts | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
+| Vendor status pages | `status.claude.com`, `status.openai.com`, `status.x.ai` |
+| Model price catalog (API-equivalent cost), cached daily | `ericjypark.github.io` (codex-island's public catalog; the bundled copy is used offline) |
+| Local usage collector (optional) | `127.0.0.1:43190` only |
+
+Credentials stay in `~/Library/Application Support/DashIsland/accounts/` (folders 0700, files 0600). Logs and `status.json` never contain tokens or response bodies.
+
 ### Logs
 
 - File: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 rotation). Also mirrored to the unified log (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
@@ -168,7 +182,7 @@ Optional later: GitHub Release zips → notarized Developer ID → Sparkle → H
 
 ### License
 
-TBD — set before a public release tag (MIT is a common choice).
+MIT — see [LICENSE](LICENSE). Third-party code and marks: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -276,6 +290,20 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 `DASHISLAND_DEMO_COUNT` ∈ `1` | `3` | `5` (기본 `3`).
 
+### 개인정보와 네트워크
+
+Dash Island는 텔레메트리를 보내지 않고, 자체 서버도 없습니다. 앱은 다음 주소와만 통신합니다.
+
+| 용도 | 호스트 |
+|--|--|
+| 사용량 조회(사용자 본인 계정) | `api.anthropic.com`, `chatgpt.com`, `cli-chat-proxy.grok.com`, `cloudcode-pa.googleapis.com` |
+| 관리 계정의 토큰 갱신 | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
+| 벤더 상태 페이지 | `status.claude.com`, `status.openai.com`, `status.x.ai` |
+| 모델 가격표(API 환산 비용), 하루 한 번 캐시 | `ericjypark.github.io` (codex-island의 공개 가격표; 오프라인에서는 동봉 사본 사용) |
+| 로컬 사용량 수집기(선택) | `127.0.0.1:43190`만 사용 |
+
+자격 증명은 `~/Library/Application Support/DashIsland/accounts/`에 저장됩니다(폴더 0700, 파일 0600). 로그와 `status.json`에는 토큰과 응답 본문이 기록되지 않습니다.
+
 ### 로그
 
 - 파일: `~/Library/Application Support/DashIsland/logs/dashisland.log` (2 MB × 3 회전). 통합 로그에도 같은 내용이 기록됩니다 (`log show --predicate 'subsystem == "dev.dashisland.DashIsland"'`).
@@ -317,4 +345,4 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 
 ### 라이선스
 
-TBD — 공개 릴리스 태그 전에 정하세요 (이런 도구는 MIT가 흔합니다).
+MIT — [LICENSE](LICENSE)를 보세요. 외부 코드와 상표는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.

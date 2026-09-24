@@ -409,7 +409,7 @@ struct IslandRootView: View {
         !useDemoWidgets && accountStore.accounts.isEmpty
     }
 
-    /// Chevron + add rail whenever under the 5-account cap (demo empty-state only hides it).
+    /// Chevron + add rail whenever under the account cap (`AccountStore.maxAccounts`; demo empty-state only hides it).
     private var showAdd: Bool {
         !useDemoWidgets
             && accountStore.accounts.count < AccountStore.maxAccounts

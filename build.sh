@@ -6,6 +6,9 @@ cd "$(dirname "$0")"
 APP_NAME="DashIsland"
 BUNDLE_ID="dev.dashisland.DashIsland"
 VERSION="$(cat VERSION)"
+# Build identity for logs and bug reports: short commit, "+dirty" with local edits.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then COMMIT="$COMMIT+dirty"; fi
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: VERSION must be X.Y.Z (got '$VERSION')" >&2
   exit 1
@@ -61,6 +64,7 @@ cat > "$CONTENTS/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>DashIslandCommit</key><string>$COMMIT</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>$DEPLOYMENT_TARGET</string>
   <key>LSUIElement</key><true/>
@@ -72,4 +76,4 @@ EOF
 
 codesign --force --sign - --timestamp=none "$APP_DIR"
 
-echo "✓ built $APP_DIR ($VERSION)"
+echo "✓ built $APP_DIR ($VERSION, $COMMIT)"
