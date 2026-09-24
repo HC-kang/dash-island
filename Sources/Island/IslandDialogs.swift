@@ -206,12 +206,13 @@ struct IslandConfirmView: View {
                     // Destructive (HIG): Return picks Cancel; Remove needs a click.
                     // Escape still cancels via the panel's `cancelOperation`.
                     if showCancel {
-                        dialogButton("Cancel", primary: false, destructive: false, action: onCancel)
+                        // The default (Return) button carries the emphasis, so Cancel does here.
+                        dialogButton("Cancel", primary: isDestructive, destructive: false, action: onCancel)
                             .keyboardShortcut(isDestructive ? .defaultAction : .cancelAction)
                     }
                     dialogButton(
                         confirmTitle,
-                        primary: true,
+                        primary: !(isDestructive && showCancel),
                         destructive: isDestructive,
                         action: onConfirm
                     )
@@ -262,13 +263,14 @@ private func buttonForeground(primary: Bool, destructive: Bool, enabled: Bool) -
 }
 
 private func buttonFill(primary: Bool, destructive: Bool, enabled: Bool) -> Color {
-    if destructive { return Color.red.opacity(0.18) }
+    // A secondary destructive button stays quiet; only the default one is filled.
+    if destructive { return primary ? Color.red.opacity(0.18) : Color.white.opacity(0.04) }
     if primary { return Color.white.opacity(0.12) }
     return Color.white.opacity(0.04)
 }
 
 private func buttonStroke(primary: Bool, destructive: Bool) -> Color {
-    if destructive { return Color.red.opacity(0.35) }
+    if destructive { return Color.red.opacity(primary ? 0.35 : 0.22) }
     if primary { return Color.white.opacity(0.16) }
     return Color.white.opacity(0.08)
 }
