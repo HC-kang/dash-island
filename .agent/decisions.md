@@ -200,6 +200,6 @@ Implemented from feature-benchmark-inventory:
 
 ### Research report — code/UX/benchmark (2026-09-23)
 
-- Report (private artifact): https://claude.ai/artifact/CJaPPuNcopekwLz38GEDE1. 73 findings (44 adversarially verified: 20 confirmed, 24 partial, 0 refuted; 4 final high: adapters-01 Agy add path, core-01 main-thread burn scan, ui-01 hover steals focus, ui-02 always-on 30fps rim glow).
+- Report: private artifact (link kept outside the repo). 73 findings (44 adversarially verified: 20 confirmed, 24 partial, 0 refuted; 4 final high: adapters-01 Agy add path, core-01 main-thread burn scan, ui-01 hover steals focus, ui-02 always-on 30fps rim glow).
 - Measured baseline: 201 tests pass (42 s), build 124 s, 3/3 e2e scripts pass (each recompiles all Sources, 48–263 s), idle CPU ≈5.9% real / ≈4.9% with 0 accounts, fetch success 99.7% over 6.45 h.
 - Biggest product gap vs market (CodexBar, codenotch, codex-island, Pulse, Codex Pulse variants): compact island shows no data; no threshold alerts; no ETA text; no Sparkle/CI. "Codex Pulse" is 11+ unrelated repos, not one product.

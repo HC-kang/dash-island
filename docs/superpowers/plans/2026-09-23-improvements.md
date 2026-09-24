@@ -5,7 +5,7 @@
 **Goal:** Implement the roadmap and the findings from the 2026-09-23 research report (code audit 73 findings, UX review, benchmark ideas), in three phases, each landing as one PR.
 
 **Source of truth:**
-- Report: https://claude.ai/artifact/CJaPPuNcopekwLz38GEDE1 (private; summary below)
+- Report: private artifact, link kept outside the repo (summary below)
 - Findings with evidence and verifier notes: `$FINDINGS` (JSON; path given in each agent prompt). Each finding has `id`, `loc` (file:line), `ev` (evidence), `impact`, `rec` (recommendation), `vnote` (verifier note — when it says the claim is partial, follow the verifier).
 - Project memory: `.agent/context.md` (read the headings and every section that mentions your files).
 
