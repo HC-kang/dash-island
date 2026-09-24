@@ -397,7 +397,7 @@ struct IslandRootView: View {
         }
         .fixedSize()
         // Mask at the wings' own size (the compact root is only pill-wide).
-        .modifier(WingReveal(progress: reveal, hiddenWidth: bodyW))
+        .modifier(WingReveal(progress: reveal, hiddenWidth: bodyW, cornerRadius: radius))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -547,6 +547,8 @@ private struct IslandReveal: ViewModifier, Animatable {
 private struct WingReveal: ViewModifier, Animatable {
     var progress: Double
     var hiddenWidth: CGFloat
+    /// Same bottom radius as the silhouette, so the moving edge stays rounded.
+    var cornerRadius: CGFloat
 
     var animatableData: Double {
         get { progress }
@@ -557,7 +559,7 @@ private struct WingReveal: ViewModifier, Animatable {
         let t = CGFloat(min(max(progress, 0), 1))
         return content.mask {
             GeometryReader { g in
-                Rectangle()
+                IslandShape(bottomRadius: cornerRadius)
                     .frame(width: hiddenWidth + (max(g.size.width, hiddenWidth) - hiddenWidth) * t)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
