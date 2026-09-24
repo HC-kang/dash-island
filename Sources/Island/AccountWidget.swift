@@ -53,20 +53,22 @@ struct AccountWidget: View {
                 }
                 .frame(width: Self.gaugeSize, height: Self.gaugeSize)
 
+                // 10pt / 62%: 8pt at 42% was unreadable on 1x displays (ui-11).
                 Text(model.title)
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.42))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.62))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: Self.cellSize - 8)
-                    .frame(height: 11)
+                    .frame(height: 13)
 
                 // Fixed slot: empty cells keep the same metrics as captioned ones.
                 captionSlot
                     .frame(height: Self.captionSlotHeight)
                     .frame(maxWidth: Self.cellSize - 10)
             }
-            .padding(.top, 6)
+            // 4 + 80 + 2 + 13 + 2 + 15 + 4 = cellHeight (120).
+            .padding(.top, 4)
             .padding(.bottom, 4)
             // Top-align so growing captions cannot center-shift the gauge upward.
             .frame(width: Self.cellSize, height: Self.cellHeight, alignment: .top)
@@ -272,7 +274,7 @@ struct AccountWidget: View {
 
     private func captionLabel(_ text: String, isError: Bool) -> some View {
         Text(text)
-            .font(.system(size: 7, weight: .medium, design: .monospaced))
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
             .foregroundStyle(
                 isError
                     ? Color(red: 0.97, green: 0.44, blue: 0.44).opacity(captionHovered ? 1 : 0.85)
@@ -281,7 +283,7 @@ struct AccountWidget: View {
             .lineLimit(1)
             .truncationMode(.tail)
             .padding(.horizontal, 5)
-            .padding(.vertical, 3)
+            .padding(.vertical, 2)
             .background(
                 Capsule(style: .continuous)
                     .fill(Color.white.opacity(captionHovered ? 0.08 : 0.03))

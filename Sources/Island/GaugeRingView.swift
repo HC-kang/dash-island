@@ -32,6 +32,7 @@ struct GaugeRingView: View {
     /// Innermost scoped ring (Fable / Spark) — warm amber, distinct from brand + steel.
     private var amber: Color { Color(red: 0.92, green: 0.68, blue: 0.28) }
     private static let burnRed = Color(red: 0.937, green: 0.267, blue: 0.267) // #ef4444
+    private static let restNeedle = Color(white: 0.62)
     private static let burnSoft = Color(red: 0.97, green: 0.44, blue: 0.42)
 
     /// Breath / jitter frames; `nil` = one static frame (rest, Reduce Motion, hidden, Low Power).
@@ -87,8 +88,8 @@ struct GaugeRingView: View {
                     .foregroundStyle(Color(white: 0.96))
                     .tracking(-0.4)
                 Text("%")
-                    .font(.system(size: size * 0.083, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.36))
+                    .font(.system(size: size * 0.11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.55))
                     .tracking(0.6)
             }
             .offset(y: 1)
@@ -353,7 +354,8 @@ struct GaugeRingView: View {
         let angle = baseAngle + jitter
         let tipR: CGFloat = 38 * scale
         let tip = point(center: center, angleDeg: angle, radius: tipR)
-        let red = Self.burnRed
+        // At rest a red needle read as an alarm; grey until there is real burn.
+        let red = burnRatio < 0.05 ? Self.restNeedle : Self.burnRed
         let widthScale = BurnMotion.needleWidthScale(ratio: burnRatio)
         let lineW = 1.35 * scale * CGFloat(widthScale)
 
