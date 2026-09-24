@@ -73,9 +73,12 @@ struct IslandRootView: View {
             // They stay under the expanding body and only hide once it covers them, and
             // come back at once on collapse, so the black never breaks.
             if earsVisible {
-                compactEars
-                    .opacity(showExpandedShell ? 0 : 1)
-                    .animation(showExpandedShell && !reduceMotion ? .linear(duration: 0.01).delay(0.38) : nil,
+                // Wings retract into the pill as the body grows, and slide back out
+                // from behind it once the body has shrunk away.
+                compactEars(reveal: showExpandedShell ? 0 : 1)
+                    .animation(reduceMotion ? nil
+                               : showExpandedShell ? .easeIn(duration: 0.22)
+                               : .easeOut(duration: 0.32).delay(0.16),
                                value: showExpandedShell)
             }
 
@@ -349,7 +352,7 @@ struct IslandRootView: View {
     /// Wings on both sides of the pill, drawn as one black silhouette with one rim.
     /// Both wings take the wider label's width, so the shape stays symmetric and the
     /// middle gap sits exactly on the pill. Visual only — clicks fall through.
-    private var compactEars: some View {
+    private func compactEars(reveal: Double) -> some View {
         let g = glance
         let notch = model.notch
         let bodyW = notch.width + bodyOutset * 2
@@ -393,6 +396,8 @@ struct IslandRootView: View {
             }
         }
         .fixedSize()
+        // Mask at the wings' own size (the compact root is only pill-wide).
+        .modifier(WingReveal(progress: reveal, hiddenWidth: bodyW))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -532,6 +537,30 @@ private struct IslandReveal: ViewModifier, Animatable {
             IslandShape(bottomRadius: radius)
                 .frame(width: w, height: h)
                 .frame(maxWidth: .infinity, alignment: .top)
+        }
+    }
+}
+
+/// Horizontal reveal of the compact wings: at 0 only the pill-wide middle shows
+/// (wings tucked behind the pill), at 1 the full width. Masks rather than scales,
+/// so the labels never squash.
+private struct WingReveal: ViewModifier, Animatable {
+    var progress: Double
+    var hiddenWidth: CGFloat
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let t = CGFloat(min(max(progress, 0), 1))
+        return content.mask {
+            GeometryReader { g in
+                Rectangle()
+                    .frame(width: hiddenWidth + (max(g.size.width, hiddenWidth) - hiddenWidth) * t)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 }
