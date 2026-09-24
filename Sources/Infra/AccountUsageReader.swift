@@ -6,6 +6,16 @@ import SQLite3
 enum AccountUsageReader {
     static var directory: URL { CredentialStore.appSupportURL.appendingPathComponent("tracking") }
 
+    /// Running collector vs the copy bundled with this app build.
+    static func collectorHealth(now: Date = Date()) -> CollectorHealth {
+        let status = (try? Data(contentsOf: directory.appendingPathComponent("collector-status.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let bundled = Bundle.main.url(forResource: "usage-collector", withExtension: "py")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .flatMap(CollectorHealth.version(inScript:))
+        return CollectorHealth.assess(status: status, bundledVersion: bundled, now: now)
+    }
+
     static func identity(provider: String, account: String, organization: String = "") -> String? {
         guard !account.isEmpty, account.count <= 512, organization.count <= 512 else { return nil }
         let value = provider + "\0" + account.lowercased() + "\0" + organization.lowercased()

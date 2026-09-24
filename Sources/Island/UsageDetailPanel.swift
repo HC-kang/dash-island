@@ -364,6 +364,21 @@ private struct UsageDetailView: View {
                 }
                 Text(liveTracking ? "Attributed by the account ID reported with each call. Earlier unlinked history is excluded."
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
+                if liveTracking {
+                    let health = AccountUsageReader.collectorHealth()
+                    Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
+                        .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
+                    if health.state == .notConnected || health.state == .outdated {
+                        Button("Copy reconnect command") {
+                            let script = Bundle.main.url(forResource: "connect-usage", withExtension: "py")?.path ?? "scripts/connect-usage.py"
+                            let quoted = "'" + script.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("python3 \(quoted)", forType: .string)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(accent)
+                    }
+                }
                 if liveTracking, let date = local.snapshots[sourceKey]?.events.map(\.date).max() {
                     Text("Last captured call \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: .ui)))")
                 }
@@ -500,7 +515,10 @@ private struct ScrollCueProbe: NSViewRepresentable {
             guard let scroll = enclosingScrollView, let doc = scroll.documentView else { return }
             let visible = scroll.documentVisibleRect
             let below = doc.isFlipped ? doc.bounds.height - visible.maxY : visible.minY
-            onChange(IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height))
+            let more = IslandGeometry.hasMoreBelow(contentBottom: visible.height + below, viewportHeight: visible.height)
+            // Frame-change notifications arrive mid-layout; SwiftUI drops state writes made
+            // during a view update, so hand the result over on the next run-loop turn.
+            DispatchQueue.main.async { [weak self] in self?.onChange(more) }
         }
     }
 }
