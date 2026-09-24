@@ -127,6 +127,50 @@ enum CredentialStore {
         }
     }
 
+    /// Advisory `flock` on `<folder>/.dash-refresh.lock`, held across a
+    /// refresh token's read → POST → write. A second app copy (dev build and
+    /// installed app) or a second poll waits, then reads the rotated file
+    /// instead of POSTing a spent single-use token. The vendor CLIs that
+    /// account-cli launches do not take it; the re-read inside covers them.
+    static let refreshLockFileName = ".dash-refresh.lock"
+
+    final class RefreshLock {
+        private var fd: Int32
+
+        fileprivate init(fd: Int32) { self.fd = fd }
+
+        func release() {
+            guard fd >= 0 else { return }
+            flock(fd, LOCK_UN)
+            close(fd)
+            fd = -1
+        }
+
+        deinit { release() }
+    }
+
+    /// `nil` when another holder kept the lock past `timeout`, or on cancel.
+    /// A folder where the lock file cannot be created (read-only) runs unlocked.
+    static func acquireRefreshLock(in dir: URL, timeout: TimeInterval = 20) async -> RefreshLock? {
+        let path = dir.appendingPathComponent(refreshLockFileName, isDirectory: false).path
+        let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            Log.auth.warn("refreshLock outcome=unavailable errno=\(errno)")
+            return RefreshLock(fd: -1)
+        }
+        let lock = RefreshLock(fd: fd)
+        let deadline = Date().addingTimeInterval(timeout)
+        // Non-blocking tries: a blocking flock would pin a cooperative thread.
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK, Date() < deadline, !Task.isCancelled else {
+                lock.release()
+                return nil
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return lock
+    }
+
     /// Reauth keeps the live session until the new login is accepted.
     ///
     /// `stash` moves each session file to `<name>.prior` so the CLI starts

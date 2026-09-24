@@ -104,7 +104,13 @@ struct ClaudeAdapter: VendorAdapter {
     ]
 
     /// Serializes OAuth refresh so two Claude accounts cannot 429 the token host.
-    private static let refreshGate = ClaudeRefreshGate()
+    /// `var` only so tests can swap in a gate on throwaway defaults.
+    nonisolated(unsafe) static var refreshGate = ClaudeRefreshGate()
+    /// Starts the detached CLI ping after a failed token host. Tests replace
+    /// it: a real ping spawns `claude` and reads the Keychain.
+    nonisolated(unsafe) static var backgroundPing: (URL, String?) -> Date? = {
+        startBackgroundCLIPing(configDir: $0, failedAccessToken: $1)
+    }
 
     // MARK: VendorAdapter
 
@@ -967,6 +973,13 @@ struct ClaudeAdapter: VendorAdapter {
             return .deferred(waitUntil)
         }
 
+        // Held across read → POST → write: a second app copy refreshing this
+        // folder finishes first, and the read below adopts what it wrote.
+        guard let lock = await CredentialStore.acquireRefreshLock(in: configDir) else {
+            return .deferred(Date().addingTimeInterval(60))
+        }
+        defer { lock.release() }
+
         // Fresh read after waiting — another poll may have healed the file.
         guard let data = try? Data(contentsOf: path),
               let creds = parseCredentialsJSON(data)
@@ -1067,7 +1080,7 @@ struct ClaudeAdapter: VendorAdapter {
         // HTTP oauth/token 429s for days; the Claude CLI still refreshes. The
         // ping runs in the background; look again once it could have landed.
         let pingEnd = (saw429 || lastStatus > 0)
-            ? startBackgroundCLIPing(configDir: configDir, failedAccessToken: failedAccessToken ?? creds.accessToken)
+            ? backgroundPing(configDir, failedAccessToken ?? creds.accessToken)
             : nil
         if saw429 {
             let retry = retry429 ?? Date().addingTimeInterval(globalRefresh429Quiet)

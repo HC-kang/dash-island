@@ -603,14 +603,19 @@ struct AgyAdapter: VendorAdapter {
     }
 
     /// Extend from the file's refresh_token. Never spawn `agy` or touch Keychain.
-    static func freshCredentials(home: URL) async -> FreshResult {
+    /// `refresh` defaults to the clients embedded in `agy`; tests pass their own.
+    static func freshCredentials(
+        home: URL,
+        refresh refreshAccess: ((String) async -> TokenRefreshResult)? = nil
+    ) async -> FreshResult {
         syncManagedCredentials(home: home)
         guard var creds = readCredentials(home: home) else { return .needsReauth }
         if isFresh(creds, slack: 5 * 60) { return .ok(creds) }
         guard let refresh = creds.refreshToken, !refresh.isEmpty else {
             return .needsReauth
         }
-        switch await refreshAccessToken(refresh) {
+        let result = if let refreshAccess { await refreshAccess(refresh) } else { await refreshAccessToken(refresh) }
+        switch result {
         case .success(let access, let rotated, let expiresIn):
             creds = extended(creds, access: access, rotated: rotated, expiresIn: expiresIn)
             do {

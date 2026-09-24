@@ -656,3 +656,10 @@ Fixes landed: Claude `minPollSeconds` 120 (usage GET only); `schedulerTickSecond
 - Agy: `TokenRefreshResult.clientRejected` (every pair refused the client, or no client in the binary). Reauth goes on to sign-in for it; polls stay soft "retrying". A refused cached pair falls back to every embedded pair. Timeout copy is split: Add "not added", reauth "stored session was kept"; no folder path, no Terminal step.
 - Follow cursor: `IslandGeometry.pointer(_:isOn:)` (`NSMouseInRect`) counts the top edge (y == maxY). A failed candidate clears `lastPointerScreenFrame`.
 - Left: Codex/Grok/Claude timeout copy still names the folder, which Add deletes (older issue).
+
+## Phase 3 adapter tests + folder lock (2026-09-24, branch p3/adapter-tests)
+
+- adapters-12 seams (test-only reasons): `CodexAdapter.fetchUsage(codexHome:)`, `GrokAdapter.fetchUsage(grokHome:)`, swappable `ClaudeAdapter.refreshGate` / `backgroundPing`, `AgyAdapter.freshCredentials(home:refresh:)`. `StubHTTP.with(route:)` answers per request (by host or `Authorization`) and records `requestURLs`.
+- Claude tests never call `fetchUsage` (it deletes a Keychain item). Drive `refreshThenProbe` / `refreshManagedCredentialsDetailed` inside a sandbox that swaps the gate (throwaway defaults) and `backgroundPing` (counter). A token-host 429/5xx test is now safe that way.
+- adapters-02: `CredentialStore.acquireRefreshLock` (`flock` on `<folder>/.dash-refresh.lock`, non-blocking tries, 20s, nil on timeout/cancel; unwritable folder runs unlocked). Codex/Grok hold it across read → POST → write and adopt the file when its refresh token differs from `knownRefreshToken` (the caller's read). Claude holds it from its post-gate re-read; its existing re-read/adopt logic covers a rotated file, so no extra comparison was added.
+- account-cli takes no lock: vendor CLIs cannot honor it. The app yields to a newer file (README). Agy has no lock (Google refresh tokens rarely rotate; not in scope).
