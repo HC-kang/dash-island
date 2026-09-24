@@ -4,6 +4,15 @@ All notable user-facing changes. Format: [Keep a Changelog](https://keepachangel
 
 ## [Unreleased]
 
+### Added
+- Korean UI. Dates and weekdays follow the UI language.
+- Detail panel: a 7-day usage trend for the first window, and costs in KRW (≈₩, daily rate from open.er-api.com, fetched only when KRW is selected).
+- The app updates an outdated usage collector by itself; a first connection is one button.
+
+### Fixed
+- Two refreshes of the same account folder no longer race; a token file that the CLI rotated meanwhile is adopted.
+- The network retry log line states the wait that actually applies.
+
 ## [0.1.0] - 2026-09-24
 
 ### Added
