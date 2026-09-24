@@ -68,6 +68,7 @@ final class PreferencesStore: ObservableObject {
         static let glanceRim = "DashIsland.glanceRim"
         static let glanceEars = "DashIsland.glanceEars"
         static let alertNotifications = "DashIsland.alertNotifications"
+        static let glanceTotalVendors = "DashIsland.glanceTotalVendors"
     }
 
     /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
@@ -102,11 +103,17 @@ final class PreferencesStore: ObservableObject {
         didSet { defaults.set(alertNotifications, forKey: Keys.alertNotifications) }
     }
 
+    /// Vendors whose accounts the left ear sums ("212/500%"). Empty: show the worst account.
+    @Published var glanceTotalVendors: [String] {
+        didSet { defaults.set(glanceTotalVendors, forKey: Keys.glanceTotalVendors) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
         self.glanceEars = defaults.object(forKey: Keys.glanceEars) as? Bool ?? true
         self.alertNotifications = defaults.object(forKey: Keys.alertNotifications) as? Bool ?? true
+        self.glanceTotalVendors = defaults.stringArray(forKey: Keys.glanceTotalVendors) ?? []
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 

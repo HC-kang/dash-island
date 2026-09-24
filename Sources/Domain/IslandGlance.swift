@@ -18,6 +18,10 @@ struct IslandGlance: Equatable, Sendable {
         var awaiting: Bool = false
         /// Short window name ("5h", "wk", "Fable") of `used`.
         var window: String? = nil
+        var vendor: String = ""
+        /// The account's shortest reported window, for the total across accounts.
+        var shortUsed: Double? = nil
+        var shortResetAt: Date? = nil
     }
 
     static let warnAt = 0.80
@@ -30,7 +34,11 @@ struct IslandGlance: Equatable, Sendable {
     var trailing: String?
     var accessibility: String
 
-    static func make(accounts: [Account], now: Date) -> IslandGlance {
+    /// `totalVendors` non-empty: the leading ear sums the shortest window of every
+    /// reporting account of those vendors ("212/500%") and the trailing ear shows
+    /// the earliest reset among them. The level still follows the worst account,
+    /// so one exhausted account cannot hide inside the total.
+    static func make(accounts: [Account], now: Date, totalVendors: Set<String> = []) -> IslandGlance {
         let worst = accounts.filter { $0.used != nil }.max { ($0.used ?? 0) < ($1.used ?? 0) }
         let broken = accounts.filter { $0.health == .error }.count
 
@@ -42,16 +50,21 @@ struct IslandGlance: Equatable, Sendable {
             else if let u = a.used, u >= warnAt { level = max(level, .warning) }
         }
 
-        let leading = worst.map(label)
+        let counted = accounts.filter { totalVendors.contains($0.vendor) && $0.shortUsed != nil }
+        let total = !counted.isEmpty
+        let sum = counted.reduce(0) { $0 + percent($1.shortUsed ?? 0) }
+        let leading = total ? "\(sum)/\(counted.count * 100)%" : worst.map(label)
+        let reset = total ? counted.compactMap(\.shortResetAt).filter { $0 > now }.min() : worst?.resetAt
         let trailing: String?
         if broken > 0 {
             trailing = "reauth \(broken)"
-        } else if let reset = worst?.resetAt {
+        } else if let reset {
             trailing = "↻ " + countdown(reset.timeIntervalSince(now))
         } else {
             trailing = nil
         }
-        var spoken = worst.map { label($0) + " used" } ?? "No usage reported"
+        var spoken = total ? "\(sum) of \(counted.count * 100) percent used across \(counted.count) accounts"
+            : worst.map { label($0) + " used" } ?? "No usage reported"
         if broken > 0 { spoken += ", \(broken) need sign-in" }
         return IslandGlance(level: level, leading: leading, trailing: trailing, accessibility: spoken)
     }
@@ -79,7 +92,9 @@ extension WidgetViewModel {
             ([s.primary] + [s.secondary, s.tertiary].compactMap { $0 } + s.extras).filter(\.isReported)
         } ?? []
         let top = windows.max { $0.usedFraction < $1.usedFraction }
+        let shortest = windows.min { $0.kind.nominalDuration < $1.kind.nominalDuration }
         return .init(title: title, used: top?.usedFraction, resetAt: top?.resetAt,
-                     health: health, awaiting: isAwaitingFirstSample, window: top?.displayLabel)
+                     health: health, awaiting: isAwaitingFirstSample, window: top?.displayLabel,
+                     vendor: vendorID, shortUsed: shortest?.usedFraction, shortResetAt: shortest?.resetAt)
     }
 }

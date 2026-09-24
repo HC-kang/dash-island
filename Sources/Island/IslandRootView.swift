@@ -321,7 +321,8 @@ struct IslandRootView: View {
     // MARK: - At a glance (compact rim + ears)
 
     private var glance: IslandGlance {
-        IslandGlance.make(accounts: widgets.map(\.glanceAccount), now: Date())
+        IslandGlance.make(accounts: widgets.map(\.glanceAccount), now: Date(),
+                          totalVendors: Set(preferences.glanceTotalVendors))
     }
 
     /// User accent while healthy; amber / red when an account nears its limit or needs sign-in.

@@ -54,6 +54,38 @@ enum IslandGlanceSuite {
             try assertEqual(IslandGlance.countdown(3 * 86_400 + 5 * 3_600), "3d 5h")
             try assertEqual(IslandGlance.countdown(-5), "now")
         }
+        f += check("total mode sums the shortest window of the selected vendors") {
+            let g = IslandGlance.make(accounts: [
+                A(title: "a", used: 0.9, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.40, shortResetAt: now.addingTimeInterval(7_200)),
+                A(title: "b", used: 0.5, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.72, shortResetAt: now.addingTimeInterval(1_800)),
+                A(title: "c", used: 0.2, resetAt: nil, health: .ok, vendor: "codex", shortUsed: 0.10, shortResetAt: now.addingTimeInterval(600)),
+                A(title: "d", used: 0.3, resetAt: nil, health: .ok, vendor: "grok", shortUsed: 0.30, shortResetAt: now.addingTimeInterval(60)),
+            ], now: now, totalVendors: ["claude", "codex"])
+            try assertEqual(g.leading, "122/300%")
+            try assertEqual(g.trailing, "↻ 10m")          // earliest reset among the counted accounts
+            try assertEqual(g.level, .warning)            // rim still follows the worst account (a at 90%)
+            try assertEqual(g.accessibility, "122 of 300 percent used across 3 accounts")
+        }
+        f += check("total mode leaves out accounts with nothing reported") {
+            let g = IslandGlance.make(accounts: [
+                A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.40, shortResetAt: nil),
+                A(title: "b", used: nil, resetAt: nil, health: .ok, vendor: "claude", shortUsed: nil, shortResetAt: nil),
+            ], now: now, totalVendors: ["claude"])
+            try assertEqual(g.leading, "40/100%")
+            try assertEqual(g.trailing, nil)
+        }
+        f += check("total mode with no matching account falls back to the worst account") {
+            let g = IslandGlance.make(accounts: [A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "grok", shortUsed: 0.4)],
+                                      now: now, totalVendors: ["claude"])
+            try assertEqual(g.leading, "a 40%")
+        }
+        f += check("total mode still shows reauth first") {
+            let g = IslandGlance.make(accounts: [
+                A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.4, shortResetAt: now.addingTimeInterval(600)),
+                A(title: "b", used: nil, resetAt: nil, health: .error, vendor: "claude"),
+            ], now: now, totalVendors: ["claude"])
+            try assertEqual(g.trailing, "reauth 1")
+        }
         return f
     }
 }
