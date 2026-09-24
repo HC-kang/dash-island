@@ -32,6 +32,7 @@ struct TestMain {
         failures += await LoginProcessSuite.run()
         failures += CredentialStoreSuite.run()
         failures += await TokenHostSuite.run()
+        failures += await AdapterRefreshSuite.run()
         failures += VendorStatusSuite.run()
         failures += await UsageModelSuite.run()
 

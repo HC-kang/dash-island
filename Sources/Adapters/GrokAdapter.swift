@@ -105,8 +105,13 @@ struct GrokAdapter: VendorAdapter {
     }
 
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
+        await Self.fetchUsage(grokHome: CredentialStore.directoryURL(for: ref))
+    }
+
+    /// One poll of a managed folder. Tests call it with a temp folder.
+    static func fetchUsage(grokHome dir: URL) async -> UsageSnapshot {
         let now = Date()
-        let dir = CredentialStore.directoryURL(for: ref)
+        let ref = dir.lastPathComponent
         guard var session = Self.readSession(grokHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }

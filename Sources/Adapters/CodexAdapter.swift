@@ -100,8 +100,13 @@ struct CodexAdapter: VendorAdapter {
     }
 
     func fetchUsage(_ ref: CredentialRef) async -> UsageSnapshot {
+        await Self.fetchUsage(codexHome: CredentialStore.directoryURL(for: ref))
+    }
+
+    /// One poll of a managed folder. Tests call it with a temp folder.
+    static func fetchUsage(codexHome dir: URL) async -> UsageSnapshot {
         let now = Date()
-        let dir = CredentialStore.directoryURL(for: ref)
+        let ref = dir.lastPathComponent
         guard var creds = Self.readCredentials(codexHome: dir) else {
             return Self.errorSnapshot(.authRequired, fetchedAt: now)
         }

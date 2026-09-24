@@ -165,9 +165,13 @@ enum TokenHostSuite {
 
 /// Answers every `URLSession.shared` request in-process; tests never reach a vendor.
 final class StubHTTP: URLProtocol {
-    nonisolated(unsafe) static var response: (status: Int, body: Data, headers: [String: String])?
+    typealias Answer = (status: Int, body: String, headers: [String: String])
+
+    nonisolated(unsafe) static var route: ((URLRequest) -> Answer)?
     /// Requests answered since the last `with` began.
     nonisolated(unsafe) static var requestCount = 0
+    /// Their URLs, in order.
+    nonisolated(unsafe) static var requestURLs: [URL] = []
 
     static func with<T>(
         status: Int,
@@ -175,12 +179,18 @@ final class StubHTTP: URLProtocol {
         headers: [String: String] = [:],
         _ run: () async -> T
     ) async -> T {
-        response = (status, Data(body.utf8), headers)
+        await with(route: { _ in (status, body, headers) }, run)
+    }
+
+    /// One answer per request, e.g. by host or by `Authorization` header.
+    static func with<T>(route: @escaping (URLRequest) -> Answer, _ run: () async -> T) async -> T {
+        self.route = route
         requestCount = 0
+        requestURLs = []
         URLProtocol.registerClass(StubHTTP.self)
         defer {
             URLProtocol.unregisterClass(StubHTTP.self)
-            response = nil
+            self.route = nil
         }
         return await run()
     }
@@ -190,14 +200,15 @@ final class StubHTTP: URLProtocol {
 
     override func startLoading() {
         Self.requestCount += 1
-        guard let stub = Self.response, let url = request.url,
+        if let url = request.url { Self.requestURLs.append(url) }
+        guard let stub = Self.route?(request), let url = request.url,
               let http = HTTPURLResponse(url: url, statusCode: stub.status, httpVersion: "HTTP/1.1", headerFields: stub.headers)
         else {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
             return
         }
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: stub.body)
+        client?.urlProtocol(self, didLoad: Data(stub.body.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
