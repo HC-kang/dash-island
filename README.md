@@ -132,6 +132,10 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 - Tail: `scripts/logs.sh`, follow: `scripts/logs.sh -f`, filter: `scripts/logs.sh -f fetch`.
 - The log never contains tokens or response bodies.
 
+### Status file
+
+`~/Library/Application Support/DashIsland/status.json` mirrors what the island shows, for scripts (sketchybar, tmux, Raycast). It is rewritten after each update, owner-only (0600), and holds only account id (8 chars), label, vendor, health, window percents, reset times, and freshness. No tokens.
+
 ### Tests
 
 ```bash
@@ -278,6 +282,10 @@ DASHISLAND_DEMO=1 DASHISLAND_DEMO_COUNT=5 open build/DashIsland.app
 - 레벨: `defaults write dev.dashisland.DashIsland DashIsland.logLevel debug` 또는 환경 변수 `DASHISLAND_LOG=debug`. 값은 `debug info warn error`이고 기본값은 `info`입니다. 앱을 다시 시작해야 적용됩니다.
 - 보기: `scripts/logs.sh`, 따라가기: `scripts/logs.sh -f`, 필터: `scripts/logs.sh -f fetch`.
 - 로그에는 토큰과 응답 본문이 기록되지 않습니다.
+
+### 상태 파일
+
+`~/Library/Application Support/DashIsland/status.json`에는 island가 보여 주는 값이 기록됩니다. sketchybar, tmux, Raycast 같은 스크립트가 이 파일을 읽을 수 있습니다. 갱신할 때마다 다시 쓰고, 권한은 소유자 전용(0600)입니다. 계정 ID(8자), 라벨, 벤더, 상태, 창별 사용률, 리셋 시각, 갱신 여부만 담고, 토큰은 담지 않습니다.
 
 ### 테스트
 

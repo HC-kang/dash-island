@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AccountStore.shared.load()
         UsageOrchestrator.shared.startAutoRefresh()
         AlertCenter.shared.start()
+        StatusFile.shared.start()
         island = IslandWindowController()
         island?.show()
     }
