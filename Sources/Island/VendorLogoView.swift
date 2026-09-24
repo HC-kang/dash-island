@@ -39,13 +39,20 @@ struct VendorLogoView: View {
         }
     }
 
-    /// Marks only. Rings keep IslandColor. Codex/Grok stay white (official mono).
+    /// Marks only; rings keep IslandColor. One lightness and chroma (OKLCH
+    /// L 0.75, C 0.10; Grok 0.05) so no mark outshines the amber gauge.
     static func markTint(for vendorID: VendorID) -> Color {
         switch vendorID {
-        case "claude": return IslandColor.claude
-        case "agy": return IslandColor.agy
+        case "claude": return rgb(0xE3, 0x9A, 0x78)
+        case "codex": return rgb(0x64, 0xC3, 0xA7)
+        case "grok": return rgb(0xB0, 0xA8, 0xCB)
+        case "agy": return rgb(0x82, 0xB1, 0xED)
         default: return .white
         }
+    }
+
+    private static func rgb(_ r: Double, _ g: Double, _ b: Double) -> Color {
+        Color(red: r / 255, green: g / 255, blue: b / 255)
     }
 
     /// Map vendor → resource name (png in VendorLogos/).
