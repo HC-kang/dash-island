@@ -111,6 +111,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var usage = UsageOrchestrator.shared
     @ObservedObject private var local = LocalUsageStore.shared
     @ObservedObject private var accounts = AccountStore.shared
+    @ObservedObject private var preferences = PreferencesStore.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -211,9 +212,9 @@ private struct UsageDetailView: View {
         VStack(alignment: .leading, spacing: 15) {
             if let first = windows.first {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(Int(((1 - first.usedFraction) * 100).rounded()))%")
+                    Text("\(shownPercent(first))%")
                         .font(.system(size: 38, weight: .medium, design: .rounded)).monospacedDigit()
-                    Text("left").font(.system(size: 14)).foregroundStyle(.secondary)
+                    Text(shownWord).font(.system(size: 14)).foregroundStyle(.secondary)
                     Spacer()
                     Text(label(first)).font(.system(size: 12, weight: .medium)).foregroundStyle(accent)
                 }
@@ -224,7 +225,7 @@ private struct UsageDetailView: View {
                         HStack {
                             Text(label(window)).fontWeight(.medium)
                             Spacer()
-                            Text("\(Int(((1 - window.usedFraction) * 100).rounded()))% left").monospacedDigit()
+                            Text("\(shownPercent(window))% \(shownWord)").monospacedDigit()
                         }.font(.system(size: 12))
                         quotaBar(window)
                         resetLabel(window)
@@ -269,12 +270,21 @@ private struct UsageDetailView: View {
         return name.hasSuffix(" wk") ? String(name.dropLast(3)) + " Weekly" : name
     }
 
+    /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).
+    private var showsUsed: Bool { preferences.displayMode == .used }
+    private var shownWord: String { showsUsed ? "used" : "left" }
+    private func shownFraction(_ window: WindowUsage) -> Double {
+        let used = min(1, max(0, window.usedFraction))
+        return showsUsed ? used : 1 - used
+    }
+    private func shownPercent(_ window: WindowUsage) -> Int { Int((shownFraction(window) * 100).rounded()) }
+
     private func quotaBar(_ window: WindowUsage) -> some View {
         GeometryReader { proxy in
             Capsule().fill(Color.white.opacity(0.09))
                 .overlay(alignment: .leading) {
                     Capsule().fill(accent.opacity(0.9))
-                        .frame(width: proxy.size.width * min(1, max(0, 1 - window.usedFraction)))
+                        .frame(width: proxy.size.width * shownFraction(window))
                 }
         }.frame(height: 5).accessibilityHidden(true)
     }
