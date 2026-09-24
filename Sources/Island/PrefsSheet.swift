@@ -47,6 +47,7 @@ struct PrefsSheet: View {
                 prefBlock(title: "AT A GLANCE") {
                     prefToggle("Warning color on the rim", isOn: $preferences.glanceRim)
                     prefToggle("Show top usage beside the notch", isOn: $preferences.glanceEars)
+                    prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
                     Text("Amber at 80% used, red at 95% or when an account needs sign-in.")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))

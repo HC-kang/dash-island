@@ -67,6 +67,7 @@ final class PreferencesStore: ObservableObject {
         static let pollSeconds = "DashIsland.pollSeconds"
         static let glanceRim = "DashIsland.glanceRim"
         static let glanceEars = "DashIsland.glanceEars"
+        static let alertNotifications = "DashIsland.alertNotifications"
     }
 
     /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
@@ -96,10 +97,16 @@ final class PreferencesStore: ObservableObject {
         didSet { defaults.set(glanceEars, forKey: Keys.glanceEars) }
     }
 
+    /// macOS notifications at 80% / 95%, after a reset, and when sign-in is needed.
+    @Published var alertNotifications: Bool {
+        didSet { defaults.set(alertNotifications, forKey: Keys.alertNotifications) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
         self.glanceEars = defaults.object(forKey: Keys.glanceEars) as? Bool ?? true
+        self.alertNotifications = defaults.object(forKey: Keys.alertNotifications) as? Bool ?? true
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 
