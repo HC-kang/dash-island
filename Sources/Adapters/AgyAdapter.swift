@@ -393,6 +393,8 @@ struct AgyAdapter: VendorAdapter {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = ["-a", "Terminal", script.path]
+        // Cancelled while we got here: do not open a Terminal login nobody waits for.
+        try Task.checkCancellation()
         do {
             try task.run()
         } catch {

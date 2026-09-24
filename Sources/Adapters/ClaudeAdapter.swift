@@ -700,6 +700,8 @@ struct ClaudeAdapter: VendorAdapter {
         // Keep stdin open so the CLI does not see immediate EOF.
         task.standardInput = Pipe()
 
+        // Cancelled while we got here: do not open a browser login nobody waits for.
+        try Task.checkCancellation()
         do {
             try task.run()
         } catch {
