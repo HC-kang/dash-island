@@ -115,6 +115,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var vendorStatus = VendorStatusStore.shared
     @ObservedObject private var quotaHistory = QuotaHistoryStore.shared
     @ObservedObject private var rates = ExchangeRateStore.shared
+    @ObservedObject private var collector = CollectorUpdater.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -183,6 +184,7 @@ private struct UsageDetailView: View {
         .onAppear {
             _ = quotaHistory.history(for: initial.id)
             if preferences.displayCurrency == .krw { rates.refreshIfNeeded() }
+            collector.updateIfOutdated()
         }
         .task(id: sourceKey) {
             repeat {
@@ -440,17 +442,25 @@ private struct UsageDetailView: View {
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
                 if liveTracking {
                     let health = AccountUsageReader.collectorHealth()
-                    Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
-                        .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
-                    if health.state == .notConnected || health.state == .outdated {
-                        Button("Copy reconnect command") {
-                            let script = Bundle.main.url(forResource: "connect-usage", withExtension: "py")?.path ?? "scripts/connect-usage.py"
-                            let quoted = "'" + script.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("python3 \(quoted)", forType: .string)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(accent)
+                    if collector.status == .running {
+                        Label("Updating the tracking collector…", systemImage: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(Color.secondary)
+                    } else {
+                        Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
+                            .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
+                    }
+                    if case .failed(let reason) = collector.status {
+                        Text(reason).foregroundStyle(Color.orange)
+                    }
+                    // Outdated updates itself (no CLI config change); only a first connection
+                    // edits CLI configs, so that one waits for this click.
+                    if health.state == .notConnected {
+                        Button("Connect tracking") { collector.connect() }
+                            .buttonStyle(.plain).foregroundStyle(accent)
+                            .disabled(collector.status == .running)
+                    } else if health.state == .outdated, collector.status != .running {
+                        Button("Retry update") { collector.updateIfOutdated() }
+                            .buttonStyle(.plain).foregroundStyle(accent)
                     }
                 }
                 if liveTracking, let date = local.snapshots[sourceKey]?.events.map(\.date).max() {

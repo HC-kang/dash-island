@@ -194,6 +194,24 @@ print('PASS: connector installs the repo collector unless the installed copy is 
 with tempfile.TemporaryDirectory() as temporary:
     home = Path(temporary)
     tracking = home / 'Library/Application Support/DashIsland/tracking'
+    calls = []
+    assert quiet(i.update, home, launchctl(calls)) == 'not-connected'
+    assert calls == [] and not tracking.exists(), 'update never connects on its own'
+    quiet(i.install, home, {}, launchctl(calls))
+    configs = {path: path.read_bytes() for path in home.rglob('*') if path.is_file() and 'DashIsland' not in str(path)}
+    installed = tracking / 'usage-collector.py'
+    installed.write_text('VERSION = 1\n')
+    calls.clear()
+    assert quiet(i.update, home, launchctl(calls)) == 'updated'
+    assert installed.read_bytes() == source_collector and calls == ['bootout', 'bootstrap']
+    assert {path: path.read_bytes() for path in configs} == configs, 'update leaves CLI configs untouched'
+    calls.clear()
+    assert quiet(i.update, home, launchctl(calls)) == 'current' and calls == []
+print('PASS: update replaces an older collector only, never touching CLI configs')
+
+with tempfile.TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    tracking = home / 'Library/Application Support/DashIsland/tracking'
     plist = home / 'Library/LaunchAgents/dev.dashisland.usage-collector.plist'
     codex_path, claude_path, custom = home / '.codex/config.toml', home / '.claude/settings.json', home / 'custom'
     codex_path.parent.mkdir()

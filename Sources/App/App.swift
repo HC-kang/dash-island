@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UsageOrchestrator.shared.startAutoRefresh()
         AlertCenter.shared.start()
         StatusFile.shared.start()
+        CollectorUpdater.shared.updateIfOutdated()
         island = IslandWindowController()
         island?.show()
     }

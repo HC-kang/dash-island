@@ -14,7 +14,7 @@ struct CollectorHealth: Equatable, Sendable {
         }
         let running = (status["version"] as? NSNumber)?.intValue
         if let bundledVersion, (running ?? 0) < bundledVersion {
-            return .init(state: .outdated, message: String(localized: "Tracking collector is out of date. Reconnect to update it."))
+            return .init(state: .outdated, message: String(localized: "Tracking collector is out of date. It updates itself."))
         }
         guard let last = (status["lastBatchAt"] as? NSNumber)?.doubleValue else {
             return .init(state: .quiet, message: String(localized: "Tracking connected · no calls captured yet"))

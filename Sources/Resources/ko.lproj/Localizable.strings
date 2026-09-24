@@ -143,7 +143,6 @@
 "This removes the account from Dash Island and deletes its stored credentials." = "Dash Island에서 이 계정을 없애고 저장된 자격 증명을 삭제합니다.";
 "Today" = "오늘";
 "Tracking active · last call %@ ago" = "추적 중 · 마지막 호출 %@ 전";
-"Tracking collector is out of date. Reconnect to update it." = "추적 수집기가 구버전입니다. 다시 연결하면 갱신됩니다.";
 "Tracking connected · no calls captured yet" = "추적 연결됨 · 아직 수집된 호출이 없습니다";
 "Tracking connected · no calls for %lldd" = "추적 연결됨 · %lld일 동안 호출 없음";
 "Tracking is not connected" = "추적이 연결되지 않았습니다";
@@ -215,3 +214,9 @@
 "API estimate" = "API 환산 추정";
 "%lld days" = "%lld일";
 " · partial" = " · 일부";
+"Updating the tracking collector…" = "추적 수집기를 갱신하는 중…";
+"Connect tracking" = "추적 연결";
+"Retry update" = "갱신 다시 시도";
+"The connector script is missing from the app bundle." = "앱 번들에 연결 스크립트가 없습니다.";
+"The collector could not be updated." = "수집기를 갱신하지 못했습니다.";
+"Tracking collector is out of date. It updates itself." = "추적 수집기가 구버전입니다. 자동으로 갱신합니다.";
