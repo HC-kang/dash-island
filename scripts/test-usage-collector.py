@@ -293,7 +293,8 @@ with tempfile.TemporaryDirectory() as temporary:
     idle = None
     client = http.client.HTTPConnection('127.0.0.1', port, timeout=8)
     try:
-        deadline = time.monotonic() + 5
+        # Cold CI runners take several seconds to start Python; the bound only limits failure.
+        deadline = time.monotonic() + 30
         while idle is None:
             assert process.poll() is None, 'collector exited during startup'
             try:
