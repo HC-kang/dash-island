@@ -65,6 +65,8 @@ final class PreferencesStore: ObservableObject {
         static let compactRim = "DashIsland.rimCompact"
         static let expandedRim = "DashIsland.rimExpanded"
         static let pollSeconds = "DashIsland.pollSeconds"
+        static let glanceRim = "DashIsland.glanceRim"
+        static let glanceEars = "DashIsland.glanceEars"
     }
 
     /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
@@ -84,8 +86,20 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    /// Compact rim turns amber/red when an account nears its limit or needs sign-in.
+    @Published var glanceRim: Bool {
+        didSet { defaults.set(glanceRim, forKey: Keys.glanceRim) }
+    }
+
+    /// Compact ears show the worst account and its reset countdown.
+    @Published var glanceEars: Bool {
+        didSet { defaults.set(glanceEars, forKey: Keys.glanceEars) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
+        self.glanceEars = defaults.object(forKey: Keys.glanceEars) as? Bool ?? true
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 
