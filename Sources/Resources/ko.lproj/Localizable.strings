@@ -228,7 +228,6 @@
 "Limits reset." = "한도를 리셋했습니다.";
 "Limits reset. %lld left." = "한도를 리셋했습니다. %lld개 남았습니다.";
 "No answer from the vendor. Try again: the retry cannot spend a second reset." = "벤더가 응답하지 않았습니다. 다시 시도하세요. 재시도는 같은 요청을 다시 보내므로 리셋권을 두 번 쓰지 않습니다.";
-"No limit is full right now." = "지금 가득 찬 한도가 없습니다.";
 "No limit needs a reset now. Nothing was used." = "지금 리셋할 한도가 없습니다. 리셋권은 쓰지 않았습니다.";
 "No reset is available. Nothing was used." = "쓸 수 있는 리셋권이 없습니다. 리셋권은 쓰지 않았습니다.";
 "Not available" = "사용할 수 없음";
@@ -244,3 +243,6 @@
 "Use a limit reset?" = "리셋권을 쓸까요?";
 "Use reset" = "리셋권 사용";
 "Vendor reason: %@" = "벤더 사유: %@";
+"Use by %@" = "%@까지 사용 가능";
+"No limit is full right now: the highest is at %lld%%." = "지금 가득 찬 한도가 없습니다. 가장 높은 사용률은 %lld%%입니다.";
+"weekly extra usage" = "주간 추가 사용량";

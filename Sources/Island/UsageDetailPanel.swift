@@ -292,6 +292,10 @@ private struct UsageDetailView: View {
                 }
             }
             .font(.system(size: 12, weight: .medium))
+            if let expires = offer?.expiresAt, (offer?.available ?? 0) > 0 {
+                Text("Use by \(expires.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted).locale(.ui)))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             if let note = resets.notes[initial.id] {
                 Text(note).font(.system(size: 11)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -307,8 +311,11 @@ private struct UsageDetailView: View {
         lines.append(clears.isEmpty
             ? String(localized: "The vendor resets the eligible usage limits now.")
             : String(localized: "Resets now: \(clears)."))
-        if offer.atLimit == false || (offer.atLimit == nil && (model.usageSnapshot?.primary.usedFraction ?? 0) < 1) {
-            lines.append(String(localized: "No limit is full right now."))
+        let snap = model.usageSnapshot
+        let highest = [snap?.primary.usedFraction, snap?.secondary?.usedFraction].compactMap { $0 }.max() ?? 0
+        if offer.atLimit == false || (offer.atLimit == nil && highest < 1) {
+            // Early use still spends the credit (the CLI asks the same way).
+            lines.append(String(localized: "No limit is full right now: the highest is at \(Int((highest * 100).rounded()))%."))
         }
         let ok = IslandDialogController.shared.runConfirm(
             title: String(localized: "Use a limit reset?"),
@@ -323,6 +330,7 @@ private struct UsageDetailView: View {
         switch kind {
         case "five_hour": return String(localized: "5-hour limit")
         case "seven_day": return String(localized: "weekly limit")
+        case "seven_day_overage_included": return String(localized: "weekly extra usage")
         default: return kind.replacingOccurrences(of: "_", with: " ")
         }
     }

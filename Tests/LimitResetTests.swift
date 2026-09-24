@@ -136,6 +136,16 @@ enum LimitResetSuite {
             try assertEqual(LimitResetFailure.from(status: 500), .http(500))
         }
 
+        failures += check("claude reset user agent: newest installed CLI, CLI format") {
+            try assertEqual(ClaudeAdapter.newestVersion(["2.1.9", "2.1.281", "2.1.30", "latest", "2.1"]), "2.1.281")
+            try assertTrue(ClaudeAdapter.newestVersion(["x"]) == nil)
+            let empty = FileManager.default.temporaryDirectory.appendingPathComponent("no-claude-\(UUID().uuidString)")
+            try assertEqual(ClaudeAdapter.resetUserAgent(versionsDir: empty),
+                            "claude-cli/\(ClaudeAdapter.resetFallbackCLIVersion) (external, cli)")
+            let req = ClaudeAdapter.oauthRequest(url: ClaudeAdapter.limitResetOfferURL, token: "t")
+            try assertTrue(req.value(forHTTPHeaderField: "User-Agent")?.hasPrefix("claude-cli/") == true)
+        }
+
         failures += check("organization id comes from .claude.json oauthAccount") {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("reset-org-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

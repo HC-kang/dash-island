@@ -49,8 +49,29 @@ extension ClaudeAdapter: LimitResetting {
         req.setValue(betaHeader, forHTTPHeaderField: "anthropic-beta")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(cliUserAgent, forHTTPHeaderField: "User-Agent")
+        // The reset program is gated on the client surface, read from this
+        // header: the CLI sends `claude-cli/<ver> (external, cli)` here, and
+        // `claude-code/…` answers `ineligible_reason: surface`.
+        req.setValue(resetUserAgent(), forHTTPHeaderField: "User-Agent")
         return req
+    }
+
+    /// Fallback when no CLI install is found; the vendor may also gate on version.
+    static let resetFallbackCLIVersion = "2.1.281"
+
+    static func resetUserAgent(versionsDir: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/share/claude/versions", isDirectory: true)) -> String {
+        let installed = (try? FileManager.default.contentsOfDirectory(atPath: versionsDir.path)) ?? []
+        return "claude-cli/\(newestVersion(installed) ?? resetFallbackCLIVersion) (external, cli)"
+    }
+
+    /// Highest `x.y.z` among directory names; other names are ignored.
+    static func newestVersion(_ names: [String]) -> String? {
+        func parts(_ name: String) -> [Int]? {
+            let p = name.split(separator: ".").compactMap { Int($0) }
+            return p.count == 3 && name.split(separator: ".").count == 3 ? p : nil
+        }
+        return names.filter { parts($0) != nil }.max { parts($0)!.lexicographicallyPrecedes(parts($1)!) }
     }
 
     /// `POST /api/organizations/{org}/reset_rate_limits`. Nil when an id does

@@ -43,7 +43,7 @@ final class LimitResetCenter: ObservableObject {
             let result = await resetter.limitResetOffer(account.credentialRef)
             switch result {
             case .success(let offer):
-                Log.accounts.info("reset offer account=\(id.short) available=\(offer.available) reason=\(offer.ineligibleReason ?? "-")")
+                Log.accounts.info("reset offer account=\(id.short) available=\(offer.available) reason=\(offer.ineligibleReason ?? "-") requires_limit=\(offer.requiresLimit) at_limit=\(offer.atLimit.map(String.init) ?? "-") clears=\(offer.clears.joined(separator: ","))")
                 offers[id] = .ready(offer)
             case .failure(let failure):
                 Log.accounts.info("reset offer account=\(id.short) outcome=\(failure)")
