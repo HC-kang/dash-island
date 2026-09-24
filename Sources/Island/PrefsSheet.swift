@@ -37,6 +37,20 @@ struct PrefsSheet: View {
                     )
                 }
 
+                prefBlock(title: "COST") {
+                    segmented(
+                        selection: $preferences.displayCurrency,
+                        options: [(.usd, "USD"), (.krw, "KRW")]
+                    )
+                    Text("API-equivalent estimates. KRW uses a daily rate from open.er-api.com, fetched only while KRW is selected.")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.40))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .onChange(of: preferences.displayCurrency) { currency in
+                    if currency == .krw { ExchangeRateStore.shared.refreshIfNeeded() }
+                }
+
                 prefBlock(title: "RIM") {
                     rimSwatches(selection: $preferences.rimAccent)
                     Text("Neon edge glow (compact + expanded).")

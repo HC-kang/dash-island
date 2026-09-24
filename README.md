@@ -135,6 +135,7 @@ Dash Island has no telemetry and no server of its own. It talks only to:
 | Token refresh for managed accounts | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
 | Vendor status pages | `status.claude.com`, `status.openai.com`, `status.x.ai` |
 | Model price catalog (API-equivalent cost), cached daily | `ericjypark.github.io` (codex-island's public catalog; the bundled copy is used offline) |
+| USD→KRW rate, only while KRW display is selected, cached daily | `open.er-api.com` |
 | Local usage collector (optional) | `127.0.0.1:43190` only |
 
 Credentials stay in `~/Library/Application Support/DashIsland/accounts/` (folders 0700, files 0600). Logs and `status.json` never contain tokens or response bodies.
@@ -300,6 +301,7 @@ Dash Island는 텔레메트리를 보내지 않고, 자체 서버도 없습니�
 | 관리 계정의 토큰 갱신 | `console.anthropic.com`, `platform.claude.com`, `auth.openai.com`, `auth.x.ai`, `oauth2.googleapis.com` |
 | 벤더 상태 페이지 | `status.claude.com`, `status.openai.com`, `status.x.ai` |
 | 모델 가격표(API 환산 비용), 하루 한 번 캐시 | `ericjypark.github.io` (codex-island의 공개 가격표; 오프라인에서는 동봉 사본 사용) |
+| USD→KRW 환율, KRW 표시를 고른 경우에만, 하루 한 번 캐시 | `open.er-api.com` |
 | 로컬 사용량 수집기(선택) | `127.0.0.1:43190`만 사용 |
 
 자격 증명은 `~/Library/Application Support/DashIsland/accounts/`에 저장됩니다(폴더 0700, 파일 0600). 로그와 `status.json`에는 토큰과 응답 본문이 기록되지 않습니다.

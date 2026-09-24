@@ -70,6 +70,7 @@ final class PreferencesStore: ObservableObject {
         static let glanceEarsMode = "DashIsland.glanceEarsMode"
         static let alertNotifications = "DashIsland.alertNotifications"
         static let glanceTotalVendors = "DashIsland.glanceTotalVendors"
+        static let displayCurrency = "DashIsland.displayCurrency"
     }
 
     /// Writes go back to the store they were read from (a test suite stays out of `.standard`).
@@ -109,6 +110,11 @@ final class PreferencesStore: ObservableObject {
         didSet { defaults.set(glanceTotalVendors, forKey: Keys.glanceTotalVendors) }
     }
 
+    /// API-equivalent cost display. KRW converts at a daily rate (see ExchangeRateStore).
+    @Published var displayCurrency: CurrencyDisplay.Currency {
+        didSet { defaults.set(displayCurrency.rawValue, forKey: Keys.displayCurrency) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.glanceRim = defaults.object(forKey: Keys.glanceRim) as? Bool ?? true
@@ -120,6 +126,8 @@ final class PreferencesStore: ObservableObject {
         }
         self.alertNotifications = defaults.object(forKey: Keys.alertNotifications) as? Bool ?? true
         self.glanceTotalVendors = defaults.stringArray(forKey: Keys.glanceTotalVendors) ?? []
+        self.displayCurrency = defaults.string(forKey: Keys.displayCurrency)
+            .flatMap(CurrencyDisplay.Currency.init(rawValue:)) ?? .usd
         let rawMode = defaults.string(forKey: Keys.displayMode) ?? ""
         self.displayMode = DisplayMode(rawValue: rawMode) ?? .used
 

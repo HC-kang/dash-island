@@ -114,6 +114,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var preferences = PreferencesStore.shared
     @ObservedObject private var vendorStatus = VendorStatusStore.shared
     @ObservedObject private var quotaHistory = QuotaHistoryStore.shared
+    @ObservedObject private var rates = ExchangeRateStore.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -179,7 +180,10 @@ private struct UsageDetailView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         .colorScheme(.dark)
         .tint(accent)
-        .onAppear { _ = quotaHistory.history(for: initial.id) }
+        .onAppear {
+            _ = quotaHistory.history(for: initial.id)
+            if preferences.displayCurrency == .krw { rates.refreshIfNeeded() }
+        }
         .task(id: sourceKey) {
             repeat {
                 await local.load(provider: provider, accountID: initial.id)
@@ -411,7 +415,7 @@ private struct UsageDetailView: View {
                 HStack(alignment: .top) {
                     metric(Self.tokens(summary.tokens.total), caption: liveTracking ? "Captured tokens, incl. cache" : "Tokens, including cache")
                     Spacer()
-                    metric(summary.dollars.map(Self.money) ?? "—", caption: (provider == "grok" ? "Recorded API value" : "API estimate")
+                    metric(summary.dollars.map(money) ?? "—", caption: (provider == "grok" ? "Recorded API value" : "API estimate")
                            + (summary.unpricedTokens > 0 ? " · partial" : ""))
                 }
                 trend(summary.trend)
@@ -503,11 +507,11 @@ private struct UsageDetailView: View {
                     Text(row.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(Self.tokens(row.tokens.total)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Text(row.dollars.map { Self.money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
+                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
                         .font(.system(size: 11)).lineLimit(1).frame(minWidth: 54, alignment: .trailing)
                 }.monospacedDigit().contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(Self.money) ?? "unpriced")")
+                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? "unpriced")")
                 .accessibilityValue(expandedModels.contains(row.id) ? "Expanded" : "Collapsed")
                 .accessibilityHint("Show input, output and cache tokens")
             GeometryReader { proxy in
@@ -537,8 +541,8 @@ private struct UsageDetailView: View {
     private static func tokens(_ count: Int64) -> String {
         count.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)).locale(Locale(identifier: "en_US")))
     }
-    private static func money(_ amount: Double) -> String {
-        amount.formatted(.currency(code: "USD").precision(.fractionLength(2)).locale(Locale(identifier: "en_US")))
+    private func money(_ amount: Double) -> String {
+        CurrencyDisplay.format(usd: amount, currency: preferences.displayCurrency, krwPerUSD: rates.krwPerUSD)
     }
 }
 
