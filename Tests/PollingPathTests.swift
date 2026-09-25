@@ -146,16 +146,18 @@ enum PollingPathSuite {
         private(set) var running = 0
         private(set) var peak = 0
         func enter() { running += 1; peak = max(peak, running) }
-        func leave() { running -= 1 }
+        private(set) var done = 0
+        func leave() { running -= 1; done += 1 }
     }
 
     static func runAsync() async -> Int {
         var failures = 0
 
-        // Item 0 is slow. Fixed pairs made items 2…4 wait for it; a sliding
-        // window keeps the other slot busy and hands results over on arrival.
+        // Item 0 is slow: it ends only after the other four (5 s cap). Fixed
+        // pairs made items 2…4 wait for it; a sliding window keeps the other
+        // slot busy and hands results over on arrival. A signal, not a fixed
+        // sleep, so a slow CI runner cannot reorder the finishes.
         let gauge = Gauge()
-        let delaysMs: [UInt64] = [400, 20, 20, 20, 20]
         var started: [Int] = []
         var finished: [Int] = []
         await UsageOrchestrator.forEachBounded(
@@ -167,7 +169,13 @@ enum PollingPathSuite {
             },
             work: { item -> Int in
                 await gauge.enter()
-                try? await Task.sleep(nanoseconds: delaysMs[item] * 1_000_000)
+                if item == 0 {
+                    for _ in 0..<500 where await gauge.done < 4 {
+                        try? await Task.sleep(nanoseconds: 10_000_000)
+                    }
+                } else {
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
                 await gauge.leave()
                 return item
             },
