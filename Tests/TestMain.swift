@@ -27,6 +27,7 @@ struct TestMain {
         failures += ClaudeAdapterSuite.run()
         failures += await ClaudeAdapterSuite.runGate()
         failures += CodexAdapterSuite.run()
+        failures += LimitResetSuite.run()
         failures += GrokAdapterSuite.run()
         failures += AgyAdapterSuite.run()
         failures += await AgyAdapterSuite.runLogin()

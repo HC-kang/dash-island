@@ -74,7 +74,7 @@ struct ClaudeAdapter: VendorAdapter {
     /// ~37m stale, so the two concerns are separated here.
     let minPollSeconds = 60
 
-    private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     /// Access-token skew (Orca uses 5m). Refresh *before* usage 401 so the
     /// ~27-day refresh_token is rotated instead of dying unused.
@@ -93,8 +93,8 @@ struct ClaudeAdapter: VendorAdapter {
     private static let credentialsFileName = ".credentials.json"
     private static let loginTimeout: TimeInterval = 180
     private static let pollNanos: UInt64 = 1_000_000_000
-    private static let cliUserAgent = "claude-code/2.1.121"
-    private static let betaHeader = "oauth-2025-04-20"
+    static let cliUserAgent = "claude-code/2.1.121"
+    static let betaHeader = "oauth-2025-04-20"
     private static let keychainServiceBase = "Claude Code-credentials"
     /// Token hosts (Claude Code has moved between these; try both).
     /// console first: the reference client's working issuer; platform often 429s first.

@@ -70,6 +70,8 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
                 // The widget handles this click on mouse-up. Closing on mouse-down
                 // first would make its toggle immediately reopen the same panel.
                 if event.type == .leftMouseDown, event.window is BorderlessFloatingWindow { return event }
+                // A confirmation raised from the panel (reset) is not an outside click.
+                if event.window === IslandDialogController.shared.window { return event }
                 if event.window !== self?.window { self?.close() }
                 return event
             }
@@ -171,6 +173,7 @@ private struct UsageDetailView: View {
     @ObservedObject private var quotaHistory = QuotaHistoryStore.shared
     @ObservedObject private var rates = ExchangeRateStore.shared
     @ObservedObject private var collector = CollectorUpdater.shared
+    @ObservedObject private var resets = LimitResetCenter.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
     @State private var expandedModels: Set<String> = []
@@ -240,6 +243,7 @@ private struct UsageDetailView: View {
             _ = quotaHistory.history(for: initial.id)
             if preferences.displayCurrency == .krw { rates.refreshIfNeeded() }
             collector.updateIfOutdated()
+            if let account = managedAccount { resets.load(account) }
         }
         .task(id: sourceKey) {
             repeat {
@@ -249,6 +253,85 @@ private struct UsageDetailView: View {
         }
         .onChange(of: accounts.accounts.map(\.id)) { ids in
             if !ids.contains(initial.id) { UsageDetailPanel.shared.close() }
+        }
+    }
+
+    private var managedAccount: Account? {
+        accounts.accounts.first { $0.id == initial.id }
+    }
+
+    /// Reset credits: count, a Use button behind a confirmation, and the last outcome.
+    private var resetRow: some View {
+        let state = resets.offers[initial.id]
+        let busy = resets.inFlight.contains(initial.id)
+        let offer: LimitResetOffer? = { if case .ready(let o)? = state { return o }; return nil }()
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Label("Limit resets", systemImage: "arrow.counterclockwise")
+                Spacer()
+                switch state {
+                case .ready(let o) where o.ineligibleReason != nil:
+                    Text("Not available").foregroundStyle(.secondary)
+                        .help(o.ineligibleReason.map { String(localized: "Vendor reason: \($0)") } ?? "")
+                case .ready(let o):
+                    Text("\(o.available) available").foregroundStyle(o.available > 0 ? accent : Color.secondary)
+                case .loading:
+                    Text("Checking…").foregroundStyle(.secondary)
+                case .unavailable, nil:
+                    Text("Unavailable").foregroundStyle(.secondary)
+                }
+                if let offer, offer.available > 0, offer.ineligibleReason == nil {
+                    Button {
+                        confirmReset(offer)
+                    } label: {
+                        if busy { ProgressView().controlSize(.mini) } else { Text("Use") }
+                    }
+                    .controlSize(.small)
+                    .disabled(busy || !offer.canUse)
+                    .help(offer.canUse ? "Spend one reset on this account" : "Available once a limit is full")
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+            if let expires = offer?.expiresAt, (offer?.available ?? 0) > 0 {
+                Text("Use by \(expires.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted).locale(.ui)))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if let note = resets.notes[initial.id] {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: resets.notes[initial.id])
+    }
+
+    private func confirmReset(_ offer: LimitResetOffer) {
+        guard let account = managedAccount else { return }
+        let clears = offer.clears.map(Self.limitName).joined(separator: ", ")
+        var lines = [String(localized: "Spends 1 of \(offer.available) resets on \(account.label). This cannot be undone.")]
+        lines.append(clears.isEmpty
+            ? String(localized: "The vendor resets the eligible usage limits now.")
+            : String(localized: "Resets now: \(clears)."))
+        let snap = model.usageSnapshot
+        let highest = [snap?.primary.usedFraction, snap?.secondary?.usedFraction].compactMap { $0 }.max() ?? 0
+        if offer.atLimit == false || (offer.atLimit == nil && highest < 1) {
+            // Early use still spends the credit (the CLI asks the same way).
+            lines.append(String(localized: "No limit is full right now: the highest is at \(Int((highest * 100).rounded()))%."))
+        }
+        let ok = IslandDialogController.shared.runConfirm(
+            title: String(localized: "Use a limit reset?"),
+            message: lines.joined(separator: " "),
+            confirmTitle: String(localized: "Use reset"),
+            isDestructive: true
+        )
+        if ok { resets.use(account, offer: offer) }
+    }
+
+    static func limitName(_ kind: String) -> String {
+        switch kind {
+        case "five_hour": return String(localized: "5-hour limit")
+        case "seven_day": return String(localized: "weekly limit")
+        case "seven_day_overage_included": return String(localized: "weekly extra usage")
+        default: return kind.replacingOccurrences(of: "_", with: " ")
         }
     }
 
@@ -316,14 +399,7 @@ private struct UsageDetailView: View {
                 Text("Quota unavailable").font(.system(size: 22, weight: .medium))
                 Text("No reading has been reported for this account.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            if provider == "codex" {
-                HStack {
-                    Label("Rate limit resets", systemImage: "arrow.counterclockwise")
-                    Spacer()
-                    Text(model.usageSnapshot?.resetCreditsAvailable.map { "\($0) available" } ?? "Unavailable")
-                        .foregroundStyle(model.usageSnapshot?.resetCreditsAvailable == nil ? Color.secondary : accent)
-                }.font(.system(size: 12, weight: .medium))
-            }
+            if LimitResetCenter.resetter(for: provider) != nil { resetRow }
             if let error = model.errorCaption {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.system(size: 11)).foregroundStyle(Color.orange)
