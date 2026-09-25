@@ -32,6 +32,11 @@ struct GaugeClusterView: View {
     @State private var bandWidth: CGFloat = 0
     /// Latest hover chrome from every cell (usage / caption / status).
     @State private var hoverChrome: [WidgetHoverChrome] = []
+    /// The hang tip on screen. It trails `hoverChrome`: a short dwell before it
+    /// appears, and a short grace before it hides so it glides between cells.
+    @State private var shownTip: WidgetHoverChrome?
+    @State private var tipTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Leading edge of the slot row in `dragSpace` (tracks scroll).
     @State private var rowOriginX: CGFloat = 0
     /// Viewport width of the scroll/clip region.
@@ -331,15 +336,48 @@ struct GaugeClusterView: View {
         .onPreferenceChange(WidgetHoverElevatePreference.self) { list in
             // Hover only flips on enter/exit; storing mid-drag is cheap and keeps it current.
             hoverChrome = list
+            updateTip()
         }
+        .onChange(of: draggingID) { _ in updateTip() }
+    }
+
+    private static let tipAnimation = Animation.spring(response: 0.26, dampingFraction: 0.9)
+
+    private func updateTip() {
+        let next = elevatedChrome.flatMap { $0.showUsage || $0.showCaption ? $0 : nil }
+        tipTask?.cancel()
+        guard next != shownTip else { return }
+        // Visible tip → another cell or another card: glide there now.
+        if next != nil, shownTip != nil {
+            withAnimation(Self.tipAnimation) { shownTip = next }
+            return
+        }
+        // Appear after a dwell (a pass over the row shows nothing); hide after a
+        // grace that covers the gap between two cells.
+        let delay: UInt64 = next == nil ? 90_000_000 : 180_000_000
+        tipTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            withAnimation(next == nil ? .easeOut(duration: 0.12) : Self.tipAnimation) { shownTip = next }
+        }
+    }
+
+    private var tipTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .opacity
+                    .combined(with: .scale(scale: 0.96, anchor: .top))
+                    .combined(with: .offset(y: -4)),
+                removal: .opacity
+            )
     }
 
     /// Usage / caption tips drawn in an overlay so they never affect row layout width.
     @ViewBuilder
     private var floatingHangTips: some View {
         if draggingID == nil,
-           let chrome = elevatedChrome,
-           chrome.showUsage || chrome.showCaption,
+           let chrome = shownTip,
            let model = modelByID[chrome.accountID],
            let index = baseOrder.firstIndex(of: chrome.accountID)
         {
@@ -357,12 +395,15 @@ struct GaugeClusterView: View {
                     AccountHoverTips.captionCard(model: model)
                 }
             }
+            // New cell or card: the old one fades out while the frame glides over.
+            .id("\(chrome.accountID)-\(chrome.showUsage)")
+            .transition(.opacity)
             .fixedSize()
             // Anchor the top edge directly; measured half-heights lag when cards change.
             .frame(width: 0, height: 0, alignment: .top)
             .position(x: center.x, y: tipTop)
             .allowsHitTesting(false)
-            .transition(.opacity)
+            .transition(tipTransition)
         }
     }
 
