@@ -40,7 +40,7 @@ final class LocalUsageStore: ObservableObject {
                 let key = Self.sourceKey(provider: provider, accountID: account.id)
                 let identity = AccountUsageReader.identity(provider: provider, home: CredentialStore.directoryURL(for: account.credentialRef))
                 snapshots[key] = .init(events: identity.flatMap { captured.accounts[$0] } ?? [],
-                    notice: identity == nil ? "Account identity unavailable. Reauthenticate this account to reconnect tracking." : captured.notice)
+                    notice: identity == nil ? String(localized: "Account identity unavailable. Sign in again to this account to reconnect tracking.") : captured.notice)
                 updated[key] = date
             }
             // debug: the detail panel reloads every ~15 s.

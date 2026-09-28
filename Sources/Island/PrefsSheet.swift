@@ -75,11 +75,11 @@ struct PrefsSheet: View {
                         .frame(width: 170)
                     }
                     prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
-                    Text("Left ear: total across accounts of")
+                    Text("Beside the notch: total across accounts of")
                         .font(Typography.settingsRow)
                         .foregroundStyle(.white.opacity(0.88))
                     HStack(spacing: 12) {
-                        ForEach([("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"), ("agy", "Agy")], id: \.0) { id, name in
+                        ForEach([("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"), ("agy", "Antigravity")], id: \.0) { id, name in
                             Toggle(name, isOn: Binding(
                                 get: { preferences.glanceTotalVendors.contains(id) },
                                 set: { on in
@@ -92,7 +92,7 @@ struct PrefsSheet: View {
                             .font(.system(size: 11))
                         }
                     }
-                    Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left ear sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
+                    Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left side of the notch sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(.white.opacity(0.40))
                         .fixedSize(horizontal: false, vertical: true)
@@ -194,8 +194,8 @@ struct PrefsSheet: View {
                     return false
                 }()
                 let badge = [
-                    info.isBuiltin ? "Built-in" : "External",
-                    info.hasNotch ? "notch" : nil
+                    info.isBuiltin ? String(localized: "Built-in") : String(localized: "External"),
+                    info.hasNotch ? String(localized: "notch") : nil
                 ].compactMap { $0 }.joined(separator: " · ")
                 screenRow(
                     title: info.name,

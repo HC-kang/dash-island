@@ -1017,18 +1017,18 @@ final class UsageOrchestrator: ObservableObject {
             let outcome: AccountFetchStatus.Outcome
             if let cool, cool > now {
                 if case .authRequired = err {
-                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "auth")
+                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? String(localized: "needs sign-in"))
                 } else if case .rateLimited = err {
-                    outcome = .failure("cooling down")
+                    outcome = .failure(String(localized: "cooling down"))
                 } else if let err {
-                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "waiting to retry")
+                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? String(localized: "waiting to retry"))
                 } else {
-                    outcome = .failure("cooling down")
+                    outcome = .failure(String(localized: "cooling down"))
                 }
             } else if attempt == nil {
                 outcome = .never
             } else if let err {
-                outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "waiting to retry")
+                outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? String(localized: "waiting to retry"))
             } else {
                 outcome = .success
             }
@@ -1142,7 +1142,7 @@ final class UsageOrchestrator: ObservableObject {
             burnSampleAt: awaiting ? nil : burn.lastSampleAt,
             burnQuantized: awaiting ? false : burn.quantized,
             hoverWindows: awaiting
-                ? [HoverWindowLine(label: "…", usage: "waiting for first poll", resetAt: nil)]
+                ? [HoverWindowLine(label: "…", usage: String(localized: "waiting for first poll"), resetAt: nil)]
                 : Self.hoverWindows(snapshot: snap, mode: mode),
             errorCaption: shortCaption,
             detailCaption: detail,

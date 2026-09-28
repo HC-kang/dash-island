@@ -26,7 +26,7 @@ enum ClaudeAdapterError: Error, Equatable, LocalizedError {
 
               CLAUDE_CONFIG_DIR='\(configDir)' claude auth login --claudeai
 
-            Then choose Reauthenticate (or remove and re-add).
+            Then choose Sign in again (or remove and re-add).
             """
         case .credentialsMissing(let configDir):
             return """
@@ -275,7 +275,7 @@ struct ClaudeAdapter: VendorAdapter {
                 """
                 Token rejected by Anthropic (invalid or missing scopes).
                 `claude setup-token` usually cannot read usage — it lacks user:profile.
-                Use Reauthenticate → browser login instead:
+                Use Sign in again → browser sign-in instead:
                   CLAUDE_CONFIG_DIR='\(configDir.path)' claude auth login --claudeai
                 """
             )
@@ -309,7 +309,7 @@ struct ClaudeAdapter: VendorAdapter {
                 Log.auth.warn("token vendor=claude outcome=missingUsageScopes ref=\(String(ref.prefix(8)))")
                 return Self.errorSnapshot(
                     .unavailable(
-                        "setup-token can’t read usage (no user:profile). Reauthenticate → browser login"
+                        "setup-token can’t read usage (no user:profile). Sign in again → browser sign-in"
                     ),
                     fetchedAt: now
                 )

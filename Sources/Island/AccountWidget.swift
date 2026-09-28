@@ -163,7 +163,7 @@ struct AccountWidget: View {
                 AccountChromeActions.rename(accountID: a.id, currentLabel: a.label)
             }
         }
-        .accessibilityAction(named: "Reauthenticate") {
+        .accessibilityAction(named: "Sign in again") {
             if let a = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
                 AccountChromeActions.reauthenticate(account: a)
             }
@@ -183,7 +183,7 @@ struct AccountWidget: View {
             Button("Rename…") {
                 AccountChromeActions.rename(accountID: account.id, currentLabel: account.label)
             }
-            Button("Reauthenticate") {
+            Button("Sign in again") {
                 AccountChromeActions.reauthenticate(account: account)
             }
             Divider()
@@ -290,10 +290,10 @@ struct AccountWidget: View {
             if model.needsReauth, let account = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
                 // A truncated "reauth: codex log…" told users what to type; offer the action.
                 Button { AccountChromeActions.reauthenticate(account: account) } label: {
-                    captionLabel("Reauthenticate ›", isError: true)
+                    captionLabel(String(localized: "Sign in ›"), isError: true)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Reauthenticate \(account.label)")
+                .accessibilityLabel("Sign in again to \(account.label)")
             } else {
                 TimelineView(.periodic(from: .now, by: 15)) { context in
                     let isError = model.errorCaption != nil
@@ -414,7 +414,7 @@ struct AccountWidget: View {
     }
 
     private var accessibilitySummary: String {
-        var parts = ["\(model.title), \(model.centerPercent) percent"]
+        var parts = [String(localized: "\(model.title), \(model.centerPercent) percent")]
         if let caption = model.errorCaption, !caption.isEmpty {
             parts.append(caption)
         }

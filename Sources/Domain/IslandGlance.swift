@@ -46,7 +46,7 @@ struct IslandGlance: Equatable, Sendable {
     var level: Level
     /// Worst account, e.g. "work 72%".
     var leading: String?
-    /// "reauth N" when accounts need sign-in, else the worst window's reset countdown.
+    /// "needs sign-in" / "N need sign-in" when accounts need sign-in, else the worst window's reset countdown.
     var trailing: String?
     var accessibility: String
 
@@ -73,7 +73,7 @@ struct IslandGlance: Equatable, Sendable {
         let reset = total ? counted.compactMap(\.shortResetAt).filter { $0 > now }.min() : worst?.resetAt
         let trailing: String?
         if broken > 0 {
-            trailing = String(localized: "reauth \(broken)")
+            trailing = broken == 1 ? String(localized: "needs sign-in") : String(localized: "\(broken) need sign-in")
         } else if let reset {
             trailing = "↻ " + countdown(reset.timeIntervalSince(now))
         } else {

@@ -24,7 +24,7 @@ enum CodexAdapterError: Error, Equatable, LocalizedError {
 
               CODEX_HOME='\(codexHome)' codex login
 
-            Then choose Reauthenticate (or remove and re-add).
+            Then choose Sign in again (or remove and re-add).
             """
         case .credentialsMissing(let codexHome):
             return """

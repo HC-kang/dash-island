@@ -190,8 +190,8 @@ actor LocalUsageArchive {
             if loaded[key] == nil { loaded[key] = Archive() }
         }
         return Snapshot(events: Array(loaded[key]!.events.values), notice: unreadable.contains(key)
-            ? "Saved history could not be read. Original file preserved."
-            : (loaded[key]!.incompleteFiles.isEmpty ? nil : "Some local records could not be included."))
+            ? String(localized: "Saved history could not be read. Original file preserved.")
+            : (loaded[key]!.incompleteFiles.isEmpty ? nil : String(localized: "Some local records could not be included.")))
     }
 
     func refresh(provider: String, roots: [URL], scope: String? = nil, now: Date = Date()) -> Snapshot {
@@ -265,16 +265,16 @@ actor LocalUsageArchive {
             changed = true
         }
         // ponytail: one atomic JSON archive per provider, rewritten only when something changed; switch to SQLite if retained metadata becomes large.
-        var notice: String? = readError || !archive.incompleteFiles.isEmpty ? "Some local records could not be included." : nil
+        var notice: String? = readError || !archive.incompleteFiles.isEmpty ? String(localized: "Some local records could not be included.") : nil
         if unreadable.contains(key) {
-            notice = "Saved history could not be read. Original file preserved."
+            notice = String(localized: "Saved history could not be read. Original file preserved.")
         } else if changed {
             do {
                 try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                 let file = directory.appendingPathComponent("\(key).json")
                 try JSONEncoder().encode(archive).write(to: file, options: [.atomic])
                 try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-            } catch { notice = "History could not be saved. Current readings are still shown." }
+            } catch { notice = String(localized: "History could not be saved. Current readings are still shown.") }
         }
         loaded[key] = archive
         return Snapshot(events: Array(archive.events.values), notice: notice)

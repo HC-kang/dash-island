@@ -25,7 +25,7 @@ enum GrokAdapterError: Error, Equatable, LocalizedError {
 
               GROK_HOME='\(grokHome)' grok login --oauth
 
-            Then choose Reauthenticate (or remove and re-add).
+            Then choose Sign in again (or remove and re-add).
             """
         case .credentialsMissing(let grokHome):
             return """
