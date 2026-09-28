@@ -203,3 +203,10 @@ Implemented from feature-benchmark-inventory:
 - Report: private artifact (link kept outside the repo). 73 findings (44 adversarially verified: 20 confirmed, 24 partial, 0 refuted; 4 final high: adapters-01 Agy add path, core-01 main-thread burn scan, ui-01 hover steals focus, ui-02 always-on 30fps rim glow).
 - Measured baseline: 201 tests pass (42 s), build 124 s, 3/3 e2e scripts pass (each recompiles all Sources, 48–263 s), idle CPU ≈5.9% real / ≈4.9% with 0 accounts, fetch success 99.7% over 6.45 h.
 - Biggest product gap vs market (CodexBar, codenotch, codex-island, Pulse, Codex Pulse variants): compact island shows no data; no threshold alerts; no ETA text; no Sparkle/CI. "Codex Pulse" is 11+ unrelated repos, not one product.
+
+### UI copy: re-auth wording and ko terms (2026-09-28)
+
+- Re-auth action is "Sign in again" (ko "다시 로그인"). Re-auth state is "needs sign-in" (ko "로그인 필요"). Do not add "reauth", "Reauthenticate", "reconnect", or "browser login" to UI copy. CLI commands stay as they are.
+- The widget caption button is "Sign in ›" (ko "다시 로그인 ›"). The 9pt mono cell fits about 14 characters.
+- Status wording is "Polling…" (capital P). The vendor name in UI is "Antigravity"; the vendor ID stays "agy".
+- ko terms: "아일랜드" for the island; "한도 주기" for a usage window (limit period); "창" only for a UI window; "조회 상태" for the fetch-status popover title ("Sources").
