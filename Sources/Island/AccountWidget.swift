@@ -414,7 +414,7 @@ struct AccountWidget: View {
     }
 
     private var accessibilitySummary: String {
-        var parts = ["\(model.title), \(model.centerPercent) percent"]
+        var parts = [String(localized: "\(model.title), \(model.centerPercent) percent")]
         if let caption = model.errorCaption, !caption.isEmpty {
             parts.append(caption)
         }

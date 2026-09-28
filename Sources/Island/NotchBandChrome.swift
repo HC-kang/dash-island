@@ -173,7 +173,7 @@ struct NotchBandChrome: View {
     }
 
     private func statusLabel(relativeTo now: Date) -> String {
-        if isLoading { return String(localized: "polling…") }
+        if isLoading { return String(localized: "Polling…") }
         if let updated = effectiveUpdated {
             return Self.relativeFormatter.localizedString(for: updated, relativeTo: now)
         }
@@ -322,8 +322,8 @@ private struct FetchStatusPopover: View {
                         .foregroundStyle(Color(red: 0.95, green: 0.78, blue: 0.35).opacity(0.85))
                 } else if let next = row.nextDueAt {
                     let label = next <= now
-                        ? "due now"
-                        : "next \(Self.relativeFormatter.localizedString(for: next, relativeTo: now))"
+                        ? String(localized: "due now")
+                        : String(localized: "next \(Self.relativeFormatter.localizedString(for: next, relativeTo: now))")
                     Text(label)
                         .font(.system(size: 9, weight: .regular, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.35))
@@ -343,8 +343,8 @@ private struct FetchStatusPopover: View {
 
     private func outcomeLabel(_ outcome: AccountFetchStatus.Outcome) -> String {
         switch outcome {
-        case .never: return "pending"
-        case .success: return "ok"
+        case .never: return String(localized: "pending")
+        case .success: return String(localized: "ok")
         case .failure(let msg): return msg
         }
     }

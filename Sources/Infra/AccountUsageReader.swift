@@ -134,13 +134,13 @@ enum AccountUsageReader {
                              now: Date = Date()) -> (accounts: [String: [LocalUsageEvent]], notice: String?) {
         let file = directory.appendingPathComponent("account-usage.sqlite")
         guard FileManager.default.fileExists(atPath: file.path) else {
-            return (accounts: [:], notice: "Account tracking is not connected yet.")
+            return (accounts: [:], notice: String(localized: "Account tracking is not connected yet."))
         }
         var pointer: OpaquePointer?
         guard sqlite3_open_v2(file.path, &pointer, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
               let db = pointer else {
             if let pointer { sqlite3_close(pointer) }
-            return (accounts: [:], notice: "Account history could not be read. Try again shortly.")
+            return (accounts: [:], notice: String(localized: "Account history could not be read. Try again shortly."))
         }
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 500)
@@ -150,7 +150,7 @@ enum AccountUsageReader {
         FROM usage_events WHERE provider=? AND timestamp>=? AND timestamp<=?
         """
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            return (accounts: [:], notice: "Account history format could not be read.")
+            return (accounts: [:], notice: String(localized: "Account history format could not be read."))
         }
         defer { sqlite3_finalize(statement) }
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -164,7 +164,7 @@ enum AccountUsageReader {
             if status == SQLITE_DONE { return (accounts: accounts, notice: nil) }
             guard status == SQLITE_ROW, let id = sqlite3_column_text(statement, 0), let model = sqlite3_column_text(statement, 2),
                   let identity = sqlite3_column_text(statement, 8) else {
-                return (accounts: accounts, notice: "Some account records could not be read.")
+                return (accounts: accounts, notice: String(localized: "Some account records could not be read."))
             }
             let tokens = UsageTokens(input: sqlite3_column_int64(statement, 3), output: sqlite3_column_int64(statement, 4),
                                      cacheWrite: sqlite3_column_int64(statement, 5), cacheRead: sqlite3_column_int64(statement, 6))

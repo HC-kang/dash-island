@@ -109,7 +109,7 @@ final class VendorStatusStore: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return .unknown(vendor: vendorLabel, reason: "status HTTP error")
+                return .unknown(vendor: vendorLabel, reason: String(localized: "status HTTP error"))
             }
             return parseStatuspage(
                 data: data,
@@ -118,7 +118,7 @@ final class VendorStatusStore: ObservableObject {
                 sourceURL: urlString
             )
         } catch {
-            return .unknown(vendor: vendorLabel, reason: "status unreachable")
+            return .unknown(vendor: vendorLabel, reason: String(localized: "status unreachable"))
         }
     }
 
@@ -131,12 +131,12 @@ final class VendorStatusStore: ObservableObject {
         now: Date = Date()
     ) -> VendorServiceSnapshot {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return .unknown(vendor: vendorLabel, reason: "status parse error")
+            return .unknown(vendor: vendorLabel, reason: String(localized: "status parse error"))
         }
 
         let overall = (obj["status"] as? [String: Any])
         let indicator = (overall?["indicator"] as? String)?.lowercased() ?? "none"
-        let description = (overall?["description"] as? String) ?? "Status unknown"
+        let description = (overall?["description"] as? String) ?? String(localized: "Status unknown")
 
         // Exact names only: substring matching pulled in "Ads API" and "Compliance API".
         let preferred = Set(preferredComponentNames.map { $0.lowercased() })
@@ -197,7 +197,7 @@ final class VendorStatusStore: ObservableObject {
         } else if levelFromIndicator(indicator) <= .operational {
             summary = "\(vendorLabel): \(description)"
         } else {
-            summary = "\(vendorLabel): no issue on used services (\(description) elsewhere)"
+            summary = "\(vendorLabel): " + String(localized: "no issue on used services (\(description) elsewhere)")
         }
         return VendorServiceSnapshot(
             level: level,
@@ -240,11 +240,11 @@ final class VendorStatusStore: ObservableObject {
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                   let xml = String(data: data, encoding: .utf8)
             else {
-                return .unknown(vendor: "xAI", reason: "status HTTP error")
+                return .unknown(vendor: "xAI", reason: String(localized: "status HTTP error"))
             }
             return parseXAIRSS(xml: xml, now: Date())
         } catch {
-            return .unknown(vendor: "xAI", reason: "status unreachable")
+            return .unknown(vendor: "xAI", reason: String(localized: "status unreachable"))
         }
     }
 
@@ -269,7 +269,7 @@ final class VendorStatusStore: ObservableObject {
         if openTitles.isEmpty {
             return VendorServiceSnapshot(
                 level: .operational,
-                summary: "xAI: no open incidents",
+                summary: "xAI: " + String(localized: "no open incidents"),
                 fetchedAt: now,
                 sourceURL: "https://status.x.ai"
             )

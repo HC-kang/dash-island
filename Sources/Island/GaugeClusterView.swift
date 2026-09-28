@@ -819,7 +819,7 @@ struct GaugeClusterView: View {
             }
             return
         }
-        let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? "this account"
+        let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? String(localized: "this account")
         // Do not sync here — `remove` presents a deferred confirm. Cancel leaves order
         // intact; confirm updates via AccountStore → widgets → baseOrder onChange.
         AccountChromeActions.remove(accountID: id, label: label)

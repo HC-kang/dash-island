@@ -50,7 +50,7 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
     func show(model: WidgetViewModel) {
         guard let window else { return }
         displayedAccountID = model.id
-        window.title = "\(model.title) usage"
+        window.title = String(localized: "\(model.title) usage")
         window.contentViewController = NSHostingController(rootView: UsageDetailView(initial: model).id(model.id))
         fadeToken += 1
         let wasVisible = window.isVisible && isOpen
@@ -340,7 +340,9 @@ private struct UsageDetailView: View {
             VendorLogoView(vendorID: provider, size: 25)
             VStack(alignment: .leading, spacing: 3) {
                 Text(model.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                Text([providerName, model.usageSnapshot?.plan?.capitalized].compactMap { $0 }.joined(separator: " · "))
+                // Antigravity reports its vendor id ("agy") as the plan; that is not a plan name.
+                Text([providerName, model.usageSnapshot?.plan.flatMap { $0.lowercased() == provider ? nil : $0.capitalized }]
+                        .compactMap { $0 }.joined(separator: " · "))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
@@ -648,11 +650,11 @@ private struct UsageDetailView: View {
                     Text(row.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(Self.tokens(row.tokens.total)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
+                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? String(localized: "Unpriced"))
                         .font(.system(size: 11)).lineLimit(1).frame(minWidth: 54, alignment: .trailing)
                 }.monospacedDigit().contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? "unpriced")")
+                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? String(localized: "unpriced"))")
                 .accessibilityValue(expandedModels.contains(row.id) ? "Expanded" : "Collapsed")
                 .accessibilityHint("Show input, output and cache tokens")
             GeometryReader { proxy in
@@ -672,7 +674,7 @@ private struct UsageDetailView: View {
         }
     }
 
-    private func tokenPart(_ label: String, _ value: Int64) -> some View {
+    private func tokenPart(_ label: LocalizedStringKey, _ value: Int64) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).foregroundStyle(.secondary)
             Text(Self.tokens(value)).monospacedDigit()

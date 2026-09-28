@@ -60,7 +60,7 @@ struct AgyAdapter: VendorAdapter {
                 try await runLogin(home: dir)
                 try await Self.verifyUsageAccess(home: dir)
                 let short = String(ref.prefix(8))
-                return AddAccountResult(vendorID: id, label: "Agy \(short)", credentialRef: ref)
+                return AddAccountResult(vendorID: id, label: "Antigravity \(short)", credentialRef: ref)
             } catch {
                 Self.clearManagedCredentials(home: dir)
                 try? CredentialStore.removeDirectory(for: ref)
