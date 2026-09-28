@@ -1,7 +1,7 @@
 // E2E pointer driver for the running Dash Island app. Coordinates for move/click
 // are relative to the island window's top-left; warp takes global points.
 // Usage: drive info | hover | away | move X Y | click X Y | rclick X Y |
-//        scroll DY | shot NAME [island|detail|screen] | warp X Y | wiggle v|h
+//        scroll DY | shot NAME [island|detail|screen] | warp X Y | gmove X Y | wiggle v|h | esc
 import AppKit
 
 let shotsDir = ProcessInfo.processInfo.environment["E2E_SHOTS"] ?? NSTemporaryDirectory() + "dash-e2e-shots"
@@ -68,6 +68,9 @@ case "shot":
     default: let i = island(); r = CGRect(x: i.minX + 180, y: i.minY, width: i.width - 360, height: 260)
     }
     shot(a[1], r)
+case "gmove":
+    // Global point, sent as a real mouse-move event (warp sends none).
+    post(.mouseMoved, CGPoint(x: Double(a[1])!, y: Double(a[2])!)); Thread.sleep(forTimeInterval: 0.6)
 case "warp":
     CGWarpMouseCursorPosition(CGPoint(x: Double(a[1])!, y: Double(a[2])!)); CGAssociateMouseAndMouseCursorPosition(1)
 case "wiggle":
@@ -78,5 +81,8 @@ case "wiggle":
         CGWarpMouseCursorPosition(vertical ? CGPoint(x: o.x, y: o.y + d) : CGPoint(x: o.x + d, y: o.y)); Thread.sleep(forTimeInterval: 0.05)
     }
     CGWarpMouseCursorPosition(o); CGAssociateMouseAndMouseCursorPosition(1)
+case "esc":
+    for down in [true, false] { CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: down)!.post(tap: .cghidEventTap) }
+    Thread.sleep(forTimeInterval: 0.5)
 default: fail("unknown command")
 }
