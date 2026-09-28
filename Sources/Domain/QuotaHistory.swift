@@ -30,4 +30,13 @@ struct QuotaHistory: Codable, Equatable, Sendable {
         let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
         return (samples[window] ?? []).filter { $0.at >= cutoff && $0.at <= now }
     }
+
+    /// The sample closest to `date`, or nil when none lies within `tolerance`
+    /// (a gap in the record reads as no value, not as a guess).
+    static func nearest(_ samples: [Sample], to date: Date, within tolerance: TimeInterval = 2 * bucket) -> Sample? {
+        guard let best = samples.min(by: { abs($0.at.timeIntervalSince(date)) < abs($1.at.timeIntervalSince(date)) }),
+              abs(best.at.timeIntervalSince(date)) <= tolerance
+        else { return nil }
+        return best
+    }
 }

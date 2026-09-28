@@ -279,3 +279,4 @@
 "24:00" = "24:00";
 "Dash Island" = "Dash Island";
 "Account identity unavailable. Sign in again to this account to reconnect tracking." = "계정 식별 정보가 없습니다. 추적을 다시 연결하려면 이 계정에 다시 로그인하세요.";
+"Last 7 days: %@" = "최근 7일: %@";

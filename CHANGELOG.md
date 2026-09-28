@@ -5,7 +5,7 @@ All notable user-facing changes. Format: [Keep a Changelog](https://keepachangel
 ## [Unreleased]
 
 ### Added
-- Detail panel: the account's second window (Claude weekly) gets its own 7-day chart under its bar; each chart has its own hover readout.
+- Detail panel: the 7-day chart shows every own window of the account in one Grafana-style chart (Claude: session and weekly), with a color per series, a legend with current values, and a crosshair tooltip that lists every series.
 
 ## [0.1.0] - 2026-09-28
 
