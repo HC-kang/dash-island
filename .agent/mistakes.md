@@ -237,3 +237,10 @@ Fixes:
 - Bug: `BurnSmoother.push` scaled the whole %-only jump by `wallDt/5m` → steady 5h cruise over 15m polls (+5%) read 3.0 redline.
 - Fix: inflate only one integer tick (`quantTick` 0.01): `r * (1 + (scale-1) * min(1, tick/du))`. +1%/15m policy unchanged (~0.57); cruise reads ~1.3. Monotonic in du.
 - (Needle base decision from this entry moved to decisions.md.)
+
+## Polish pass (2026-09-28)
+
+- An empty SwiftUI `Group` never appears, so its `.onAppear` never runs. The hover card's reset line did not load until it hung off a zero-size `Color.clear` anchor.
+- E2E runs failed when the user moved the mouse mid-run (tips missing, island not expanded). Wait for 15 s of pointer stillness, and check the pointer is still where the driver put it before trusting a screenshot.
+- `screencapture -v` starts late (up to ~2 s); start it well before the action, or the recording misses the transition.
+- In zsh, `$VAR` holding "x y" is one argument (no word split): pass it through `xargs`. Never name a shell function `end`.
