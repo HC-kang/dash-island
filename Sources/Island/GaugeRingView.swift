@@ -9,7 +9,7 @@ import SwiftUI
 /// Burn motion (Apple-instrument language via `BurnMotion`):
 /// quiet at rest → soft trail + micro-wobble at cruise → warm bloom past cruise.
 /// No strobe, bounce, or rainbow — continuous energy only.
-struct GaugeRingView: View {
+struct GaugeRingView: View, Animatable {
     var primaryFraction: Double
     /// Estimated end of the primary ring between API samples. Drawn as a faint,
     /// hollow extension so an estimate never reads as a vendor measurement.
@@ -26,6 +26,17 @@ struct GaugeRingView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.islandMotion) private var islandMotion
+
+    /// Ring fills interpolate when the caller animates a new reading. A ring
+    /// that is absent in the new reading stays absent.
+    var animatableData: AnimatablePair<Double, AnimatablePair<Double, Double>> {
+        get { AnimatablePair(primaryFraction, AnimatablePair(secondaryFraction ?? 0, tertiaryFraction ?? 0)) }
+        set {
+            primaryFraction = newValue.first
+            if secondaryFraction != nil { secondaryFraction = newValue.second.first }
+            if tertiaryFraction != nil { tertiaryFraction = newValue.second.second }
+        }
+    }
 
     private var brand: Color { tint.brandColor }
     private var steel: Color { Color(red: 0.23, green: 0.40, blue: 0.50) } // ~#3a6580
@@ -84,6 +95,7 @@ struct GaugeRingView: View {
 
             VStack(spacing: 1) {
                 Text("\(centerPercent)")
+                    .modifier(NumericRoll(value: centerPercent))
                     .font(.system(size: size * 0.177, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color(white: 0.96))
                     .tracking(-0.4)
@@ -259,7 +271,7 @@ struct GaugeRingView: View {
                 angleDeg: deg,
                 innerR: innerR,
                 outerR: outerR,
-                color: Color(red: 0.97, green: 0.44, blue: 0.44).opacity(0.38 + od * 0.18),
+                color: IslandColor.critical.opacity(0.38 + od * 0.18),
                 width: 1.05 * scale
             )
         }
@@ -513,6 +525,19 @@ extension VendorTint {
         case .grok: return IslandColor.grok
         case .agy: return IslandColor.agy
         case .neutral: return Color(red: 0.75, green: 0.72, blue: 0.68)
+        }
+    }
+}
+
+/// Digits roll to a new reading (macOS 14+); older systems swap the text.
+private struct NumericRoll: ViewModifier {
+    var value: Int
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14, *) {
+            content.contentTransition(.numericText(value: Double(value)))
+        } else {
+            content
         }
     }
 }

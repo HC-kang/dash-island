@@ -26,127 +26,12 @@ struct PrefsSheet: View {
 
             hairline
 
-            VStack(alignment: .leading, spacing: 18) {
-                prefBlock(title: "DISPLAY MODE") {
-                    segmented(
-                        selection: $preferences.displayMode,
-                        options: [
-                            (.used, "Used"),
-                            (.remaining, "Remaining")
-                        ]
-                    )
-                }
-
-                prefBlock(title: "COST") {
-                    segmented(
-                        selection: $preferences.displayCurrency,
-                        options: [(.usd, "USD"), (.krw, "KRW")]
-                    )
-                    Text("API-equivalent estimates. KRW uses a daily rate from open.er-api.com, fetched only while KRW is selected.")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.40))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .onChange(of: preferences.displayCurrency) { currency in
-                    if currency == .krw { ExchangeRateStore.shared.refreshIfNeeded() }
-                }
-
-                prefBlock(title: "RIM") {
-                    rimSwatches(selection: $preferences.rimAccent)
-                    Text("Neon edge glow (compact + expanded).")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.40))
-                }
-
-                prefBlock(title: "AT A GLANCE") {
-                    prefToggle("Warning color on the rim", isOn: $preferences.glanceRim)
-                    HStack {
-                        Text("Usage beside the notch")
-                            .font(Typography.settingsRow)
-                            .foregroundStyle(.white.opacity(0.88))
-                        Spacer()
-                        Picker("Usage beside the notch", selection: $preferences.glanceEarsMode) {
-                            Text("Auto").tag(IslandGlance.EarsMode.auto)
-                            Text("Always").tag(IslandGlance.EarsMode.always)
-                            Text("Never").tag(IslandGlance.EarsMode.never)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 170)
-                    }
-                    prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
-                    Text("Left ear: total across accounts of")
-                        .font(Typography.settingsRow)
-                        .foregroundStyle(.white.opacity(0.88))
-                    HStack(spacing: 12) {
-                        ForEach([("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"), ("agy", "Agy")], id: \.0) { id, name in
-                            Toggle(name, isOn: Binding(
-                                get: { preferences.glanceTotalVendors.contains(id) },
-                                set: { on in
-                                    var next = preferences.glanceTotalVendors.filter { $0 != id }
-                                    if on { next.append(id) }
-                                    preferences.glanceTotalVendors = next
-                                }
-                            ))
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 11))
-                        }
-                    }
-                    Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left ear sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.40))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                prefBlock(title: "SCREEN") {
-                    screenPicker
-                    Text("Auto: notched if available. Follow cursor: island hops to the display under the mouse. Or pin a specific screen.")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.40))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                prefBlock(title: "UPDATES") {
-                    Text("Busy accounts every 1m, idle ones every 15m · fresh data when you expand the island.")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                prefBlock(title: "GENERAL") {
-                    HStack {
-                        Text("Launch at Login")
-                            .font(Typography.settingsRow)
-                            .foregroundStyle(.white.opacity(0.88))
-                        Spacer()
-                        Toggle("Launch at Login", isOn: Binding(
-                            get: { launchAtLogin.isEnabled },
-                            set: { launchAtLogin.setEnabled($0) }
-                        ))
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .labelsHidden()
-                        .tint(IslandColor.liveTeal)
-                    }
-
-                    Button {
-                        UsageOrchestrator.shared.refresh()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text("Refresh all accounts now")
-                                .font(Typography.settingsRow)
-                        }
-                        .foregroundStyle(.white.opacity(0.85))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                }
+            // Short screens: the settings scroll; the header and Quit stay put.
+            ViewThatFits(in: .vertical) {
+                settingsBlocks
+                ScrollView(.vertical) { settingsBlocks }
+                    .scrollIndicators(.never)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
 
             hairline
 
@@ -156,7 +41,7 @@ struct PrefsSheet: View {
                     NSApp.terminate(nil)
                 }
                 .font(Typography.settingsRow)
-                .foregroundStyle(Color(red: 1, green: 0.55, blue: 0.52).opacity(0.9))
+                .foregroundStyle(IslandColor.critical.opacity(0.9))
                 .buttonStyle(.plain)
                 Spacer()
             }
@@ -165,11 +50,136 @@ struct PrefsSheet: View {
             .padding(.bottom, 16)
         }
         .frame(width: 340)
-        .fixedSize(horizontal: true, vertical: true)
+        .fixedSize(horizontal: true, vertical: false)
         .background(Color.black)
         .preferredColorScheme(.dark)
         .onAppear { launchAtLogin.refresh() }
     }
+
+    private var settingsBlocks: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            prefBlock(title: "DISPLAY MODE") {
+                segmented(
+                    selection: $preferences.displayMode,
+                    options: [
+                        (.used, "Used"),
+                        (.remaining, "Remaining")
+                    ]
+                )
+            }
+
+            prefBlock(title: "COST") {
+                segmented(
+                    selection: $preferences.displayCurrency,
+                    options: [(.usd, "USD"), (.krw, "KRW")]
+                )
+                Text("API-equivalent estimates. KRW uses a daily rate from open.er-api.com, fetched only while KRW is selected.")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .onChange(of: preferences.displayCurrency) { currency in
+                if currency == .krw { ExchangeRateStore.shared.refreshIfNeeded() }
+            }
+
+            prefBlock(title: "RIM") {
+                rimSwatches(selection: $preferences.rimAccent)
+                Text("Neon edge glow (compact + expanded).")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.40))
+            }
+
+            prefBlock(title: "AT A GLANCE") {
+                prefToggle("Warning color on the rim", isOn: $preferences.glanceRim)
+                HStack {
+                    Text("Usage beside the notch")
+                        .font(Typography.settingsRow)
+                        .foregroundStyle(.white.opacity(0.88))
+                    Spacer()
+                    Picker("Usage beside the notch", selection: $preferences.glanceEarsMode) {
+                        Text("Auto").tag(IslandGlance.EarsMode.auto)
+                        Text("Always").tag(IslandGlance.EarsMode.always)
+                        Text("Never").tag(IslandGlance.EarsMode.never)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 170)
+                }
+                prefToggle("Notify at 80% and 95%", isOn: $preferences.alertNotifications)
+                Text("Beside the notch: total across accounts of")
+                    .font(Typography.settingsRow)
+                    .foregroundStyle(.white.opacity(0.88))
+                HStack(spacing: 12) {
+                    ForEach([("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"), ("agy", "Antigravity")], id: \.0) { id, name in
+                        Toggle(name, isOn: Binding(
+                            get: { preferences.glanceTotalVendors.contains(id) },
+                            set: { on in
+                                var next = preferences.glanceTotalVendors.filter { $0 != id }
+                                if on { next.append(id) }
+                                preferences.glanceTotalVendors = next
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                    }
+                }
+                Text("Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left side of the notch sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit.")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            prefBlock(title: "SCREEN") {
+                screenPicker
+                Text("Auto: notched if available. Follow cursor: island hops to the display under the mouse. Or pin a specific screen.")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            prefBlock(title: "UPDATES") {
+                Text("Busy accounts every 1m, idle ones every 15m · fresh data when you expand the island.")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            prefBlock(title: "GENERAL") {
+                HStack {
+                    Text("Launch at Login")
+                        .font(Typography.settingsRow)
+                        .foregroundStyle(.white.opacity(0.88))
+                    Spacer()
+                    Toggle("Launch at Login", isOn: Binding(
+                        get: { launchAtLogin.isEnabled },
+                        set: { launchAtLogin.setEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    .tint(IslandColor.liveTeal)
+                }
+
+                Button {
+                    UsageOrchestrator.shared.refresh()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Refresh all accounts now")
+                            .font(Typography.settingsRow)
+                    }
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
 
     private var screenPicker: some View {
         let displays = DisplayInfo.all()
@@ -194,8 +204,8 @@ struct PrefsSheet: View {
                     return false
                 }()
                 let badge = [
-                    info.isBuiltin ? "Built-in" : "External",
-                    info.hasNotch ? "notch" : nil
+                    info.isBuiltin ? String(localized: "Built-in") : String(localized: "External"),
+                    info.hasNotch ? String(localized: "notch") : nil
                 ].compactMap { $0 }.joined(separator: " · ")
                 screenRow(
                     title: info.name,

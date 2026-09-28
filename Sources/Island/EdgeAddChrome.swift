@@ -159,7 +159,7 @@ enum AccountChromeActions {
         activateForUI()
         guard let adapter = VendorRegistry.adapter(for: account.vendorID) else {
             presentAlert(
-                title: "Reauthenticate",
+                title: "Sign in again",
                 message: String(localized: "No adapter for vendor “\(account.vendorID)”.")
             )
             return
@@ -180,7 +180,7 @@ enum AccountChromeActions {
             await previous?.value
             guard !Task.isCancelled else { return }
             IslandDialogController.shared.showProgress(
-                title: "Reauthenticate",
+                title: "Sign in again",
                 message: message,
                 vendorID: adapter.id,
                 onCancel: {
@@ -205,7 +205,7 @@ enum AccountChromeActions {
                 // ignored
             } catch {
                 if !Task.isCancelled {
-                    presentAlert(title: "Reauthenticate failed", message: error.localizedDescription)
+                    presentAlert(title: "Couldn’t sign in again", message: error.localizedDescription)
                 }
             }
         }

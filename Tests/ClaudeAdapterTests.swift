@@ -964,7 +964,7 @@ enum ClaudeAdapterSuite {
         failures += check("pending refresh is soft with no red caption; only a dead refresh path demands reconnect") {
             try assertEqual(UsageSnapshotMerge.failureKind(.unavailable("refresh pending")), .soft)
             try assertTrue(UsageOrchestrator.caption(for: .unavailable("refresh pending"), vendorID: "claude") == nil)
-            try assertEqual(UsageOrchestrator.caption(for: .authRequired, vendorID: "claude"), "reconnect account")
+            try assertEqual(UsageOrchestrator.caption(for: .authRequired, vendorID: "claude"), "needs sign-in")
         }
         return failures
     }

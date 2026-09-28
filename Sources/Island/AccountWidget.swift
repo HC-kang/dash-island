@@ -3,6 +3,7 @@ import SwiftUI
 /// Square account cell: gauge + label + independent hover tips
 /// (body usage · status chip · warning caption — like the status light).
 struct AccountWidget: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let model: WidgetViewModel
     var isDragging: Bool = false
     var isDropTarget: Bool = false
@@ -44,13 +45,19 @@ struct AccountWidget: View {
                         phaseOffset: BurnMotion.phaseOffset(for: model.id)
                     )
                     .opacity(model.isAwaitingFirstSample ? 0.22 : 1)
+                    // A new reading sweeps the rings instead of snapping.
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.6), value: model.primaryFraction)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.6), value: model.secondaryFraction)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.6), value: model.tertiaryFraction)
 
                     if model.isAwaitingFirstSample {
                         ProgressView()
                             .controlSize(.small)
                             .colorScheme(.dark)
+                            .transition(.opacity)
                     }
                 }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: model.isAwaitingFirstSample)
                 .frame(width: Self.gaugeSize, height: Self.gaugeSize)
 
                 // 10pt / 62%: 8pt at 42% was unreadable on 1x displays (ui-11).
@@ -163,7 +170,7 @@ struct AccountWidget: View {
                 AccountChromeActions.rename(accountID: a.id, currentLabel: a.label)
             }
         }
-        .accessibilityAction(named: "Reauthenticate") {
+        .accessibilityAction(named: "Sign in again") {
             if let a = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
                 AccountChromeActions.reauthenticate(account: a)
             }
@@ -183,7 +190,7 @@ struct AccountWidget: View {
             Button("Rename…") {
                 AccountChromeActions.rename(accountID: account.id, currentLabel: account.label)
             }
-            Button("Reauthenticate") {
+            Button("Sign in again") {
                 AccountChromeActions.reauthenticate(account: account)
             }
             Divider()
@@ -236,7 +243,7 @@ struct AccountWidget: View {
                 green: 1.0 * (1 - w) + 0.48 * w,
                 blue: 1.0 * (1 - w) + 0.42 * w
             )
-        let warmAccent = Color(red: 0.97, green: 0.48, blue: 0.42)
+        let warmAccent = IslandColor.critical
 
         return RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(
@@ -290,16 +297,13 @@ struct AccountWidget: View {
             if model.needsReauth, let account = AccountStore.shared.accounts.first(where: { $0.id == model.id }) {
                 // A truncated "reauth: codex log…" told users what to type; offer the action.
                 Button { AccountChromeActions.reauthenticate(account: account) } label: {
-                    captionLabel("Reauthenticate ›", isError: true)
+                    captionLabel(String(localized: "Sign in ›"), isError: true)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Reauthenticate \(account.label)")
+                .accessibilityLabel("Sign in again to \(account.label)")
             } else {
-                TimelineView(.periodic(from: .now, by: 15)) { context in
-                    let isError = model.errorCaption != nil
-                    let text = liveShortCaption(now: context.date)
-                    captionLabel(text, isError: isError)
-                }
+                // The age lives in the caption card: the cell fits ~14 characters.
+                captionLabel(model.errorCaption ?? model.noticeCaption ?? "", isError: model.errorCaption != nil)
             }
         } else {
             Color.clear
@@ -307,23 +311,16 @@ struct AccountWidget: View {
         }
     }
 
-    /// `rate limited · 3m` when we know the last poll time.
-    private func liveShortCaption(now: Date) -> String {
-        let base = model.errorCaption ?? model.noticeCaption ?? ""
-        guard let checked = model.lastCheckedAt else { return base }
-        let age = UsageOrchestrator.formatCompactAge(since: checked, now: now)
-        return "\(base) · \(age)"
-    }
-
     private func captionLabel(_ text: String, isError: Bool) -> some View {
         Text(text)
             .font(.system(size: 9, weight: .medium, design: .monospaced))
             .foregroundStyle(
                 isError
-                    ? Color(red: 0.97, green: 0.44, blue: 0.44).opacity(captionHovered ? 1 : 0.85)
-                    : Color(red: 0.95, green: 0.78, blue: 0.35).opacity(captionHovered ? 1 : 0.9)
+                    ? IslandColor.critical.opacity(captionHovered ? 1 : 0.85)
+                    : IslandColor.warning.opacity(captionHovered ? 1 : 0.9)
             )
             .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .truncationMode(.tail)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
@@ -372,11 +369,11 @@ struct AccountWidget: View {
     private var statusDotColor: Color {
         switch model.health {
         case .ok:
-            return Color(red: 0.30, green: 0.82, blue: 0.50) // soft green
+            return IslandColor.ok // soft green
         case .warn:
-            return Color(red: 0.95, green: 0.78, blue: 0.28)
+            return IslandColor.warning
         case .error:
-            return Color(red: 0.97, green: 0.40, blue: 0.40)
+            return IslandColor.critical
         }
     }
 
@@ -394,27 +391,19 @@ struct AccountWidget: View {
                     .foregroundStyle(Color(white: 0.92))
                 ForEach(Array(timing.enumerated()), id: \.offset) { _, line in
                     Text(line)
-                        .font(.system(size: 9, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.62))
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.72))
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
-            )
+            .background(AccountHoverTips.tipBackground())
             .fixedSize()
         }
     }
 
     private var accessibilitySummary: String {
-        var parts = ["\(model.title), \(model.centerPercent) percent"]
+        var parts = [String(localized: "\(model.title), \(model.centerPercent) percent")]
         if let caption = model.errorCaption, !caption.isEmpty {
             parts.append(caption)
         }

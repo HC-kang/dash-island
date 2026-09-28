@@ -23,7 +23,7 @@ enum UnavailableReason: Equatable, Sendable {
 
     init(message: String) {
         let lower = message.lowercased()
-        if ["setup-token", "user:profile", "need browser", "reauthenticate", "invalid_grant", "token family"]
+        if ["setup-token", "user:profile", "need browser", "reauthenticate", "sign in again", "invalid_grant", "token family"]
             .contains(where: lower.contains)
         {
             self = .needsLogin
@@ -78,7 +78,7 @@ enum UsageSnapshotMerge {
             case .needsLogin, .temporary: return String(localized: "stale · temporary (last-good rings)")
             }
         case .authRequired:
-            return String(localized: "reconnect this account")
+            return String(localized: "needs sign-in")
         }
     }
 

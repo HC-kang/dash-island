@@ -195,6 +195,9 @@ struct GaugeClusterView: View {
                                 .zIndex(100)
                         }
                     }
+                    // Snapping to and off the trash springs; plain drag updates
+                    // do not change this value, so they stay 1:1 with the pointer.
+                    .animation(.spring(response: 0.22, dampingFraction: 0.8), value: magnetizedToTrash)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
                     .onAppear {
                         if abs(geo.size.width - bandWidth) > 0.5 {
@@ -600,7 +603,7 @@ struct GaugeClusterView: View {
     private var trashTarget: some View {
         ZStack {
             Circle()
-                .fill(Color.red.opacity(magnetizedToTrash ? 0.62 : 0.28))
+                .fill(IslandColor.critical.opacity(magnetizedToTrash ? 0.62 : 0.28))
                 .frame(
                     width: magnetizedToTrash ? 54 : Self.trashSize,
                     height: magnetizedToTrash ? 54 : Self.trashSize
@@ -616,7 +619,7 @@ struct GaugeClusterView: View {
                 .font(.system(size: magnetizedToTrash ? 20 : 16, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
         }
-        .shadow(color: Color.red.opacity(magnetizedToTrash ? 0.55 : 0.28), radius: magnetizedToTrash ? 14 : 8)
+        .shadow(color: IslandColor.critical.opacity(magnetizedToTrash ? 0.55 : 0.28), radius: magnetizedToTrash ? 14 : 8)
         .allowsHitTesting(false)
         .accessibilityLabel("Remove account")
     }
@@ -819,7 +822,7 @@ struct GaugeClusterView: View {
             }
             return
         }
-        let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? "this account"
+        let label = AccountStore.shared.accounts.first(where: { $0.id == id })?.label ?? String(localized: "this account")
         // Do not sync here — `remove` presents a deferred confirm. Cancel leaves order
         // intact; confirm updates via AccountStore → widgets → baseOrder onChange.
         AccountChromeActions.remove(accountID: id, label: label)
@@ -1027,10 +1030,10 @@ enum DemoWidgets {
             hoverWindows: [
                 HoverWindowLine(label: "wk", usage: "9%", resetAt: Date().addingTimeInterval(6 * 86_400))
             ],
-            errorCaption: "reauth: codex login",
+            errorCaption: "needs sign-in",
             isAwaitingFirstSample: false,
             health: .error,
-            healthTooltip: "reauth: codex login"
+            healthTooltip: "needs sign-in"
         ),
     ]
 }

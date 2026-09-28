@@ -19,7 +19,7 @@ enum AccountHealth: Equatable, Sendable {
     /// Short hover string (English, monospaced-friendly).
     var defaultLabel: String {
         switch self {
-        case .ok: return "ok"
+        case .ok: return String(localized: "ok")
         case .warn: return String(localized: "warning")
         case .error: return String(localized: "error")
         }
@@ -62,7 +62,7 @@ enum AccountHealth: Equatable, Sendable {
             switch error {
             case .authRequired:
                 health = maxHealth(health, .error)
-                parts.append(authCaption ?? String(localized: "auth required"))
+                parts.append(authCaption ?? String(localized: "needs sign-in"))
             case .rateLimited:
                 health = maxHealth(health, .warn)
                 parts.append(String(localized: "rate limited"))
@@ -86,7 +86,7 @@ enum AccountHealth: Equatable, Sendable {
             if let service, service.level == .operational {
                 return (.ok, service.summary)
             }
-            return (.ok, "ok")
+            return (.ok, String(localized: "ok"))
         }
         // Prefer a single readable line; join if both service + account speak.
         let tip = parts.joined(separator: " · ")
@@ -132,7 +132,7 @@ struct VendorServiceSnapshot: Equatable, Sendable {
     var fetchedAt: Date
     var sourceURL: String
 
-    static func unknown(vendor: String, reason: String = "status unavailable") -> VendorServiceSnapshot {
+    static func unknown(vendor: String, reason: String = String(localized: "status unavailable")) -> VendorServiceSnapshot {
         VendorServiceSnapshot(
             level: .unknown,
             summary: "\(vendor): \(reason)",
@@ -187,13 +187,13 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     /// Corner status light.
     var health: AccountHealth = .ok
     /// Hover text for the status light.
-    var healthTooltip: String = "ok"
+    var healthTooltip: String = String(localized: "ok")
     /// Estimated primary ring end between API samples, after display-mode mapping.
     /// Drawn as a faint extension, never as the centre number — it is a hint built
     /// from locally captured calls, not a vendor reading. Nil when we cannot build
     /// one, which is the normal state right after a poll.
     var projectedPrimaryFraction: Double? = nil
-    /// Credentials were rejected; the caption becomes a Reauthenticate action.
+    /// Credentials were rejected; the caption becomes a "Sign in ›" action.
     var needsReauth: Bool = false
 
     /// Flat strings for accessibility / demos.

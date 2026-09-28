@@ -50,7 +50,7 @@ final class UsageDetailPanel: NSWindowController, NSWindowDelegate {
     func show(model: WidgetViewModel) {
         guard let window else { return }
         displayedAccountID = model.id
-        window.title = "\(model.title) usage"
+        window.title = String(localized: "\(model.title) usage")
         window.contentViewController = NSHostingController(rootView: UsageDetailView(initial: model).id(model.id))
         fadeToken += 1
         let wasVisible = window.isVisible && isOpen
@@ -176,6 +176,8 @@ private struct UsageDetailView: View {
     @ObservedObject private var resets = LimitResetCenter.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
+    /// Pointer x over the 7-day chart, nil when away.
+    @State private var trendProbe: CGFloat?
     @State private var expandedModels: Set<String> = []
     @State private var moreBelow = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -236,7 +238,7 @@ private struct UsageDetailView: View {
         }
         .background(Color(white: 0.045))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         .colorScheme(.dark)
         .tint(accent)
         .onAppear {
@@ -340,7 +342,9 @@ private struct UsageDetailView: View {
             VendorLogoView(vendorID: provider, size: 25)
             VStack(alignment: .leading, spacing: 3) {
                 Text(model.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                Text([providerName, model.usageSnapshot?.plan?.capitalized].compactMap { $0 }.joined(separator: " · "))
+                // Antigravity reports its vendor id ("agy") as the plan; that is not a plan name.
+                Text([providerName, model.usageSnapshot?.plan.flatMap { $0.lowercased() == provider ? nil : $0.capitalized }]
+                        .compactMap { $0 }.joined(separator: " · "))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
@@ -362,7 +366,7 @@ private struct UsageDetailView: View {
         if let service = vendorStatus.byVendor[provider], service.level >= .degraded {
             Label(service.summary, systemImage: service.level == .outage ? "bolt.horizontal.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(service.level == .outage ? Color.red : Color.orange)
+                .foregroundStyle(service.level == .outage ? IslandColor.critical : IslandColor.warning)
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
@@ -402,7 +406,7 @@ private struct UsageDetailView: View {
             if LimitResetCenter.resetter(for: provider) != nil { resetRow }
             if let error = model.errorCaption {
                 Label(error, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11)).foregroundStyle(Color.orange)
+                    .font(.system(size: 11)).foregroundStyle(IslandColor.warning)
             }
             ForEach([model.paceLine(now: Date())].compactMap { $0 }, id: \.self) { line in
                 Label(line, systemImage: "gauge.with.dots.needle.33percent")
@@ -428,6 +432,8 @@ private struct UsageDetailView: View {
     }
 
     /// Seven days of the headline window from QuotaHistory, in the display mode.
+    /// Day lines at local midnight with weekday labels, a 0/50/100% scale, and a
+    /// hover readout.
     @ViewBuilder
     private func trend(_ window: WindowUsage) -> some View {
         let now = Date()
@@ -435,46 +441,112 @@ private struct UsageDetailView: View {
         let points = (quotaHistory.byAccount[initial.id] ?? QuotaHistory())
             .series(window: window.displayLabel, days: 7, now: now)
         if points.count >= 2 {
-            VStack(alignment: .leading, spacing: 4) {
+            let gutter: CGFloat = 30
+            let plotH: CGFloat = 64
+            let days = Self.dayStarts(from: now.addingTimeInterval(-span), to: now)
+            VStack(alignment: .leading, spacing: 3) {
                 GeometryReader { g in
+                    let w = g.size.width - gutter
+                    let xAt: (Date) -> CGFloat = { gutter + w * CGFloat(1 - now.timeIntervalSince($0) / span) }
                     let xy: (QuotaHistory.Sample) -> CGPoint = { p in
-                        let x = g.size.width * CGFloat(1 - now.timeIntervalSince(p.at) / span)
                         let v = showsUsed ? p.used : 1 - p.used
-                        return CGPoint(x: x, y: g.size.height * CGFloat(1 - v))
+                        return CGPoint(x: xAt(p.at), y: plotH * CGFloat(1 - v))
                     }
                     let line = Path { path in
                         path.move(to: xy(points[0]))
                         for p in points.dropFirst() { path.addLine(to: xy(p)) }
                     }
-                    ZStack {
-                        Path { p in
-                            p.move(to: CGPoint(x: 0, y: g.size.height / 2))
-                            p.addLine(to: CGPoint(x: g.size.width, y: g.size.height / 2))
+                    ZStack(alignment: .topLeading) {
+                        // Percent scale.
+                        ForEach([1.0, 0.5, 0.0], id: \.self) { v in
+                            let y = plotH * CGFloat(1 - v)
+                            Path { p in
+                                p.move(to: CGPoint(x: gutter, y: y))
+                                p.addLine(to: CGPoint(x: g.size.width, y: y))
+                            }
+                            .stroke(Color.white.opacity(v == 0 ? 0.12 : 0.06),
+                                    style: StrokeStyle(lineWidth: 1, dash: v == 0 ? [] : [3, 3]))
+                            Text("\(Int(v * 100))%")
+                                .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                                .frame(width: gutter - 4, alignment: .trailing)
+                                .position(x: (gutter - 4) / 2, y: y)
                         }
-                        .stroke(Color.white.opacity(0.06), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        // Day lines at local midnight.
+                        ForEach(days, id: \.self) { day in
+                            Path { p in
+                                p.move(to: CGPoint(x: xAt(day), y: 0))
+                                p.addLine(to: CGPoint(x: xAt(day), y: plotH + 4))
+                            }
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        }
                         Path { p in
                             p.addPath(line)
-                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: g.size.height))
-                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: g.size.height))
+                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: plotH))
+                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: plotH))
                             p.closeSubpath()
                         }
                         .fill(accent.opacity(0.14))
                         line.stroke(accent.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
-                        let end = xy(points[points.count - 1])
-                        Circle().fill(accent).frame(width: 5, height: 5).position(end)
+                        Circle().fill(accent).frame(width: 5, height: 5).position(xy(points[points.count - 1]))
+                        // Weekday under the middle of each day that has room.
+                        ForEach(Self.daySegments(days: days, from: now.addingTimeInterval(-span), to: now), id: \.start) { seg in
+                            let x0 = xAt(seg.start), x1 = xAt(seg.end)
+                            if x1 - x0 >= 22 {
+                                Text(seg.start.formatted(Date.FormatStyle(locale: .ui).weekday(.abbreviated)))
+                                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                                    .position(x: (x0 + x1) / 2, y: plotH + 11)
+                            }
+                        }
+                        if let probe = trendProbe, probe >= gutter {
+                            let at = now.addingTimeInterval(-span * Double(1 - (probe - gutter) / w))
+                            if let sample = points.min(by: { abs($0.at.timeIntervalSince(at)) < abs($1.at.timeIntervalSince(at)) }) {
+                                let p = xy(sample)
+                                Path { path in
+                                    path.move(to: CGPoint(x: p.x, y: 0))
+                                    path.addLine(to: CGPoint(x: p.x, y: plotH))
+                                }
+                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                Circle().fill(accent).frame(width: 5, height: 5).position(p)
+                                let v = showsUsed ? sample.used : 1 - sample.used
+                                Text("\(sample.at.formatted(Date.FormatStyle(locale: .ui).weekday(.abbreviated).hour().minute())) · \(Int((v * 100).rounded()))%")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color(white: 0.16)))
+                                    .fixedSize()
+                                    .position(x: min(max(p.x, gutter + 60), g.size.width - 60), y: -10)
+                            }
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        if case .active(let loc) = phase { trendProbe = loc.x } else { trendProbe = nil }
                     }
                 }
-                .frame(height: 36)
-                HStack {
-                    Text("7 days ago")
-                    Spacer()
-                    Text("now")
-                }
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .frame(height: plotH + 18)
             }
+            .padding(.top, 14)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(window.displayLabel) over the last 7 days")
         }
+    }
+
+    /// Local midnights strictly inside (from, to].
+    static func dayStarts(from: Date, to: Date, calendar: Calendar = .current) -> [Date] {
+        var out: [Date] = []
+        var day = calendar.startOfDay(for: from)
+        while let next = calendar.date(byAdding: .day, value: 1, to: day), next <= to {
+            out.append(next)
+            day = next
+        }
+        return out
+    }
+
+    struct DaySegment { var start: Date; var end: Date }
+
+    /// Day spans between midnights, clipped to the window; the first starts at `from`.
+    static func daySegments(days: [Date], from: Date, to: Date) -> [DaySegment] {
+        let edges = [from] + days + [to]
+        return zip(edges, edges.dropFirst()).map { DaySegment(start: $0, end: $1) }
     }
 
     /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).
@@ -557,17 +629,17 @@ private struct UsageDetailView: View {
                         modelRow(row, total: summary.tokens.total)
                     }
                     if summary.models.count > 3 {
-                        Button(showAll ? "Show less" : "Show all \(summary.models.count) models") { showAll.toggle() }
+                        Button(showAll ? "Show less" : "Show all \(summary.models.count) models") { withAnimation(.easeOut(duration: 0.2)) { showAll.toggle() } }
                             .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(accent)
                     }
                 }
             }
             VStack(alignment: .leading, spacing: 5) {
                 if let notice = local.snapshots[sourceKey]?.notice {
-                    Text(notice).foregroundStyle(Color.orange)
+                    Text(notice).foregroundStyle(IslandColor.warning)
                 }
                 if summary.unpricedTokens > 0 {
-                    Text("\(Self.tokens(summary.unpricedTokens)) tokens have no model price.").foregroundStyle(Color.orange)
+                    Text("\(Self.tokens(summary.unpricedTokens)) tokens have no model price.").foregroundStyle(IslandColor.warning)
                 }
                 Text(liveTracking ? "Attributed by the account ID reported with each call. Earlier unlinked history is excluded."
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
@@ -578,10 +650,10 @@ private struct UsageDetailView: View {
                             .foregroundStyle(Color.secondary)
                     } else {
                         Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
-                            .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
+                            .foregroundStyle(health.state == .active ? Color.secondary : IslandColor.warning)
                     }
                     if case .failed(let reason) = collector.status {
-                        Text(reason).foregroundStyle(Color.orange)
+                        Text(reason).foregroundStyle(IslandColor.warning)
                     }
                     // Outdated updates itself (no CLI config change); only a first connection
                     // edits CLI configs, so that one waits for this click.
@@ -640,7 +712,9 @@ private struct UsageDetailView: View {
     private func modelRow(_ row: ModelUsageTotal, total: Int64) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Button {
-                if !expandedModels.insert(row.id).inserted { expandedModels.remove(row.id) }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if !expandedModels.insert(row.id).inserted { expandedModels.remove(row.id) }
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: expandedModels.contains(row.id) ? "chevron.down" : "chevron.right")
@@ -648,11 +722,11 @@ private struct UsageDetailView: View {
                     Text(row.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(Self.tokens(row.tokens.total)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? "Unpriced")
+                    Text(row.dollars.map { money($0) + (row.unpricedTokens > 0 ? "+" : "") } ?? String(localized: "Unpriced"))
                         .font(.system(size: 11)).lineLimit(1).frame(minWidth: 54, alignment: .trailing)
                 }.monospacedDigit().contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? "unpriced")")
+                .accessibilityLabel("\(row.name), \(Self.tokens(row.tokens.total)) tokens, \(row.dollars.map(money) ?? String(localized: "unpriced"))")
                 .accessibilityValue(expandedModels.contains(row.id) ? "Expanded" : "Collapsed")
                 .accessibilityHint("Show input, output and cache tokens")
             GeometryReader { proxy in
@@ -672,7 +746,7 @@ private struct UsageDetailView: View {
         }
     }
 
-    private func tokenPart(_ label: String, _ value: Int64) -> some View {
+    private func tokenPart(_ label: LocalizedStringKey, _ value: Int64) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).foregroundStyle(.secondary)
             Text(Self.tokens(value)).monospacedDigit()

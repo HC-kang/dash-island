@@ -306,7 +306,7 @@ enum AgyAdapterSuite {
                 try assertTrue(!text.contains("Terminal"), "the Terminal login was ended: \(text)")
             }
             try assertTrue(add.contains("not added"), add)
-            try assertTrue(reauth.contains("Reauthenticate"), reauth)
+            try assertTrue(reauth.contains("Sign in again"), reauth)
             let mapped = AgyAdapter.reauthError(AgyAdapterError.loginTimeout(reauth: false))
             try assertEqual(mapped as? AgyAdapterError, .loginTimeout(reauth: true))
             try assertTrue(AgyAdapter.reauthError(CancellationError()) is CancellationError)
