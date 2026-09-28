@@ -39,7 +39,7 @@ enum IslandGlanceSuite {
             ], now: now)
             try assertEqual(g.level, .critical)
             try assertEqual(g.leading, "work 30%")
-            try assertEqual(g.trailing, "reauth 1")
+            try assertEqual(g.trailing, "needs sign-in")
         }
         f += check("warn health (not awaiting first sample) is warning") {
             try assertEqual(IslandGlance.make(accounts: [A(title: "a", used: 0.1, resetAt: nil, health: .warn)], now: now).level, .warning)
@@ -105,7 +105,7 @@ enum IslandGlanceSuite {
                 A(title: "a", used: 0.4, resetAt: nil, health: .ok, vendor: "claude", shortUsed: 0.4, shortResetAt: now.addingTimeInterval(600)),
                 A(title: "b", used: nil, resetAt: nil, health: .error, vendor: "claude"),
             ], now: now, totalVendors: ["claude"])
-            try assertEqual(g.trailing, "reauth 1")
+            try assertEqual(g.trailing, "needs sign-in")
         }
         return f
     }

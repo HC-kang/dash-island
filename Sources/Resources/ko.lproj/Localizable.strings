@@ -1,8 +1,8 @@
 /* Korean UI. Keys are the English copy (English is the development language). */
 "%@\nSoft failure — will retry on the next poll. Last-good rings stay if present." = "%@\n일시적인 실패입니다. 다음 조회에서 다시 시도합니다. 마지막 정상 값은 링에 남습니다.";
-"%@\nSoft failure: last-good usage stays on the rings. Not a full reconnect yet.\nIf this persists for hours, widget menu → Reauthenticate this account only." = "%@\n일시적인 실패입니다. 마지막 정상 사용량이 링에 남습니다. 아직 다시 연결할 필요는 없습니다.\n몇 시간 동안 계속되면 위젯 메뉴 → 이 계정만 재인증하세요.";
-"%@\nWidget menu → Reauthenticate (browser login for this account only).\n%@" = "%1$@\n위젯 메뉴 → 재인증(이 계정만 브라우저로 로그인).\n%2$@";
-"%@ needs sign-in" = "%@: 로그인이 필요합니다";
+"%@\nSoft failure: last-good usage stays on the rings. No need to sign in again yet.\nIf this persists for hours, widget menu → Sign in again (this account only)." = "%@\n일시적인 실패입니다. 마지막 정상 사용량이 링에 남습니다. 아직 다시 로그인할 필요는 없습니다.\n몇 시간 동안 계속되면 위젯 메뉴 → 다시 로그인(이 계정만).";
+"%@\nWidget menu → Sign in again (browser sign-in for this account only).\n%@" = "%1$@\n위젯 메뉴 → 다시 로그인(이 계정만 브라우저로 로그인).\n%2$@";
+"%@ needs sign-in" = "%@: 로그인 필요";
 "%@ over the last 7 days" = "최근 7일 %@";
 "%@ tokens have no model price." = "토큰 %@개에 모델 가격이 없습니다.";
 "%@ used" = "%@ 사용";
@@ -38,7 +38,7 @@
 "Add an account" = "계정 추가";
 "Almost out. Requests may be refused until the window resets." = "거의 소진했습니다. 창이 리셋될 때까지 요청이 거절될 수 있습니다.";
 "Always" = "항상";
-"Antigravity session rejected. Widget menu → Reauthenticate, or:\nHOME='%@' agy" = "Antigravity 세션이 거부되었습니다. 위젯 메뉴 → 재인증, 또는:\nHOME='%@' agy";
+"Antigravity session rejected. Widget menu → Sign in again, or:\nHOME='%@' agy" = "Antigravity 세션이 거부되었습니다. 위젯 메뉴 → 다시 로그인, 또는:\nHOME='%@' agy";
 "Attributed by the account ID reported with each call. Earlier unlinked history is excluded." = "호출마다 보고된 계정 ID로 집계합니다. 연결되지 않은 이전 기록은 제외합니다.";
 "Auto" = "자동";
 "Auto shows it only on displays without a notch, where it covers nothing. Amber at 80% used, red at 95% or when an account needs sign-in. With vendors checked, the left side of the notch sums each account's shortest window (5 accounts → n/500%); none checked shows the account closest to its limit." = "자동은 아무것도 가리지 않는 노치 없는 화면에서만 표시합니다. 80% 사용 시 주황, 95%이거나 로그인이 필요하면 빨강입니다. 벤더를 체크하면 노치 왼쪽에 계정별 가장 짧은 한도 주기의 합계를 표시합니다(계정 5개 → n/500%). 체크하지 않으면 한도에 가장 가까운 계정을 표시합니다.";
@@ -47,12 +47,12 @@
 "Busy accounts every 1m, idle ones every 15m · fresh data when you expand the island." = "사용 중인 계정은 1분, 쉬는 계정은 15분마다 조회합니다 · island를 펼치면 새로 조회합니다.";
 "COST" = "비용";
 "Cancel" = "취소";
-"Claude OAuth token host is rate-limited (not your 5h/wk usage quota).\nLong quiet window — last-good rings stay. No re-login required yet.\nEach account uses its own credentials file; reconnect only if this never recovers." = "Claude OAuth 토큰 서버가 요청을 제한하고 있습니다(5h/wk 사용 한도가 아닙니다).\n대기 시간이 깁니다. 마지막 정상 값은 링에 남습니다. 아직 다시 로그인할 필요는 없습니다.\n계정마다 자격 증명 파일이 따로 있습니다. 계속 회복되지 않을 때만 다시 연결하세요.";
-"Claude rejected this account’s token (invalid login or missing user:profile).\nsetup-token cannot read usage — use full browser OAuth.\nWidget menu → Reauthenticate this account only (other accounts stay put).\nOr: CLAUDE_CONFIG_DIR='%@' claude auth login --claudeai" = "Claude가 이 계정의 토큰을 거부했습니다(로그인이 잘못되었거나 user:profile 권한이 없습니다).\nsetup-token으로는 사용량을 읽을 수 없습니다. 브라우저 OAuth를 쓰세요.\n위젯 메뉴 → 이 계정만 재인증(다른 계정은 그대로).\n또는: CLAUDE_CONFIG_DIR='%@' claude auth login --claudeai";
+"Claude OAuth token host is rate-limited (not your 5h/wk usage quota).\nLong quiet window — last-good rings stay. No need to sign in again yet.\nEach account uses its own credentials file; sign in again only if this never recovers." = "Claude OAuth 토큰 서버가 요청을 제한하고 있습니다(5h/wk 사용 한도가 아닙니다).\n대기 시간이 깁니다. 마지막 정상 값은 링에 남습니다. 아직 다시 로그인할 필요는 없습니다.\n계정마다 자격 증명 파일이 따로 있습니다. 계속 회복되지 않을 때만 다시 로그인하세요.";
+"Claude rejected this account’s token (invalid login or missing user:profile).\nsetup-token cannot read usage — use full browser OAuth.\nWidget menu → Sign in again (this account only; other accounts stay put).\nOr: CLAUDE_CONFIG_DIR='%@' claude auth login --claudeai" = "Claude가 이 계정의 토큰을 거부했습니다(로그인이 잘못되었거나 user:profile 권한이 없습니다).\nsetup-token으로는 사용량을 읽을 수 없습니다. 브라우저 OAuth를 쓰세요.\n위젯 메뉴 → 다시 로그인(이 계정만, 다른 계정은 그대로).\n또는: CLAUDE_CONFIG_DIR='%@' claude auth login --claudeai";
 "Click for details" = "클릭하면 상세 보기";
 "Click to open or close usage details" = "클릭하면 사용량 상세를 열거나 닫습니다";
 "Close details" = "상세 닫기";
-"Codex session rejected. Widget menu → Reauthenticate, or:\nCODEX_HOME='%@' codex login" = "Codex 세션이 거부되었습니다. 위젯 메뉴 → 재인증, 또는:\nCODEX_HOME='%@' codex login";
+"Codex session rejected. Widget menu → Sign in again, or:\nCODEX_HOME='%@' codex login" = "Codex 세션이 거부되었습니다. 위젯 메뉴 → 다시 로그인, 또는:\nCODEX_HOME='%@' codex login";
 "Collapsed" = "접힘";
 "Complete %@ login in the browser or terminal. This window waits up to 3 minutes." = "브라우저나 터미널에서 %@ 로그인을 마치세요. 이 창은 최대 3분 기다립니다.";
 "Complete a fresh %@ sign-in in the browser (up to 3 minutes). The current sign-in is kept until the new one succeeds." = "브라우저에서 %@에 새로 로그인하세요(최대 3분). 새 로그인이 성공할 때까지 현재 로그인은 유지됩니다.";
@@ -72,7 +72,7 @@
 "From the vendor's public status page" = "벤더의 공개 상태 페이지 정보입니다";
 "Google API pricing · verified Sep 12, 2026" = "Google API 가격 · 2026년 9월 12일 확인";
 "Grok cost reporting" = "Grok 비용 보고";
-"Grok session rejected. Widget menu → Reauthenticate, or:\nGROK_HOME='%@' grok login --oauth" = "Grok 세션이 거부되었습니다. 위젯 메뉴 → 재인증, 또는:\nGROK_HOME='%@' grok login --oauth";
+"Grok session rejected. Widget menu → Sign in again, or:\nGROK_HOME='%@' grok login --oauth" = "Grok 세션이 거부되었습니다. 위젯 메뉴 → 다시 로그인, 또는:\nGROK_HOME='%@' grok login --oauth";
 "Hops to the display under the mouse" = "마우스가 있는 화면으로 옮겨 갑니다";
 "Hover or click to show usage" = "마우스를 올리거나 클릭하면 사용량을 보여 줍니다";
 "Label" = "이름";
@@ -101,7 +101,7 @@
 "OK" = "확인";
 "Only calls linked to this account appear here." = "이 계정과 연결된 호출만 여기에 표시됩니다.";
 "Only records in this account’s local folder. Shared CLI activity is excluded." = "이 계정 로컬 폴더의 기록만 셉니다. 공용 CLI 활동은 제외합니다.";
-"Open Dash Island and choose Reauthenticate." = "Dash Island를 열고 재인증을 선택하세요.";
+"Open Dash Island and choose Sign in again." = "Dash Island를 열고 다시 로그인을 선택하세요.";
 "Per-account fetch status" = "계정별 조회 상태";
 "Polling…" = "조회 중…";
 "Preferences" = "설정";
@@ -111,10 +111,10 @@
 "RIM" = "테두리";
 "Rate limit resets" = "한도 리셋 크레딧";
 "Reading local usage…" = "로컬 사용량을 읽는 중…";
-"Reauthenticate" = "재인증";
-"Reauthenticate %@" = "%@ 재인증";
-"Reauthenticate failed" = "재인증 실패";
-"Reauthenticate from the widget menu." = "위젯 메뉴에서 재인증하세요.";
+"Sign in again" = "다시 로그인";
+"Sign in again to %@" = "%@ 다시 로그인";
+"Couldn’t sign in again" = "다시 로그인하지 못했습니다";
+"Sign in again from the widget menu." = "위젯 메뉴에서 다시 로그인하세요.";
 "Refresh all" = "모두 새로 고침";
 "Refresh all accounts now" = "지금 모든 계정 새로 고침";
 "Remaining" = "남은 양";
@@ -155,11 +155,11 @@
 "Usage period" = "사용 기간";
 "Used" = "사용량";
 "Values reported by Grok are not subscription charges." = "Grok이 보고한 값은 구독 요금이 아닙니다.";
-"Vendor rate-limited (usage API or OAuth token refresh).\nLong quiet window; last-good numbers stay on the rings. No re-login needed yet." = "벤더가 요청을 제한하고 있습니다(사용량 API 또는 OAuth 토큰 갱신).\n대기 시간이 깁니다. 마지막 정상 값은 링에 남습니다. 아직 다시 로그인할 필요는 없습니다.";
+"Vendor rate-limited (usage API or OAuth token refresh).\nLong quiet window; last-good numbers stay on the rings. No need to sign in again yet." = "벤더가 요청을 제한하고 있습니다(사용량 API 또는 OAuth 토큰 갱신).\n대기 시간이 깁니다. 마지막 정상 값은 링에 남습니다. 아직 다시 로그인할 필요는 없습니다.";
 "View last 30 days" = "최근 30일 보기";
 "Warning color on the rim" = "테두리에 경고 색 표시";
 "You can add up to %lld accounts." = "계정은 최대 %lld개까지 추가할 수 있습니다.";
-"auth required" = "인증 필요";
+"needs sign-in" = "로그인 필요";
 "checked %@" = "%@ 확인";
 "checked %@ · ≈%lld%% est. from local calls" = "%1$@ 확인 · 로컬 호출 기준 약 %2$lld%% 추정";
 "cooldown %@" = "대기 %@";
@@ -167,7 +167,6 @@
 "error %@" = "오류 %@";
 "last ok %@" = "마지막 성공 %@";
 "lasts until the %@ reset" = "%@ 리셋까지 남음";
-"need browser login" = "브라우저 로그인 필요";
 "network error" = "네트워크 오류";
 "not requested yet" = "아직 요청 안 함";
 "notice %@" = "알림 %@";
@@ -176,13 +175,8 @@
 "out at %@, before the %@ reset" = "%1$@ 소진 예상, %2$@ 리셋 전";
 "parse error" = "해석 오류";
 "rate limited" = "요청 제한";
-"reauth %lld" = "재인증 %lld";
-"reauth needed" = "재인증 필요";
-"reauth: agy" = "재인증: agy";
-"reauth: codex" = "재인증: codex";
-"reauth: grok" = "재인증: grok";
-"reconnect account" = "계정 다시 연결";
-"reconnect this account" = "이 계정 다시 연결";
+"%lld need sign-in" = "%lld개 계정 로그인 필요";
+"Sign in ›" = "다시 로그인 ›";
 "requested %@" = "요청 %@";
 "retry in %@" = "%@ 뒤 재시도";
 "retry on next poll" = "다음 조회에서 재시도";
@@ -284,3 +278,4 @@
 "%lld%%" = "%lld%%";
 "24:00" = "24:00";
 "Dash Island" = "Dash Island";
+"Account identity unavailable. Sign in again to this account to reconnect tracking." = "계정 식별 정보가 없습니다. 추적을 다시 연결하려면 이 계정에 다시 로그인하세요.";

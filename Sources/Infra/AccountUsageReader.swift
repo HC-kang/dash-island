@@ -40,7 +40,7 @@ enum AccountUsageReader {
     static func read(provider: String, identity: String?, directory: URL = directory,
                      now: Date = Date()) -> LocalUsageArchive.Snapshot {
         guard let identity else {
-            return .init(events: [], notice: "Account identity unavailable. Reauthenticate this account to reconnect tracking.")
+            return .init(events: [], notice: String(localized: "Account identity unavailable. Sign in again to this account to reconnect tracking."))
         }
         let result = readAccounts(provider: provider, directory: directory, now: now)
         return .init(events: result.accounts[identity] ?? [], notice: result.notice)

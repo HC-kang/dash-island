@@ -20,7 +20,7 @@ enum AgyAdapterError: Error, Equatable, LocalizedError {
             return "Failed to start Antigravity login: \(message)"
         case .loginTimeout(let reauth):
             return reauth
-                ? "Antigravity sign-in timed out. The stored session was kept. Choose Reauthenticate to try again."
+                ? "Antigravity sign-in timed out. The stored session was kept. Choose Sign in again to retry."
                 : "Antigravity sign-in timed out. The account was not added. Add it again to retry."
         case .reauthFailed(let message):
             return message
@@ -177,7 +177,7 @@ struct AgyAdapter: VendorAdapter {
             )
         case .retryLater:
             throw AgyAdapterError.reauthFailed(
-                "Token refresh failed. Retry Reauthenticate in a moment."
+                "Token refresh failed. Try Sign in again in a moment."
             )
         }
         let snap = await probeUsage(token: creds.accessToken, home: home, fetchedAt: Date())
@@ -189,7 +189,7 @@ struct AgyAdapter: VendorAdapter {
         case .reject:
             throw AgyAdapterError.reauthFailed(
                 """
-                Token rejected by Google. Use Reauthenticate → browser login:
+                Token rejected by Google. Use Sign in again → browser sign-in:
                   HOME='\(home.path)' agy
                 """
             )

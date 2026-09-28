@@ -1017,7 +1017,7 @@ final class UsageOrchestrator: ObservableObject {
             let outcome: AccountFetchStatus.Outcome
             if let cool, cool > now {
                 if case .authRequired = err {
-                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? "auth")
+                    outcome = .failure(Self.caption(for: err, vendorID: account.vendorID) ?? String(localized: "needs sign-in"))
                 } else if case .rateLimited = err {
                     outcome = .failure(String(localized: "cooling down"))
                 } else if let err {

@@ -30,13 +30,8 @@ extension UsageOrchestrator {
         guard let error else { return nil }
         switch error {
         case .authRequired:
-            switch vendorID {
-            case "claude": return String(localized: "reconnect account")
-            case "codex": return String(localized: "reauth: codex")
-            case "grok": return String(localized: "reauth: grok")
-            case "agy": return String(localized: "reauth: agy")
-            default: return String(localized: "reauth needed")
-            }
+            // The widget swaps this for a "Sign in ›" button; other surfaces show the state.
+            return String(localized: "needs sign-in")
         case .rateLimited:
             return vendorID == "claude" ? String(localized: "oauth rate limited") : String(localized: "rate limited")
         case .network(let message):
@@ -46,7 +41,7 @@ extension UsageOrchestrator {
         case .unavailable:
             // One classification (UnavailableReason) for severity and copy (core-10).
             switch error.unavailableReason ?? .temporary {
-            case .needsLogin: return String(localized: "need browser login")
+            case .needsLogin: return String(localized: "needs sign-in")
             // Self-scheduled retry: rings stay, no red line. Notice/tooltip carry the age.
             case .refreshPending: return nil
             case .tokenQuiet, .temporary: return String(localized: "token quiet")
@@ -80,38 +75,38 @@ extension UsageOrchestrator {
                 return String(localized: """
                 Claude rejected this account’s token (invalid login or missing user:profile).
                 setup-token cannot read usage — use full browser OAuth.
-                Widget menu → Reauthenticate this account only (other accounts stay put).
+                Widget menu → Sign in again (this account only; other accounts stay put).
                 Or: CLAUDE_CONFIG_DIR='\(home)' claude auth login --claudeai
                 """)
             case "codex":
                 return String(localized: """
-                Codex session rejected. Widget menu → Reauthenticate, or:
+                Codex session rejected. Widget menu → Sign in again, or:
                 CODEX_HOME='\(home)' codex login
                 """)
             case "grok":
                 return String(localized: """
-                Grok session rejected. Widget menu → Reauthenticate, or:
+                Grok session rejected. Widget menu → Sign in again, or:
                 GROK_HOME='\(home)' grok login --oauth
                 """)
             case "agy":
                 return String(localized: """
-                Antigravity session rejected. Widget menu → Reauthenticate, or:
+                Antigravity session rejected. Widget menu → Sign in again, or:
                 HOME='\(home)' agy
                 """)
             default:
-                return String(localized: "Reauthenticate from the widget menu.")
+                return String(localized: "Sign in again from the widget menu.")
             }
         case .rateLimited:
             if vendorID == "claude" {
                 return String(localized: """
                 Claude OAuth token host is rate-limited (not your 5h/wk usage quota).
-                Long quiet window — last-good rings stay. No re-login required yet.
-                Each account uses its own credentials file; reconnect only if this never recovers.
+                Long quiet window — last-good rings stay. No need to sign in again yet.
+                Each account uses its own credentials file; sign in again only if this never recovers.
                 """)
             }
             return String(localized: """
             Vendor rate-limited (usage API or OAuth token refresh).
-            Long quiet window; last-good numbers stay on the rings. No re-login needed yet.
+            Long quiet window; last-good numbers stay on the rings. No need to sign in again yet.
             """)
         case .network(let message):
             return message.isEmpty
@@ -124,7 +119,7 @@ extension UsageOrchestrator {
             case .needsLogin:
                 return String(localized: """
                 \(message)
-                Widget menu → Reauthenticate (browser login for this account only).
+                Widget menu → Sign in again (browser sign-in for this account only).
                 \(loginCommand(vendorID: vendorID, home: home))
                 """)
             case .refreshPending:
@@ -135,8 +130,8 @@ extension UsageOrchestrator {
             case .tokenQuiet, .temporary:
                 return String(localized: """
                 \(message.isEmpty ? String(localized: "Temporarily unavailable.") : message)
-                Soft failure: last-good usage stays on the rings. Not a full reconnect yet.
-                If this persists for hours, widget menu → Reauthenticate this account only.
+                Soft failure: last-good usage stays on the rings. No need to sign in again yet.
+                If this persists for hours, widget menu → Sign in again (this account only).
                 """)
             }
         }

@@ -34,7 +34,7 @@ enum UsageAlert: Equatable, Sendable {
             if percent >= 100 { return String(localized: "Limit reached. Requests are refused until the window resets.") }
             return critical ? String(localized: "Almost out. Requests may be refused until the window resets.") : String(localized: "Usage passed 80% of this window.")
         case .recovered: return String(localized: "The window reset. Usage is back below 80%.")
-        case .signIn: return String(localized: "Open Dash Island and choose Reauthenticate.")
+        case .signIn: return String(localized: "Open Dash Island and choose Sign in again.")
         }
     }
 }

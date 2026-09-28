@@ -1027,10 +1027,10 @@ enum DemoWidgets {
             hoverWindows: [
                 HoverWindowLine(label: "wk", usage: "9%", resetAt: Date().addingTimeInterval(6 * 86_400))
             ],
-            errorCaption: "reauth: codex login",
+            errorCaption: "needs sign-in",
             isAwaitingFirstSample: false,
             health: .error,
-            healthTooltip: "reauth: codex login"
+            healthTooltip: "needs sign-in"
         ),
     ]
 }

@@ -62,7 +62,7 @@ enum AccountHealth: Equatable, Sendable {
             switch error {
             case .authRequired:
                 health = maxHealth(health, .error)
-                parts.append(authCaption ?? String(localized: "auth required"))
+                parts.append(authCaption ?? String(localized: "needs sign-in"))
             case .rateLimited:
                 health = maxHealth(health, .warn)
                 parts.append(String(localized: "rate limited"))
@@ -193,7 +193,7 @@ struct WidgetViewModel: Identifiable, Equatable, Sendable {
     /// from locally captured calls, not a vendor reading. Nil when we cannot build
     /// one, which is the normal state right after a poll.
     var projectedPrimaryFraction: Double? = nil
-    /// Credentials were rejected; the caption becomes a Reauthenticate action.
+    /// Credentials were rejected; the caption becomes a "Sign in ›" action.
     var needsReauth: Bool = false
 
     /// Flat strings for accessibility / demos.
