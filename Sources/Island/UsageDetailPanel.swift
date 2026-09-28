@@ -176,6 +176,8 @@ private struct UsageDetailView: View {
     @ObservedObject private var resets = LimitResetCenter.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
+    /// Pointer x over the 7-day chart, nil when away.
+    @State private var trendProbe: CGFloat?
     @State private var expandedModels: Set<String> = []
     @State private var moreBelow = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -428,6 +430,8 @@ private struct UsageDetailView: View {
     }
 
     /// Seven days of the headline window from QuotaHistory, in the display mode.
+    /// Day lines at local midnight with weekday labels, a 0/50/100% scale, and a
+    /// hover readout.
     @ViewBuilder
     private func trend(_ window: WindowUsage) -> some View {
         let now = Date()
@@ -435,46 +439,112 @@ private struct UsageDetailView: View {
         let points = (quotaHistory.byAccount[initial.id] ?? QuotaHistory())
             .series(window: window.displayLabel, days: 7, now: now)
         if points.count >= 2 {
-            VStack(alignment: .leading, spacing: 4) {
+            let gutter: CGFloat = 30
+            let plotH: CGFloat = 64
+            let days = Self.dayStarts(from: now.addingTimeInterval(-span), to: now)
+            VStack(alignment: .leading, spacing: 3) {
                 GeometryReader { g in
+                    let w = g.size.width - gutter
+                    let xAt: (Date) -> CGFloat = { gutter + w * CGFloat(1 - now.timeIntervalSince($0) / span) }
                     let xy: (QuotaHistory.Sample) -> CGPoint = { p in
-                        let x = g.size.width * CGFloat(1 - now.timeIntervalSince(p.at) / span)
                         let v = showsUsed ? p.used : 1 - p.used
-                        return CGPoint(x: x, y: g.size.height * CGFloat(1 - v))
+                        return CGPoint(x: xAt(p.at), y: plotH * CGFloat(1 - v))
                     }
                     let line = Path { path in
                         path.move(to: xy(points[0]))
                         for p in points.dropFirst() { path.addLine(to: xy(p)) }
                     }
-                    ZStack {
-                        Path { p in
-                            p.move(to: CGPoint(x: 0, y: g.size.height / 2))
-                            p.addLine(to: CGPoint(x: g.size.width, y: g.size.height / 2))
+                    ZStack(alignment: .topLeading) {
+                        // Percent scale.
+                        ForEach([1.0, 0.5, 0.0], id: \.self) { v in
+                            let y = plotH * CGFloat(1 - v)
+                            Path { p in
+                                p.move(to: CGPoint(x: gutter, y: y))
+                                p.addLine(to: CGPoint(x: g.size.width, y: y))
+                            }
+                            .stroke(Color.white.opacity(v == 0 ? 0.12 : 0.06),
+                                    style: StrokeStyle(lineWidth: 1, dash: v == 0 ? [] : [3, 3]))
+                            Text("\(Int(v * 100))%")
+                                .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                                .frame(width: gutter - 4, alignment: .trailing)
+                                .position(x: (gutter - 4) / 2, y: y)
                         }
-                        .stroke(Color.white.opacity(0.06), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        // Day lines at local midnight.
+                        ForEach(days, id: \.self) { day in
+                            Path { p in
+                                p.move(to: CGPoint(x: xAt(day), y: 0))
+                                p.addLine(to: CGPoint(x: xAt(day), y: plotH + 4))
+                            }
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        }
                         Path { p in
                             p.addPath(line)
-                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: g.size.height))
-                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: g.size.height))
+                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: plotH))
+                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: plotH))
                             p.closeSubpath()
                         }
                         .fill(accent.opacity(0.14))
                         line.stroke(accent.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
-                        let end = xy(points[points.count - 1])
-                        Circle().fill(accent).frame(width: 5, height: 5).position(end)
+                        Circle().fill(accent).frame(width: 5, height: 5).position(xy(points[points.count - 1]))
+                        // Weekday under the middle of each day that has room.
+                        ForEach(Self.daySegments(days: days, from: now.addingTimeInterval(-span), to: now), id: \.start) { seg in
+                            let x0 = xAt(seg.start), x1 = xAt(seg.end)
+                            if x1 - x0 >= 22 {
+                                Text(seg.start.formatted(Date.FormatStyle(locale: .ui).weekday(.abbreviated)))
+                                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                                    .position(x: (x0 + x1) / 2, y: plotH + 11)
+                            }
+                        }
+                        if let probe = trendProbe, probe >= gutter {
+                            let at = now.addingTimeInterval(-span * Double(1 - (probe - gutter) / w))
+                            if let sample = points.min(by: { abs($0.at.timeIntervalSince(at)) < abs($1.at.timeIntervalSince(at)) }) {
+                                let p = xy(sample)
+                                Path { path in
+                                    path.move(to: CGPoint(x: p.x, y: 0))
+                                    path.addLine(to: CGPoint(x: p.x, y: plotH))
+                                }
+                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                Circle().fill(accent).frame(width: 5, height: 5).position(p)
+                                let v = showsUsed ? sample.used : 1 - sample.used
+                                Text("\(sample.at.formatted(Date.FormatStyle(locale: .ui).weekday(.abbreviated).hour().minute())) · \(Int((v * 100).rounded()))%")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color(white: 0.16)))
+                                    .fixedSize()
+                                    .position(x: min(max(p.x, gutter + 60), g.size.width - 60), y: -10)
+                            }
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        if case .active(let loc) = phase { trendProbe = loc.x } else { trendProbe = nil }
                     }
                 }
-                .frame(height: 36)
-                HStack {
-                    Text("7 days ago")
-                    Spacer()
-                    Text("now")
-                }
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .frame(height: plotH + 18)
             }
+            .padding(.top, 14)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(window.displayLabel) over the last 7 days")
         }
+    }
+
+    /// Local midnights strictly inside (from, to].
+    static func dayStarts(from: Date, to: Date, calendar: Calendar = .current) -> [Date] {
+        var out: [Date] = []
+        var day = calendar.startOfDay(for: from)
+        while let next = calendar.date(byAdding: .day, value: 1, to: day), next <= to {
+            out.append(next)
+            day = next
+        }
+        return out
+    }
+
+    struct DaySegment { var start: Date; var end: Date }
+
+    /// Day spans between midnights, clipped to the window; the first starts at `from`.
+    static func daySegments(days: [Date], from: Date, to: Date) -> [DaySegment] {
+        let edges = [from] + days + [to]
+        return zip(edges, edges.dropFirst()).map { DaySegment(start: $0, end: $1) }
     }
 
     /// Follow the Used / Remaining preference, like the rings and the center number (ui-05).

@@ -32,11 +32,12 @@ final class LimitResetCenter: ObservableObject {
         VendorRegistry.adapter(for: vendorID) as? any LimitResetting
     }
 
-    /// Loads the offer at most once a minute per account (the panel reloads often).
-    func load(_ account: Account, force: Bool = false) {
+    /// Loads the offer unless one is younger than `maxAge` (default a minute:
+    /// the panel reloads often; the hover card passes 10 minutes).
+    func load(_ account: Account, force: Bool = false, maxAge: TimeInterval = reloadGap) {
         guard let resetter = Self.resetter(for: account.vendorID) else { return }
         let id = account.id
-        if !force, let at = loadedAt[id], Date().timeIntervalSince(at) < Self.reloadGap { return }
+        if !force, let at = loadedAt[id], Date().timeIntervalSince(at) < maxAge { return }
         loadedAt[id] = Date()
         if offers[id] == nil { offers[id] = .loading }
         Task {

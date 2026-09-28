@@ -39,11 +39,7 @@ enum AccountHoverTips {
                         .foregroundStyle(Color(white: 0.78))
                         .padding(.top, 2)
                 }
-                if let count = model.usageSnapshot?.resetCreditsAvailable {
-                    Text("Resets  \(count) available")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.90))
-                }
+                ResetCountLine(model: model)
                 if let freshness = UsageOrchestrator.formatFreshnessLine(
                     lastSuccessAt: model.lastSuccessAt,
                     projectedFraction: model.projectedPrimaryFraction,
@@ -142,5 +138,37 @@ struct TipTriangle: Shape {
         p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
         p.closeSubpath()
         return p
+    }
+}
+
+/// Reset credits in the hover card. Codex arrives with every poll; Claude is
+/// read when the card opens (at most every 10 minutes per account).
+private struct ResetCountLine: View {
+    let model: WidgetViewModel
+    @ObservedObject private var resets = LimitResetCenter.shared
+
+    private var count: Int? {
+        if case .ready(let offer)? = resets.offers[model.id], offer.ineligibleReason == nil {
+            return offer.available
+        }
+        return model.usageSnapshot?.resetCreditsAvailable
+    }
+
+    var body: some View {
+        // A zero-size anchor: an empty Group never appears, so it would never load.
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(width: 0, height: 0)
+            if let count {
+                Text("Resets  \(count) available")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Color(white: 0.90))
+            }
+        }
+        .onAppear {
+            guard model.vendorID != "codex",
+                  let account = AccountStore.shared.accounts.first(where: { $0.id == model.id })
+            else { return }
+            resets.load(account, maxAge: 10 * 60)
+        }
     }
 }

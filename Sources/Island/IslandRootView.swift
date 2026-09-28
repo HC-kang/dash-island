@@ -85,17 +85,22 @@ struct IslandRootView: View {
             if showExpandedShell {
                 // The black body grows out of the compact silhouette and shrinks back
                 // into it: never faded, so the desktop never shows through mid-way.
+                // Shadow and rim draw at the final size, so the mask would show
+                // them only at the very end. They fade in once the body has
+                // (nearly) grown and leave first on collapse.
+                expandedShadow.transition(glowTransition)
                 expandedChrome
-                    .transition(reduceMotion ? .identity : .modifier(
-                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize),
-                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize)
+                    .transition(reduceMotion ? .opacity : .modifier(
+                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize, endRadius: expandedRadius),
+                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize, endRadius: expandedRadius)
                     ))
+                expandedRim.transition(glowTransition)
                 // Content is clipped by the same growing mask, so no widget floats over
                 // the desktop outside the black while the body is still growing.
                 expandedContent
                     .transition(reduceMotion ? .opacity : AnyTransition.modifier(
-                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize),
-                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize)
+                        active: IslandReveal(progress: 0, start: compactBodySize, end: expandedBodySize, endRadius: expandedRadius),
+                        identity: IslandReveal(progress: 1, start: compactBodySize, end: expandedBodySize, endRadius: expandedRadius)
                     ).combined(with: .opacity))
             }
         }
@@ -236,12 +241,37 @@ struct IslandRootView: View {
     private var hoverWidth: CGFloat { model.hitSize.width }
     private var hoverHeight: CGFloat { model.hitSize.height }
 
+    private var expandedRadius: CGFloat { min(26, cornerRadius(forHeight: model.notch.height) + 8) }
+
     private var expandedChrome: some View {
-        let radius = min(26, cornerRadius(forHeight: model.notch.height) + 8)
+        IslandShape(bottomRadius: expandedRadius)
+            .fill(Color.black)
+            .frame(width: model.expandedContentWidth, height: model.blackHeight, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+    }
+
+    private var glowTransition: AnyTransition {
+        reduceMotion ? .opacity : .asymmetric(
+            insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.18)),
+            removal: .opacity.animation(.easeOut(duration: 0.08))
+        )
+    }
+
+    /// Drop shadow under the body (a black copy of the shape carries it).
+    private var expandedShadow: some View {
+        IslandShape(bottomRadius: expandedRadius)
+            .fill(Color.black)
+            .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
+            .frame(width: model.expandedContentWidth, height: model.blackHeight, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+    }
+
+    private var expandedRim: some View {
+        let radius = expandedRadius
         let contentW = model.expandedContentWidth
         return ZStack {
-            IslandShape(bottomRadius: radius)
-                .fill(Color.black)
             NotchRimGlow(
                 bottomRadius: radius,
                 lineWidth: 1.4,
@@ -255,7 +285,6 @@ struct IslandRootView: View {
         // Black body only; parent hover frame is the same width.
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
         .allowsHitTesting(false)
     }
 
@@ -533,6 +562,9 @@ private struct IslandReveal: ViewModifier, Animatable {
     var progress: Double
     var start: CGSize
     var end: CGSize
+    /// The body's own bottom radius, reached at progress 1 so dropping the
+    /// mask changes nothing on screen.
+    var endRadius: CGFloat
 
     var animatableData: Double {
         get { progress }
@@ -546,7 +578,8 @@ private struct IslandReveal: ViewModifier, Animatable {
         let open = t >= 0.999
         let w = open ? 100_000 : start.width + (end.width - start.width) * t
         let h = open ? 100_000 : start.height + (end.height - start.height) * t
-        let radius = min(26, max(11, h * 0.40))
+        let startRadius = min(26, max(11, start.height * 0.40))
+        let radius = startRadius + (endRadius - startRadius) * t
         return content.mask(alignment: .top) {
             IslandShape(bottomRadius: radius)
                 .frame(width: w, height: h)
