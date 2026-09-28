@@ -257,20 +257,20 @@ func dialogButton(
 }
 
 private func buttonForeground(primary: Bool, destructive: Bool, enabled: Bool) -> Color {
-    if destructive { return Color(red: 1, green: 0.55, blue: 0.52) }
+    if destructive { return IslandColor.critical }
     if primary { return .white.opacity(0.95) }
     return .white.opacity(0.7)
 }
 
 private func buttonFill(primary: Bool, destructive: Bool, enabled: Bool) -> Color {
     // A secondary destructive button stays quiet; only the default one is filled.
-    if destructive { return primary ? Color.red.opacity(0.18) : Color.white.opacity(0.04) }
+    if destructive { return primary ? IslandColor.critical.opacity(0.18) : Color.white.opacity(0.04) }
     if primary { return Color.white.opacity(0.12) }
     return Color.white.opacity(0.04)
 }
 
 private func buttonStroke(primary: Bool, destructive: Bool) -> Color {
-    if destructive { return Color.red.opacity(primary ? 0.35 : 0.22) }
+    if destructive { return IslandColor.critical.opacity(primary ? 0.35 : 0.22) }
     if primary { return Color.white.opacity(0.16) }
     return Color.white.opacity(0.08)
 }

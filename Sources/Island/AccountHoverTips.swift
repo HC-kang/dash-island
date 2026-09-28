@@ -51,7 +51,7 @@ enum AccountHoverTips {
                         .padding(.top, 2)
                 }
                 Text("Click for details")
-                    .font(.system(size: 9))
+                    .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.45))
                     .padding(.top, 4)
             }
@@ -85,8 +85,8 @@ enum AccountHoverTips {
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(
                             isError
-                                ? Color(red: 0.98, green: 0.62, blue: 0.55)
-                                : Color(red: 0.95, green: 0.82, blue: 0.45)
+                                ? IslandColor.critical
+                                : IslandColor.warning
                         )
                         .multilineTextAlignment(.leading)
                         .lineSpacing(2)
@@ -111,7 +111,8 @@ enum AccountHoverTips {
         .fixedSize(horizontal: true, vertical: true)
     }
 
-    private static func tipBackground(corner: CGFloat) -> some View {
+    /// Shared by every tip (usage, caption, status) so they read as one family.
+    static func tipBackground(corner: CGFloat = 8) -> some View {
         RoundedRectangle(cornerRadius: corner, style: .continuous)
             .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
             .overlay(
@@ -121,11 +122,29 @@ enum AccountHoverTips {
             .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
     }
 
+    /// The fill reaches 1 pt below the card's top edge to hide the border under
+    /// the caret; the two slanted edges carry the same hairline as the card.
     private static func tipCaret() -> some View {
-        TipTriangle()
-            .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
-            .frame(width: 10, height: 5)
-            .offset(y: -5)
+        ZStack(alignment: .top) {
+            TipTriangle()
+                .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
+                .frame(width: 10, height: 6)
+            TipCaretEdges()
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .frame(width: 10, height: 5)
+        }
+        .offset(y: -5)
+    }
+}
+
+/// The two slanted edges of the caret (no base), for its hairline.
+struct TipCaretEdges: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.midX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        return p
     }
 }
 

@@ -241,12 +241,15 @@ struct IslandRootView: View {
     private var hoverWidth: CGFloat { model.hitSize.width }
     private var hoverHeight: CGFloat { model.hitSize.height }
 
+    private static let railSpring = Animation.spring(response: 0.38, dampingFraction: 0.86)
+
     private var expandedRadius: CGFloat { min(26, cornerRadius(forHeight: model.notch.height) + 8) }
 
     private var expandedChrome: some View {
         IslandShape(bottomRadius: expandedRadius)
             .fill(Color.black)
             .frame(width: model.expandedContentWidth, height: model.blackHeight, alignment: .top)
+            .animation(Self.railSpring, value: model.addRailOpen)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .allowsHitTesting(false)
     }
@@ -264,6 +267,7 @@ struct IslandRootView: View {
             .fill(Color.black)
             .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
             .frame(width: model.expandedContentWidth, height: model.blackHeight, alignment: .top)
+            .animation(Self.railSpring, value: model.addRailOpen)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .allowsHitTesting(false)
     }
@@ -284,6 +288,7 @@ struct IslandRootView: View {
         }
         // Black body only; parent hover frame is the same width.
         .frame(width: contentW, height: model.blackHeight, alignment: .top)
+        .animation(Self.railSpring, value: model.addRailOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .allowsHitTesting(false)
     }
@@ -325,6 +330,8 @@ struct IslandRootView: View {
             height: model.blackHeight + IslandModel.tooltipHitPad,
             alignment: .top
         )
+        // The root drops size animations; the rail opens with its own spring.
+        .animation(Self.railSpring, value: model.addRailOpen)
         // GaugeClusterView clips its slot row before drawing hover overlays.
         // A second mask here clips the tips where they overlap the body's edge.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -445,10 +452,10 @@ struct IslandRootView: View {
 
     private func earLabel(_ text: String, dot: Color?) -> some View {
         HStack(spacing: 5) {
-            if let dot { Circle().fill(dot).frame(width: 6, height: 6) }
+            if let dot { Circle().fill(dot).frame(width: Typography.glanceDot, height: Typography.glanceDot) }
             Text(text)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.88))
+                .font(Typography.glance)
+                .foregroundStyle(.white.opacity(Typography.glanceOpacity))
                 .lineLimit(1)
         }
         .frame(height: model.notch.height)

@@ -238,7 +238,7 @@ private struct UsageDetailView: View {
         }
         .background(Color(white: 0.045))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         .colorScheme(.dark)
         .tint(accent)
         .onAppear {
@@ -366,7 +366,7 @@ private struct UsageDetailView: View {
         if let service = vendorStatus.byVendor[provider], service.level >= .degraded {
             Label(service.summary, systemImage: service.level == .outage ? "bolt.horizontal.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(service.level == .outage ? Color.red : Color.orange)
+                .foregroundStyle(service.level == .outage ? IslandColor.critical : IslandColor.warning)
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
@@ -406,7 +406,7 @@ private struct UsageDetailView: View {
             if LimitResetCenter.resetter(for: provider) != nil { resetRow }
             if let error = model.errorCaption {
                 Label(error, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11)).foregroundStyle(Color.orange)
+                    .font(.system(size: 11)).foregroundStyle(IslandColor.warning)
             }
             ForEach([model.paceLine(now: Date())].compactMap { $0 }, id: \.self) { line in
                 Label(line, systemImage: "gauge.with.dots.needle.33percent")
@@ -629,17 +629,17 @@ private struct UsageDetailView: View {
                         modelRow(row, total: summary.tokens.total)
                     }
                     if summary.models.count > 3 {
-                        Button(showAll ? "Show less" : "Show all \(summary.models.count) models") { showAll.toggle() }
+                        Button(showAll ? "Show less" : "Show all \(summary.models.count) models") { withAnimation(.easeOut(duration: 0.2)) { showAll.toggle() } }
                             .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(accent)
                     }
                 }
             }
             VStack(alignment: .leading, spacing: 5) {
                 if let notice = local.snapshots[sourceKey]?.notice {
-                    Text(notice).foregroundStyle(Color.orange)
+                    Text(notice).foregroundStyle(IslandColor.warning)
                 }
                 if summary.unpricedTokens > 0 {
-                    Text("\(Self.tokens(summary.unpricedTokens)) tokens have no model price.").foregroundStyle(Color.orange)
+                    Text("\(Self.tokens(summary.unpricedTokens)) tokens have no model price.").foregroundStyle(IslandColor.warning)
                 }
                 Text(liveTracking ? "Attributed by the account ID reported with each call. Earlier unlinked history is excluded."
                      : "Only records in this account’s local folder. Shared CLI activity is excluded.")
@@ -650,10 +650,10 @@ private struct UsageDetailView: View {
                             .foregroundStyle(Color.secondary)
                     } else {
                         Label(health.message, systemImage: health.state == .active ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle")
-                            .foregroundStyle(health.state == .active ? Color.secondary : Color.orange)
+                            .foregroundStyle(health.state == .active ? Color.secondary : IslandColor.warning)
                     }
                     if case .failed(let reason) = collector.status {
-                        Text(reason).foregroundStyle(Color.orange)
+                        Text(reason).foregroundStyle(IslandColor.warning)
                     }
                     // Outdated updates itself (no CLI config change); only a first connection
                     // edits CLI configs, so that one waits for this click.
@@ -712,7 +712,9 @@ private struct UsageDetailView: View {
     private func modelRow(_ row: ModelUsageTotal, total: Int64) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Button {
-                if !expandedModels.insert(row.id).inserted { expandedModels.remove(row.id) }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if !expandedModels.insert(row.id).inserted { expandedModels.remove(row.id) }
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: expandedModels.contains(row.id) ? "chevron.down" : "chevron.right")

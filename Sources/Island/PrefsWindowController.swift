@@ -73,8 +73,9 @@ final class PrefsWindowController: NSWindowController, NSWindowDelegate {
         var fit = hosting.view.fittingSize
         if fit.width < 340 { fit.width = 340 }
         if fit.height < 280 { fit.height = 280 }
-        // Cap absurd heights on many monitors.
-        fit.height = min(fit.height, 640)
+        // Fit the screen; the settings scroll inside when they do not fit.
+        let visibleHeight = (DisplayInfo.currentScreen() ?? NSScreen.main)?.visibleFrame.height ?? 720
+        fit.height = min(fit.height, visibleHeight - 80)
         window.setContentSize(fit)
 
         // Center on the *target* screen (or main), never under the notch band.

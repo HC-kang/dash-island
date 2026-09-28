@@ -213,7 +213,11 @@ final class IslandDialogController: NSWindowController, NSWindowDelegate {
         panel.contentViewController = host
 
         let width: CGFloat = 320
-        panel.setContentSize(NSSize(width: width, height: height))
+        // The given height is a floor: long messages (alerts, reset notes) grow
+        // the panel instead of clipping the buttons.
+        let fit = host.sizeThatFits(in: CGSize(width: width, height: 2_000))
+        let screenMax = (NotchInfo.preferredScreen()?.visibleFrame.height ?? 800) - 80
+        panel.setContentSize(NSSize(width: width, height: min(screenMax, max(height, ceil(fit.height)))))
 
         NSApp.activate(ignoringOtherApps: true)
         if let screen = NotchInfo.preferredScreen() {

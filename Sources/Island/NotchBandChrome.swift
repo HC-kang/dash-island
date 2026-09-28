@@ -25,8 +25,8 @@ struct NotchBandChrome: View {
 
     private func bandText(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.78))
+            .font(Typography.glance)
+            .foregroundStyle(.white.opacity(Typography.glanceOpacity))
             .lineLimit(1)
             .truncationMode(.tail)
             .layoutPriority(-1)
@@ -52,7 +52,7 @@ struct NotchBandChrome: View {
 
             if let leading = glance?.leading {
                 HStack(spacing: 5) {
-                    Circle().fill(glanceDot).frame(width: 5, height: 5)
+                    Circle().fill(glanceDot).frame(width: Typography.glanceDot, height: Typography.glanceDot)
                     bandText(leading)
                 }
                 .padding(.leading, 4)
@@ -79,7 +79,8 @@ struct NotchBandChrome: View {
                     NotificationCenter.default.post(name: .dashIslandRequestKey, object: nil)
                 }
             } label: {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
+                // Minute steps: a per-second label changed width and shook the glance.
+                TimelineView(.periodic(from: .now, by: 15)) { context in
                     HStack(spacing: 5) {
                         Circle()
                             .fill(statusColor)
@@ -166,7 +167,7 @@ struct NotchBandChrome: View {
             if case .failure = $0.outcome { return true }
             return false
         }) {
-            return Color(red: 0.97, green: 0.44, blue: 0.44).opacity(0.9)
+            return IslandColor.critical.opacity(0.9)
         }
         if effectiveUpdated != nil { return IslandColor.liveTeal.opacity(0.9) }
         return Color.white.opacity(0.25)
@@ -175,9 +176,9 @@ struct NotchBandChrome: View {
     private func statusLabel(relativeTo now: Date) -> String {
         if isLoading { return String(localized: "Polling…") }
         if let updated = effectiveUpdated {
-            return Self.relativeFormatter.localizedString(for: updated, relativeTo: now)
+            return UsageOrchestrator.formatAgeAgo(since: updated, now: now)
         }
-        return "— —"
+        return "—"
     }
 }
 
@@ -278,7 +279,7 @@ private struct FetchStatusPopover: View {
             .padding(.bottom, 6)
         }
         .frame(width: 280)
-        .background(Color.black)
+        // Popover material only: an opaque black inside it left a seam at the arrow.
         .preferredColorScheme(.dark)
     }
 
@@ -319,7 +320,7 @@ private struct FetchStatusPopover: View {
                 if let cool = row.cooldownUntil, cool > now {
                     Text("cooldown \(Self.relativeFormatter.localizedString(for: cool, relativeTo: now))")
                         .font(.system(size: 9, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Color(red: 0.95, green: 0.78, blue: 0.35).opacity(0.85))
+                        .foregroundStyle(IslandColor.warning.opacity(0.85))
                 } else if let next = row.nextDueAt {
                     let label = next <= now
                         ? String(localized: "due now")
@@ -353,7 +354,7 @@ private struct FetchStatusPopover: View {
         switch outcome {
         case .never: return Color.white.opacity(0.35)
         case .success: return IslandColor.liveTeal.opacity(0.95)
-        case .failure: return Color(red: 0.97, green: 0.44, blue: 0.44).opacity(0.95)
+        case .failure: return IslandColor.critical.opacity(0.95)
         }
     }
 }

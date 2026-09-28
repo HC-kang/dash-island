@@ -28,10 +28,14 @@ struct NotchRimGlow: View {
                     let phase = (Self.restPhase + elapsed / period).truncatingRemainder(dividingBy: 1)
                     rim(phase: phase)
                 }
+                .transition(.opacity)
             } else {
                 rim(phase: Self.restPhase)
+                    .transition(.opacity)
             }
         }
+        // Stop and start cross-fade: the highlight never jumps to its parked spot.
+        .animation(.easeInOut(duration: 0.35), value: frameInterval == nil)
         .onChange(of: frameInterval != nil) { moving in
             if moving { sweepStart = Date() }
         }
