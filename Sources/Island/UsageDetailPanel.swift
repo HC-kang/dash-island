@@ -176,8 +176,8 @@ private struct UsageDetailView: View {
     @ObservedObject private var resets = LimitResetCenter.shared
     @State private var period = UsagePeriod.today
     @State private var showAll = false
-    /// Pointer x over the 7-day chart, nil when away.
-    @State private var trendProbe: CGFloat?
+    /// Pointer x over a 7-day chart, keyed by window label; each chart reads its own.
+    @State private var trendProbe: [String: CGFloat] = [:]
     @State private var expandedModels: Set<String> = []
     @State private var moreBelow = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -397,6 +397,11 @@ private struct UsageDetailView: View {
                         }.font(.system(size: 12))
                         quotaBar(window)
                         resetLabel(window)
+                        // The account's second own window (Claude weekly) is
+                        // recorded too; model-scoped extras are not.
+                        if window.displayLabel == model.usageSnapshot?.secondary?.displayLabel {
+                            trend(window)
+                        }
                     }
                 }
             } else {
@@ -497,7 +502,7 @@ private struct UsageDetailView: View {
                                     .position(x: (x0 + x1) / 2, y: plotH + 11)
                             }
                         }
-                        if let probe = trendProbe, probe >= gutter {
+                        if let probe = trendProbe[window.displayLabel], probe >= gutter {
                             let at = now.addingTimeInterval(-span * Double(1 - (probe - gutter) / w))
                             if let sample = points.min(by: { abs($0.at.timeIntervalSince(at)) < abs($1.at.timeIntervalSince(at)) }) {
                                 let p = xy(sample)
@@ -519,7 +524,7 @@ private struct UsageDetailView: View {
                     }
                     .contentShape(Rectangle())
                     .onContinuousHover { phase in
-                        if case .active(let loc) = phase { trendProbe = loc.x } else { trendProbe = nil }
+                        if case .active(let loc) = phase { trendProbe[window.displayLabel] = loc.x } else { trendProbe[window.displayLabel] = nil }
                     }
                 }
                 .frame(height: plotH + 18)

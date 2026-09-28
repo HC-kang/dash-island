@@ -4,6 +4,9 @@ All notable user-facing changes. Format: [Keep a Changelog](https://keepachangel
 
 ## [Unreleased]
 
+### Added
+- Detail panel: the account's second window (Claude weekly) gets its own 7-day chart under its bar; each chart has its own hover readout.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

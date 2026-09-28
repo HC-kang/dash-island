@@ -281,3 +281,10 @@ Branch `feat/v1-implementation` — plan tasks 1–10 landed via subagent-driven
 - core-07: `UsageOrchestrator` pure helpers live in `+Schedule`, `+LastGood`, `+Format`; `PollGenerations.swift` holds the generation and status types.
 - Ears, total mode, collector auto-update, and the network retry floor are in decisions.md.
 - Localization traps (2026-09-28): a `String` passed to `Text`/`Label`/`captionLabel` is not localized, and a ternary like `cond ? "a" : "b \(x)"` assigned to a `let` is a `String`. Wrap each branch in `String(localized:)` or take a `LocalizedStringKey` parameter. Dialog titles and messages go through `LocalizedStringKey(title)` at runtime, so the compiler does not extract them: add their ko entries by hand. Coverage check: `swiftc … -emit-localized-strings` with an `@filelist` of sources, then compare the `.stringsdata` keys with `plutil -convert json` of the ko table.
+
+## E2E driver (2026-09-28)
+
+- `source scripts/e2e/e2e.sh` builds `drive` and `hud` into `~/Library/Caches/dash-island-checks/e2e` (once per source hash) and defines `waitidle`, `ctl_begin`, `restore`, `ctl_end`, `at X Y`.
+- `drive move/click X Y` take island-local points; `warp` takes global points. Screenshots go to `$TMPDIR/dash-e2e-shots` (outside the repo).
+- The app's windows are matched by PID: the owner name is the localized display name ("Dash Island").
+- Session order: `waitidle` → `ctl_begin` → actions → `restore` → `ctl_end`. Never click a reset's Use button in a test.
