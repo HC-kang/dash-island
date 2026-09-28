@@ -194,11 +194,6 @@
 "warning" = "경고";
 "≤%lld API calls/h all busy · 1m busy / 15m idle · %lld acct" = "모두 사용 중일 때 시간당 최대 API 호출 %1$lld회 · 사용 중 1분 / 쉬는 중 15분 · 계정 %2$lld개";
 "GENERAL" = "일반";
-"Session" = "세션";
-"Weekly" = "주간";
-"Monthly" = "월간";
-"Usage" = "사용량";
-"%@ Weekly" = "%@ 주간";
 "used" = "사용";
 "left" = "남음";
 "Captured tokens, incl. cache" = "수집된 토큰(캐시 포함)";
@@ -213,8 +208,6 @@
 "The connector script is missing from the app bundle." = "앱 번들에 연결 스크립트가 없습니다.";
 "The collector could not be updated." = "수집기를 갱신하지 못했습니다.";
 "Tracking collector is out of date. It updates itself." = "추적 수집기가 구버전입니다. 자동으로 갱신합니다.";
-"5-hour limit" = "5시간 한도";
-"weekly limit" = "주간 한도";
 "Available once a limit is full" = "한도가 가득 차면 사용할 수 있습니다";
 "Checking…" = "확인 중…";
 "Limit resets" = "리셋권";
@@ -238,7 +231,7 @@
 "Vendor reason: %@" = "벤더 사유: %@";
 "Use by %@" = "%@까지 사용 가능";
 "No limit is full right now: the highest is at %lld%%." = "지금 가득 찬 한도가 없습니다. 가장 높은 사용률은 %lld%%입니다.";
-"weekly extra usage" = "주간 추가 사용량";
+"wk extra usage" = "wk 추가 사용량";
 "due now" = "지금 조회";
 "next %@" = "다음 조회 %@";
 "pending" = "요청 전";

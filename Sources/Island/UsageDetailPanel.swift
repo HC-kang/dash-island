@@ -328,11 +328,12 @@ private struct UsageDetailView: View {
         if ok { resets.use(account, offer: offer) }
     }
 
+    /// Vendor limit kinds under the names the rest of the app uses (5h, wk).
     static func limitName(_ kind: String) -> String {
         switch kind {
-        case "five_hour": return String(localized: "5-hour limit")
-        case "seven_day": return String(localized: "weekly limit")
-        case "seven_day_overage_included": return String(localized: "weekly extra usage")
+        case "five_hour": return "5h"
+        case "seven_day": return "wk"
+        case "seven_day_overage_included": return String(localized: "wk extra usage")
         default: return kind.replacingOccurrences(of: "_", with: " ")
         }
     }
@@ -419,17 +420,9 @@ private struct UsageDetailView: View {
         }
     }
 
-    private func label(_ window: WindowUsage) -> String {
-        let period: String
-        switch window.kind {
-        case .fiveHour: period = String(localized: "Session")
-        case .weekly: period = String(localized: "Weekly")
-        case .monthly: period = String(localized: "Monthly")
-        case .unknown: period = String(localized: "Usage")
-        }
-        guard let name = window.labelOverride else { return period }
-        return name.hasSuffix(" wk") ? String(localized: "\(String(name.dropLast(3))) Weekly") : name
-    }
+    /// The window's own short name (5h, wk, mo, Fable …), as the hover card and
+    /// the glance show it.
+    private func label(_ window: WindowUsage) -> String { window.displayLabel }
 
     private struct TrendSeries: Identifiable {
         var id: String
