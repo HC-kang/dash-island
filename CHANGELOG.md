@@ -4,6 +4,12 @@ All notable user-facing changes. Format: [Keep a Changelog](https://keepachangel
 
 ## [Unreleased]
 
+### Added
+- Detail panel: the 7-day chart shows every own window of the account in one Grafana-style chart (Claude: session and weekly), with a color per series, a legend with current values, and a crosshair tooltip that lists every series.
+
+### Fixed
+- Mission Control hides the island, so it no longer covers the desktop list at the top of the screen.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

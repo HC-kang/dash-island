@@ -328,11 +328,12 @@ private struct UsageDetailView: View {
         if ok { resets.use(account, offer: offer) }
     }
 
+    /// Vendor limit kinds under the names the rest of the app uses (5h, wk).
     static func limitName(_ kind: String) -> String {
         switch kind {
-        case "five_hour": return String(localized: "5-hour limit")
-        case "seven_day": return String(localized: "weekly limit")
-        case "seven_day_overage_included": return String(localized: "weekly extra usage")
+        case "five_hour": return "5h"
+        case "seven_day": return "wk"
+        case "seven_day_overage_included": return String(localized: "wk extra usage")
         default: return kind.replacingOccurrences(of: "_", with: " ")
         }
     }
@@ -387,7 +388,7 @@ private struct UsageDetailView: View {
                 }
                 quotaBar(first)
                 resetLabel(first).padding(.top, -8)
-                trend(first)
+                trendChart
                 ForEach(Array(windows.dropFirst().enumerated()), id: \.offset) { _, window in
                     VStack(spacing: 6) {
                         HStack {
@@ -419,45 +420,49 @@ private struct UsageDetailView: View {
         }
     }
 
-    private func label(_ window: WindowUsage) -> String {
-        let period: String
-        switch window.kind {
-        case .fiveHour: period = String(localized: "Session")
-        case .weekly: period = String(localized: "Weekly")
-        case .monthly: period = String(localized: "Monthly")
-        case .unknown: period = String(localized: "Usage")
-        }
-        guard let name = window.labelOverride else { return period }
-        return name.hasSuffix(" wk") ? String(localized: "\(String(name.dropLast(3))) Weekly") : name
+    /// The window's own short name (5h, wk, mo, Fable …), as the hover card and
+    /// the glance show it.
+    private func label(_ window: WindowUsage) -> String { window.displayLabel }
+
+    private struct TrendSeries: Identifiable {
+        var id: String
+        var name: String
+        var color: Color
+        var points: [QuotaHistory.Sample]
+        var current: Double
     }
 
-    /// Seven days of the headline window from QuotaHistory, in the display mode.
-    /// Day lines at local midnight with weekday labels, a 0/50/100% scale, and a
-    /// hover readout.
+    /// Grafana's green: the second series next to the vendor accent.
+    private static let secondSeriesColor = Color(red: 0x73 / 255, green: 0xBF / 255, blue: 0x69 / 255)
+
+    /// One Grafana-style chart of the account's own windows (Claude: session and
+    /// weekly) over 7 days: a color per series, gradient fill, day lines with
+    /// weekdays, a 0/50/100% scale, a legend with current values, and a crosshair
+    /// tooltip that lists every series. Follows the Used / Remaining preference.
     @ViewBuilder
-    private func trend(_ window: WindowUsage) -> some View {
+    private var trendChart: some View {
         let now = Date()
         let span: TimeInterval = 7 * 86_400
-        let points = (quotaHistory.byAccount[initial.id] ?? QuotaHistory())
-            .series(window: window.displayLabel, days: 7, now: now)
-        if points.count >= 2 {
+        let history = quotaHistory.byAccount[initial.id] ?? QuotaHistory()
+        let own = [model.usageSnapshot?.primary, model.usageSnapshot?.secondary].compactMap { $0 }.filter(\.isReported)
+        let series: [TrendSeries] = own.enumerated().compactMap { i, window in
+            let points = history.series(window: window.displayLabel, days: 7, now: now)
+            guard points.count >= 2 else { return nil }
+            return TrendSeries(id: window.displayLabel, name: label(window),
+                               color: i == 0 ? accent : Self.secondSeriesColor,
+                               points: points, current: shownFraction(window))
+        }
+        if !series.isEmpty {
             let gutter: CGFloat = 30
-            let plotH: CGFloat = 64
+            let plotH: CGFloat = 72
             let days = Self.dayStarts(from: now.addingTimeInterval(-span), to: now)
-            VStack(alignment: .leading, spacing: 3) {
+            let shown: (QuotaHistory.Sample) -> Double = { showsUsed ? $0.used : 1 - $0.used }
+            VStack(alignment: .leading, spacing: 8) {
                 GeometryReader { g in
                     let w = g.size.width - gutter
                     let xAt: (Date) -> CGFloat = { gutter + w * CGFloat(1 - now.timeIntervalSince($0) / span) }
-                    let xy: (QuotaHistory.Sample) -> CGPoint = { p in
-                        let v = showsUsed ? p.used : 1 - p.used
-                        return CGPoint(x: xAt(p.at), y: plotH * CGFloat(1 - v))
-                    }
-                    let line = Path { path in
-                        path.move(to: xy(points[0]))
-                        for p in points.dropFirst() { path.addLine(to: xy(p)) }
-                    }
+                    let xy: (QuotaHistory.Sample) -> CGPoint = { CGPoint(x: xAt($0.at), y: plotH * CGFloat(1 - shown($0))) }
                     ZStack(alignment: .topLeading) {
-                        // Percent scale.
                         ForEach([1.0, 0.5, 0.0], id: \.self) { v in
                             let y = plotH * CGFloat(1 - v)
                             Path { p in
@@ -471,7 +476,6 @@ private struct UsageDetailView: View {
                                 .frame(width: gutter - 4, alignment: .trailing)
                                 .position(x: (gutter - 4) / 2, y: y)
                         }
-                        // Day lines at local midnight.
                         ForEach(days, id: \.self) { day in
                             Path { p in
                                 p.move(to: CGPoint(x: xAt(day), y: 0))
@@ -479,16 +483,26 @@ private struct UsageDetailView: View {
                             }
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         }
-                        Path { p in
-                            p.addPath(line)
-                            p.addLine(to: CGPoint(x: xy(points[points.count - 1]).x, y: plotH))
-                            p.addLine(to: CGPoint(x: xy(points[0]).x, y: plotH))
-                            p.closeSubpath()
+                        // Fills first, then lines, so no fill covers another line.
+                        ForEach(series) { s in
+                            Path { p in
+                                p.move(to: CGPoint(x: xy(s.points[0]).x, y: plotH))
+                                for point in s.points { p.addLine(to: xy(point)) }
+                                p.addLine(to: CGPoint(x: xy(s.points[s.points.count - 1]).x, y: plotH))
+                                p.closeSubpath()
+                            }
+                            .fill(LinearGradient(colors: [s.color.opacity(0.24), s.color.opacity(0)],
+                                                 startPoint: .top, endPoint: .bottom))
+                            .frame(width: g.size.width, height: plotH)
                         }
-                        .fill(accent.opacity(0.14))
-                        line.stroke(accent.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
-                        Circle().fill(accent).frame(width: 5, height: 5).position(xy(points[points.count - 1]))
-                        // Weekday under the middle of each day that has room.
+                        ForEach(series) { s in
+                            Path { p in
+                                p.move(to: xy(s.points[0]))
+                                for point in s.points.dropFirst() { p.addLine(to: xy(point)) }
+                            }
+                            .stroke(s.color.opacity(0.95), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                            Circle().fill(s.color).frame(width: 5, height: 5).position(xy(s.points[s.points.count - 1]))
+                        }
                         ForEach(Self.daySegments(days: days, from: now.addingTimeInterval(-span), to: now), id: \.start) { seg in
                             let x0 = xAt(seg.start), x1 = xAt(seg.end)
                             if x1 - x0 >= 22 {
@@ -499,22 +513,38 @@ private struct UsageDetailView: View {
                         }
                         if let probe = trendProbe, probe >= gutter {
                             let at = now.addingTimeInterval(-span * Double(1 - (probe - gutter) / w))
-                            if let sample = points.min(by: { abs($0.at.timeIntervalSince(at)) < abs($1.at.timeIntervalSince(at)) }) {
-                                let p = xy(sample)
-                                Path { path in
-                                    path.move(to: CGPoint(x: p.x, y: 0))
-                                    path.addLine(to: CGPoint(x: p.x, y: plotH))
-                                }
-                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                                Circle().fill(accent).frame(width: 5, height: 5).position(p)
-                                let v = showsUsed ? sample.used : 1 - sample.used
-                                Text("\(sample.at.formatted(Date.FormatStyle(locale: .ui).weekday(.abbreviated).hour().minute())) · \(Int((v * 100).rounded()))%")
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(Capsule().fill(Color(white: 0.16)))
-                                    .fixedSize()
-                                    .position(x: min(max(p.x, gutter + 60), g.size.width - 60), y: -10)
+                            Path { p in
+                                p.move(to: CGPoint(x: probe, y: 0))
+                                p.addLine(to: CGPoint(x: probe, y: plotH))
                             }
+                            .stroke(Color.white.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                            ForEach(series) { s in
+                                if let hit = QuotaHistory.nearest(s.points, to: at) {
+                                    Circle().fill(s.color).frame(width: 6, height: 6)
+                                        .overlay(Circle().stroke(Color.black, lineWidth: 1))
+                                        .position(xy(hit))
+                                }
+                            }
+                            let tipW: CGFloat = 156
+                            let right = probe + 10 + tipW <= g.size.width
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(at.formatted(Date.FormatStyle(locale: .ui).month(.defaultDigits).day().weekday(.abbreviated).hour().minute()))
+                                    .foregroundStyle(.secondary)
+                                ForEach(series) { s in
+                                    HStack(spacing: 6) {
+                                        Capsule().fill(s.color).frame(width: 10, height: 3)
+                                        Text(s.name)
+                                        Spacer(minLength: 4)
+                                        Text(QuotaHistory.nearest(s.points, to: at).map { "\(Int((shown($0) * 100).rounded()))%" } ?? "—")
+                                            .monospacedDigit()
+                                    }
+                                }
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .frame(width: tipW, alignment: .leading)
+                            .background(AccountHoverTips.tipBackground(corner: 6))
+                            .position(x: right ? probe + 10 + tipW / 2 : probe - 10 - tipW / 2, y: plotH / 2)
                         }
                     }
                     .contentShape(Rectangle())
@@ -523,10 +553,22 @@ private struct UsageDetailView: View {
                     }
                 }
                 .frame(height: plotH + 18)
+                // Legend: color, name, current value (Grafana's bottom legend).
+                HStack(spacing: 14) {
+                    ForEach(series) { s in
+                        HStack(spacing: 6) {
+                            Capsule().fill(s.color).frame(width: 12, height: 3)
+                            Text(s.name).foregroundStyle(.secondary)
+                            Text("\(Int((s.current * 100).rounded()))%").monospacedDigit()
+                        }
+                    }
+                }
+                .font(.system(size: 10, weight: .medium))
+                .padding(.leading, gutter)
             }
             .padding(.top, 14)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(window.displayLabel) over the last 7 days")
+            .accessibilityLabel(String(localized: "Last 7 days: \(series.map { "\($0.name) \(Int(($0.current * 100).rounded()))%" }.joined(separator: ", "))"))
         }
     }
 

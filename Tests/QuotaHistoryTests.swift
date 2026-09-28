@@ -33,6 +33,16 @@ enum QuotaHistorySuite {
             let data = try JSONEncoder().encode(h)
             try assertEqual(try JSONDecoder().decode(QuotaHistory.self, from: data), h)
         }
+        f += check("nearest sample: closest within tolerance, gap reads as none") {
+            let samples = [QuotaHistory.Sample(at: t0, used: 0.1),
+                           QuotaHistory.Sample(at: t0.addingTimeInterval(900), used: 0.2),
+                           QuotaHistory.Sample(at: t0.addingTimeInterval(7200), used: 0.5)]
+            try assertEqual(QuotaHistory.nearest(samples, to: t0.addingTimeInterval(700))?.used ?? -1, 0.2, accuracy: 1e-9)
+            try assertEqual(QuotaHistory.nearest(samples, to: t0.addingTimeInterval(7000))?.used ?? -1, 0.5, accuracy: 1e-9)
+            // 45 minutes from both neighbours: beyond the 30-minute tolerance.
+            try assertTrue(QuotaHistory.nearest(samples, to: t0.addingTimeInterval(900 + 2700)) == nil)
+            try assertTrue(QuotaHistory.nearest([], to: t0) == nil)
+        }
         return f
     }
 }

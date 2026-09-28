@@ -60,9 +60,12 @@ final class IslandWindowController {
         window.level = .popUpMenu
         // Not `canJoinAllSpaces` — that glues the island across Mission Control
         // swipes. Follow the active desktop; it slides away with the old space.
+        // `.transient`, not `.stationary`: Mission Control hides the island.
+        // Stationary kept it on top there, and hovering the Spaces bar expanded
+        // it over the desktop thumbnails.
         window.collectionBehavior = [
             .moveToActiveSpace,
-            .stationary,
+            .transient,
             .fullScreenAuxiliary,
             .ignoresCycle
         ]
